@@ -4,8 +4,12 @@
 
 [resource]
 script = ExtResource("1")
-soldier_name = "Marine 4"
-health = 110
-damage = 28
-speed = 115.0
-description = "Heavy"
+soldier_name = "Knox"
+marine_class = 3
+health = 130
+damage = 32
+speed = 125.0
+attack_range = 95.0
+fire_rate = 1.2
+ability_name = "Breaching Charge"
+description = "Breacher. Clears rooms fast up close."

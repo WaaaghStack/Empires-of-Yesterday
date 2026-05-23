@@ -4,8 +4,11 @@
 
 [resource]
 script = ExtResource("1")
-soldier_name = "Marine 5"
-health = 95
-damage = 32
-speed = 125.0
-description = "Sniper"
+soldier_name = "Reed"
+marine_class = 0
+health = 120
+damage = 28
+speed = 115.0
+attack_range = 130.0
+fire_rate = 1.1
+description = "Assault marine. Aggressive room entry."
