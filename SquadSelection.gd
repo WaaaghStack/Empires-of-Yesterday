@@ -1,63 +1,8 @@
 # SquadSelection.gd
 extends Control
 
-signal squad_selected(soldiers: Array[SoldierResource])
-
-@export var soldier_resources: Array[SoldierResource] = []
-
-var selected_soldiers: Array[SoldierResource] = []
-
-@onready var soldier_container: GridContainer = $SoldierContainer
-@onready var deploy_button: Button = $DeployButton
-
 func _ready():
-    print("SquadSelection: _ready() called")
-    load_soldiers()
-    print("SquadSelection: Loaded ", soldier_resources.size(), " soldiers")
-    populate_soldier_cards()
-    deploy_button.pressed.connect(_on_deploy_pressed)
-    deploy_button.disabled = true
-
-func load_soldiers():
-    soldier_resources.clear()
-    soldier_resources.append(preload("res://Soldier_Marine1.tres"))
-    soldier_resources.append(preload("res://Soldier_Marine2.tres"))
-    soldier_resources.append(preload("res://Soldier_Marine3.tres"))
-    soldier_resources.append(preload("res://Soldier_Marine4.tres"))
-    soldier_resources.append(preload("res://Soldier_Marine5.tres"))
-
-func populate_soldier_cards():
-    print("SquadSelection: populate_soldier_cards() called")
-    for child in soldier_container.get_children():
-        child.queue_free()
-    
-    for soldier in soldier_resources:
-        print("SquadSelection: Creating card for ", soldier.soldier_name)
-        var card_scene = preload("res://SoldierCard.tscn")
-        if card_scene:
-            var card = card_scene.instantiate()
-            card.setup(soldier)
-            card.selected.connect(_on_soldier_selected.bind(soldier))
-            card.deselected.connect(_on_soldier_deselected.bind(soldier))
-            soldier_container.add_child(card)
-            print("SquadSelection: Card added to container")
-        else:
-            print("SquadSelection: ERROR - Could not preload SoldierCard.tscn")
-
-func _on_soldier_selected(soldier: SoldierResource):
-    if soldier not in selected_soldiers and selected_soldiers.size() < 4:
-        selected_soldiers.append(soldier)
-        update_deploy_button()
-
-func _on_soldier_deselected(soldier: SoldierResource):
-    if soldier in selected_soldiers:
-        selected_soldiers.erase(soldier)
-        update_deploy_button()
-
-func update_deploy_button():
-    deploy_button.disabled = selected_soldiers.is_empty()
-
-func _on_deploy_pressed():
-    if not selected_soldiers.is_empty():
-        squad_selected.emit(selected_soldiers)
-        print("Squad deployed: ", selected_soldiers.map(func(s): return s.soldier_name))
+    print("DEBUG: SquadSelection _ready() called successfully!")
+    print("DEBUG: Node name: ", name)
+    print("DEBUG: SoldierContainer exists: ", has_node("SoldierContainer"))
+    print("DEBUG: DeployButton exists: ", has_node("DeployButton"))
