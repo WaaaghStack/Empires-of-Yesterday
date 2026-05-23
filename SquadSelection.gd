@@ -7,22 +7,22 @@ signal squad_selected(soldiers: Array[SoldierResource])
 
 var selected_soldiers: Array[SoldierResource] = []
 
-@onready var soldier_container = $SoldierContainer
-@onready var deploy_button = $DeployButton
+@onready var soldier_container: GridContainer = $SoldierContainer
+@onready var deploy_button: Button = $DeployButton
 
 func _ready():
     load_soldiers()
     populate_soldier_cards()
     deploy_button.pressed.connect(_on_deploy_pressed)
+    deploy_button.disabled = true
 
 func load_soldiers():
-    soldier_resources = [
-        preload("res://Soldier_Marine1.tres"),
-        preload("res://Soldier_Marine2.tres"),
-        preload("res://Soldier_Marine3.tres"),
-        preload("res://Soldier_Marine4.tres"),
-        preload("res://Soldier_Marine5.tres")
-    ]
+    soldier_resources.clear()
+    soldier_resources.append(preload("res://Soldier_Marine1.tres"))
+    soldier_resources.append(preload("res://Soldier_Marine2.tres"))
+    soldier_resources.append(preload("res://Soldier_Marine3.tres"))
+    soldier_resources.append(preload("res://Soldier_Marine4.tres"))
+    soldier_resources.append(preload("res://Soldier_Marine5.tres"))
 
 func populate_soldier_cards():
     for child in soldier_container.get_children():
@@ -38,13 +38,14 @@ func populate_soldier_cards():
             soldier_container.add_child(card)
 
 func _on_soldier_selected(soldier: SoldierResource):
-    if selected_soldiers.size() < 4 and soldier not in selected_soldiers:
+    if soldier not in selected_soldiers and selected_soldiers.size() < 4:
         selected_soldiers.append(soldier)
         update_deploy_button()
 
 func _on_soldier_deselected(soldier: SoldierResource):
-    selected_soldiers.erase(soldier)
-    update_deploy_button()
+    if soldier in selected_soldiers:
+        selected_soldiers.erase(soldier)
+        update_deploy_button()
 
 func update_deploy_button():
     deploy_button.disabled = selected_soldiers.is_empty()
@@ -53,3 +54,4 @@ func _on_deploy_pressed():
     if not selected_soldiers.is_empty():
         squad_selected.emit(selected_soldiers)
         print("Squad deployed: ", selected_soldiers.map(func(s): return s.soldier_name))
+        # TODO: Change scene to map/deployment screen
