@@ -1,6 +1,30 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://SoldierCard.gd" id="1"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_1"]
+bg_color = Color(0.08, 0.03, 0.02, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.3, 0.1, 0.1, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_2"]
+bg_color = Color(0.15, 0.05, 0.03, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.6, 0.15, 0.1, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
 
 [node name="SoldierCard" type="PanelContainer"]
 layout_mode = 2
@@ -8,14 +32,15 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 custom_minimum_size = Vector2(220, 280)
 script = ExtResource("1")
+theme_override_styles/panel = SubResource("StyleBoxFlat_1")
 
 [node name="VBoxContainer" type="VBoxContainer" parent="."]
 layout_mode = 2
 
 [node name="Portrait" type="ColorRect" parent="VBoxContainer"]
 layout_mode = 2
-custom_minimum_size = Vector2(200, 120)
-color = Color(0.3, 0.1, 0.1, 1)
+custom_minimum_size = Vector2(200, 100)
+color = Color(0.2, 0.05, 0.05, 1)
 
 [node name="Name" type="Label" parent="VBoxContainer"]
 layout_mode = 2
@@ -24,7 +49,7 @@ vertical_alignment = 1
 
 [node name="HealthBar" type="ProgressBar" parent="VBoxContainer"]
 layout_mode = 2
-custom_minimum_size = Vector2(0, 20)
+custom_minimum_size = Vector2(0, 18)
 max_value = 120.0
 value = 120.0
 show_percentage = false
