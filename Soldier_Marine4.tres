@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="SoldierResource" load_steps=2 format=3 uid="uid://marine4"]
+
+[ext_resource type="Script" path="res://SoldierResource.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+soldier_name = "Marine 4"
+health = 110
+damage = 28
+speed = 115.0
+description = "Heavy"
