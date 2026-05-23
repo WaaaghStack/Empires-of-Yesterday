@@ -2,7 +2,7 @@
 extends Control
 
 var selected_soldiers: Array[SoldierResource] = []
-var deployed_soldiers: Dictionary = {}
+var deployed_soldiers: Dictionary = {}  # slot_index -> {soldier, health, button}
 var enemies: Array = []
 var game_active := false
 
@@ -32,7 +32,11 @@ func spawn_deployment_slots():
 func _on_slot_pressed(slot_index: int, slot_button: Button):
     if selected_soldiers.size() > 0 and not deployed_soldiers.has(slot_index):
         var soldier = selected_soldiers.pop_front()
-        deployed_soldiers[slot_index] = soldier
+        deployed_soldiers[slot_index] = {
+            "soldier": soldier,
+            "health": soldier.health,
+            "button": slot_button
+        }
         slot_button.text = soldier.soldier_name + " (" + str(soldier.health) + ")"
         slot_button.disabled = true
 
@@ -81,12 +85,13 @@ func _soldier_attack_phase():
         _victory()
         return
     
-    # Target weakest enemy
     alive_enemies.sort_custom(func(a, b): return a.health < b.health)
     var target = alive_enemies[0]
     
     for slot_index in deployed_soldiers:
-        var soldier = deployed_soldiers[slot_index]
+        var data = deployed_soldiers[slot_index]
+        var soldier = data.soldier
+        
         if target.alive:
             target.health -= soldier.damage
             print(soldier.soldier_name, " attacks ", target.name, " for ", soldier.damage, " damage! (Enemy HP: ", target.health, ")")
@@ -110,8 +115,9 @@ func _enemy_attack_phase():
     print("\n--- ENEMY ATTACK PHASE ---")
     var alive_soldiers = []
     for slot_index in deployed_soldiers:
-        if deployed_soldiers[slot_index].health > 0:
-            alive_soldiers.append({"slot": slot_index, "soldier": deployed_soldiers[slot_index]})
+        var data = deployed_soldiers[slot_index]
+        if data.health > 0:
+            alive_soldiers.append({"slot": slot_index, "data": data})
     
     if alive_soldiers.size() == 0:
         _defeat()
@@ -120,19 +126,21 @@ func _enemy_attack_phase():
     var alive_enemies = enemies.filter(func(e): return e.alive)
     for enemy in alive_enemies:
         if alive_soldiers.size() > 0:
-            var target_data = alive_soldiers[0]
-            var target_slot = target_data.slot
-            var target_soldier = target_data.soldier
+            var target_data = alive_soldiers[0].data
+            var target_slot = target_data  # Fixed: using the data directly
             
-            target_soldier.health -= enemy.damage
-            var button = target_soldier.button if target_soldier.has_method("get") else null
+            target_data.health -= enemy.damage
+            var button = target_data.button
             if button:
-                button.text = target_soldier.soldier_name + " (" + str(target_soldier.health) + ")"
+                button.text = target_data.soldier.soldier_name + " (" + str(target_data.health) + ")"
             
-            print(enemy.name, " attacks ", target_soldier.soldier_name, " for ", enemy.damage, " damage! (Soldier HP: ", target_soldier.health, ")")
+            print(enemy.name, " attacks ", target_data.soldier.soldier_name, " for ", enemy.damage, " damage! (Soldier HP: ", target_data.health, ")")
             
-            if target_soldier.health <= 0:
-                print(target_soldier.soldier_name, " DIED!")
+            if target_data.health <= 0:
+                print(target_data.soldier.soldier_name, " DIED!")
+                if button:
+                    button.text = "DEAD"
+                    button.disabled = true
     
     await get_tree().create_timer(1.5).timeout
     _soldier_attack_phase()
