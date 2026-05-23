@@ -3,7 +3,7 @@ extends Control
 
 var selected_soldiers: Array[SoldierResource] = []
 var deployed_soldiers: Dictionary = {}
-
+var enemies: Array = []
 var game_active := false
 
 @onready var map_grid: GridContainer = $MapGrid
