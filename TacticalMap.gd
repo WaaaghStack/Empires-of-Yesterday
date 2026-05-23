@@ -2,8 +2,7 @@
 extends Control
 
 var selected_soldiers: Array[SoldierResource] = []
-var deployed_soldiers: Dictionary = {}  # slot_index -> soldier
-var enemies: Array = []
+var deployed_soldiers: Dictionary = {}
 
 var game_active := false
 
@@ -60,7 +59,6 @@ func spawn_initial_enemies():
         enemies.append(enemy)
         print("Spawned: ", enemy.name)
     
-    # Start enemy attack timer
     var timer = Timer.new()
     timer.wait_time = 2.0
     timer.one_shot = false
@@ -70,7 +68,6 @@ func spawn_initial_enemies():
 
 func start_combat_loop():
     print("Combat loop started!")
-    # Soldiers attack first
     _soldier_attack_phase()
 
 func _soldier_attack_phase():
@@ -95,7 +92,6 @@ func _soldier_attack_phase():
                 target.alive = false
                 print(target.name, " defeated!")
     
-    # Check if all enemies dead
     alive_enemies = enemies.filter(func(e): return e.alive)
     if alive_enemies.size() == 0:
         _victory()
@@ -117,15 +113,11 @@ func _enemy_attack_phase():
     for enemy in alive_enemies:
         if alive_soldiers.size() > 0:
             var target = alive_soldiers[0]
-            # Find which slot this soldier is in
             for slot_index in deployed_soldiers:
                 if deployed_soldiers[slot_index] == target:
-                    # Soldier takes damage
                     print(enemy.name, " attacks ", target.soldier_name, " for ", enemy.damage, " damage!")
-                    # Note: In a full implementation, we'd track soldier health
                     break
     
-    # Continue combat
     _soldier_attack_phase()
 
 func _victory():
@@ -135,3 +127,6 @@ func _victory():
 func _defeat():
     game_active = false
     print("DEFEAT! All soldiers lost!")
+
+func _on_back_pressed():
+    get_tree().change_scene_to_file("res://SquadSelection.tscn")
