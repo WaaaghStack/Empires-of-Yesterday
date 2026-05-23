@@ -8,14 +8,16 @@ signal deselected(soldier: SoldierResource)
 var soldier_data: SoldierResource
 var is_selected := false
 
-var portrait: TextureRect
+var portrait: ColorRect
 var name_label: Label
+var health_bar: ProgressBar
 var stats_label: Label
 var checkbox: CheckBox
 
 func _ready():
     portrait = $VBoxContainer/Portrait
     name_label = $VBoxContainer/Name
+    health_bar = $VBoxContainer/HealthBar
     stats_label = $VBoxContainer/Stats
     checkbox = $VBoxContainer/CheckBox
     
@@ -24,12 +26,15 @@ func _ready():
 
 func setup(soldier: SoldierResource):
     soldier_data = soldier
-    if portrait and soldier.portrait:
-        portrait.texture = soldier.portrait
+    if portrait:
+        portrait.color = Color(0.3 + (soldier.damage / 100.0), 0.1, 0.1, 1)
     if name_label:
         name_label.text = soldier.soldier_name
+    if health_bar:
+        health_bar.max_value = soldier.health
+        health_bar.value = soldier.health
     if stats_label:
-        stats_label.text = "HP: %d  DMG: %d" % [soldier.health, soldier.damage]
+        stats_label.text = "DMG: %d" % soldier.damage
 
 func _on_checkbox_toggled(toggled_on: bool):
     is_selected = toggled_on
