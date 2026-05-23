@@ -7,5 +7,4 @@ extends Resource
 @export var damage: int = 25
 @export var speed: float = 120.0
 @export var portrait: Texture2D
-
 @export var description: String = "Standard Rifleman"
