@@ -54,3 +54,6 @@ func populate_soldier_cards():
         else:
             print("DEBUG: ERROR - Could not preload SoldierCard.tscn")
     print("DEBUG: populate_soldier_cards() finished")
+
+func _on_deploy_pressed():
+    print("DEBUG: Deploy button pressed!")
