@@ -31,7 +31,6 @@ func populate_soldier_cards():
         if card_scene:
             var card = card_scene.instantiate()
             card.setup(soldier)
-            # Connect without .bind() - SoldierCard already passes the soldier
             card.selected.connect(_on_soldier_selected)
             card.deselected.connect(_on_soldier_deselected)
             soldier_container.add_child(card)
