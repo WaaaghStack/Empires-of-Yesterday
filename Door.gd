@@ -41,6 +41,18 @@ func request_open() -> void:
 	_idle_close_timer = 2.5
 	opened.emit(self)
 
+func request_breach() -> void:
+	force_open()
+
+func force_open() -> void:
+	if is_open and _open_progress >= 1.0:
+		return
+	is_open = true
+	_open_progress = 1.0
+	_idle_close_timer = 4.0
+	_update_visual()
+	opened.emit(self)
+
 func request_close() -> void:
 	if not is_open:
 		return

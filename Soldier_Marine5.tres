@@ -6,9 +6,11 @@
 script = ExtResource("1")
 soldier_name = "Reed"
 marine_class = 0
-health = 120
-damage = 28
-speed = 115.0
-attack_range = 130.0
-fire_rate = 1.1
-description = "Assault marine. Aggressive room entry."
+health = 105
+defense = 5
+damage = 30
+speed = 128.0
+attack_range = 125.0
+fire_rate = 1.15
+default_order = 3
+description = "Assault runner. Fast room entry, lighter armor."

@@ -2,3 +2,6 @@
 .godot/
 *.translation
 export_presets.cfg
+
+# Session logs (RunLog autoload)
+logs/

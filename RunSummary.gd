@@ -1,0 +1,50 @@
+extends Control
+
+@onready var summary_label: RichTextLabel = $MainPanel/VBox/SummaryScroll/SummaryLabel
+@onready var tokens_label: Label = $MainPanel/VBox/TokensLabel
+@onready var new_run_button: Button = $MainPanel/VBox/Buttons/NewRunButton
+@onready var menu_button: Button = $MainPanel/VBox/Buttons/MenuButton
+
+
+func _ready() -> void:
+	GameTheme.apply_to_control(self)
+	GameTheme.ignore_mouse($Background)
+	GameTheme.configure_scroll($MainPanel/VBox/SummaryScroll, 120.0)
+	$MainPanel.add_theme_stylebox_override("panel", GameTheme.make_panel_style())
+	new_run_button.pressed.connect(_on_new_run_pressed)
+	menu_button.pressed.connect(_on_menu_pressed)
+	_populate()
+
+
+func _populate() -> void:
+	var summary: Dictionary = {}
+	if get_tree().has_meta("run_summary"):
+		summary = get_tree().get_meta("run_summary")
+		get_tree().remove_meta("run_summary")
+	var tokens: int = int(summary.get("tokens_earned", 0))
+	var ops_cleared: int = int(summary.get("ops_cleared", 0))
+	var daily_block := ""
+	if bool(summary.get("daily_run", false)):
+		var daily: Dictionary = summary.get("daily_stats", {})
+		daily_block = (
+			"\nDaily run: [color=#88ccff]%s[/color]\n"
+			% str(daily.get("share_code", SaveManager.get_daily_share_code()))
+		)
+		if bool(daily.get("improved", false)):
+			daily_block += "New daily best! "
+		daily_block += SaveManager.format_daily_best_line()
+	summary_label.text = (
+		"Ops cleared: [color=#88ccff]%d[/color]\n" % ops_cleared
+		+ "Best depth: [color=#88ddaa]%d[/color]\n" % SaveManager.best_run_depth
+		+ "Total runs: [color=#cccccc]%d[/color]" % SaveManager.total_runs
+		+ daily_block
+	)
+	tokens_label.text = "Command Tokens earned: +%d (balance: %d)" % [tokens, SaveManager.command_tokens]
+
+
+func _on_new_run_pressed() -> void:
+	get_tree().change_scene_to_file("res://SquadSelection.tscn")
+
+
+func _on_menu_pressed() -> void:
+	get_tree().change_scene_to_file("res://MainMenu.tscn")

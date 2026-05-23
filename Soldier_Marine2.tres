@@ -6,10 +6,13 @@
 script = ExtResource("1")
 soldier_name = "Hayes"
 marine_class = 1
-health = 100
+health = 110
+defense = 7
 damage = 16
-speed = 105.0
+speed = 52.0
 attack_range = 120.0
 fire_rate = 0.9
 ability_name = "Field Repair"
-description = "Support medic. Keeps the squad combat effective."
+default_order = 4
+description = "Support — keeps the squad in the fight."
+bio = "Corporal Hayes traded a med-station posting for field work. Holds the line while patching the squad in defended sectors."

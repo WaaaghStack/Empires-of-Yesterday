@@ -29,10 +29,30 @@ script = ExtResource("1")
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Portrait" type="ColorRect" parent="VBoxContainer"]
+[node name="PortraitFrame" type="Control" parent="VBoxContainer"]
 custom_minimum_size = Vector2(0, 100)
 layout_mode = 2
+
+[node name="PortraitFallback" type="ColorRect" parent="VBoxContainer/PortraitFrame"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
 color = Color(0.14, 0.16, 0.22, 1)
+
+[node name="Portrait" type="TextureRect" parent="VBoxContainer/PortraitFrame"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+expand_mode = 1
+stretch_mode = 5
 
 [node name="Name" type="Label" parent="VBoxContainer"]
 layout_mode = 2
@@ -65,6 +85,25 @@ theme_override_font_sizes/font_size = 11
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
 text = "Description"
 autowrap_mode = 2
+
+[node name="DefaultOrderLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+text = "Default order at deploy:"
+horizontal_alignment = 1
+
+[node name="DefaultOrderOption" type="OptionButton" parent="VBoxContainer"]
+layout_mode = 2
+item_count = 4
+popup/item_0/text = "Clear Room"
+popup/item_0/id = 2
+popup/item_1/text = "Search & Destroy"
+popup/item_1/id = 3
+popup/item_2/text = "Defend"
+popup/item_2/id = 4
+popup/item_3/text = "Explore"
+popup/item_3/id = 6
 
 [node name="SelectButton" type="Button" parent="VBoxContainer"]
 layout_mode = 2

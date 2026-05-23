@@ -9,6 +9,23 @@ var rooms: Array[Dictionary] = []
 var corridors: Array[Rect2] = []
 var hull_outline: PackedVector2Array = PackedVector2Array()
 var path_graph = PathGraphScript.new()
+var objective_template: String = "standard"
+var op_index: int = 1
+var enemy_stat_scale: float = 1.0
+var evac_reveal_after_searches: int = 0
+var bonus_credits_room_id: String = ""
+var hold_room_id: String = ""
+var hold_duration_seconds: float = 0.0
+var intel_terminal_room_ids: Array[String] = []
+var vip_room_id: String = ""
+var loot_branch_room_id: String = ""
+var facility_theme: String = "industrial"
+var is_handcrafted: bool = false
+var map_tier: String = "medium"
+var map_scale: float = 1.0
+var hive_room_ids: Array[String] = []
+var sector_tags: Dictionary = {}
+
 func get_room_dicts() -> Array[Dictionary]:
 	return rooms
 

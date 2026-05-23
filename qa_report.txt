@@ -1,0 +1,101 @@
+=== QA VALIDATION START ===
+-- Scripts --
+OK  res://BetweenMissionHub.gd
+OK  res://Codex.gd
+OK  res://CombatAudio.gd
+OK  res://CombatFx.gd
+OK  res://ControlsOverlay.gd
+OK  res://Door.gd
+OK  res://DynamicPathGraph.gd
+OK  res://Enemy.gd
+OK  res://EnemyUnit.gd
+OK  res://GameTheme.gd
+OK  res://LineOfSight.gd
+OK  res://MainMenu.gd
+OK  res://MapVisuals.gd
+OK  res://MissionDebrief.gd
+OK  res://MissionMapData.gd
+OK  res://MissionState.gd
+OK  res://MissionTaskBoard.gd
+OK  res://MissionEntityIndex.gd
+OK  res://SquadsManager.gd
+OK  res://Hive.gd
+OK  res://OpModifier.gd
+OK  res://OperatorRosterCard.gd
+OK  res://OrderType.gd
+OK  res://PortraitPool.gd
+OK  res://ProceduralMapGenerator.gd
+OK  res://Room.gd
+OK  res://RunState.gd
+OK  res://RunLog.gd
+OK  res://RunSummary.gd
+OK  res://SaveManager.gd
+OK  res://SoldierCard.gd
+OK  res://SoldierResource.gd
+OK  res://SoldierUnit.gd
+OK  res://SquadRosterPanel.gd
+OK  res://SquadSelection.gd
+OK  res://TacticalMap.gd
+OK  res://TutorialState.gd
+-- Scenes --
+OK  res://BetweenMissionHub.tscn
+OK  res://Codex.tscn
+OK  res://ControlsOverlay.tscn
+OK  res://Door.tscn
+OK  res://Hive.tscn
+OK  res://EnemyUnit.tscn
+OK  res://MainMenu.tscn
+OK  res://MissionDebrief.tscn
+OK  res://OperatorRosterCard.tscn
+OK  res://Room.tscn
+OK  res://RunSummary.tscn
+OK  res://SoldierCard.tscn
+OK  res://SoldierUnit.tscn
+OK  res://SquadSelection.tscn
+OK  res://TacticalMap.tscn
+-- Soldier resources --
+OK  res://Soldier_Marine1.tres (Vega)
+OK  res://Soldier_Marine2.tres (Hayes)
+OK  res://Soldier_Marine3.tres (Cross)
+OK  res://Soldier_Marine4.tres (Knox)
+-- OrderType enum --
+OK  EXPLORE + OBJECTIVE enum values
+-- Portrait pool --
+Portrait textures loaded: 18
+OK  random portrait assignment
+-- Map generation --
+OK  generated 16 rooms (seed 12345, op 2 scavenge)
+-- Cross-room pathfinding --
+OK  corridor walkability and cross-room path (3 waypoints)
+-- RunState flow --
+OK  RunState transitions
+-- RunLog autoload --
+OK  RunLog session=C:/Users/Komba/OneDrive/Documents/GitHub/Empires-of-Yesterday/logs/latest_run.txt
+-- Phase A-E / F smoke tests --
+OK  objective templates (7)
+OK  hold_purge hold_room_id=room_13
+OK  run augments script
+OK  facility theme bio
+OK  handcrafted finale (5 rooms)
+OK  daily share code EOY-2026-05-23-12345
+-- Objective template smoke tests --
+OK  standard rooms=18 deploy_rooms=13
+OK  silent_extract rooms=16 deploy_rooms=12
+OK  scavenge rooms=15 deploy_rooms=10
+OK  hold_purge rooms=14 deploy_rooms=8
+OK  black_site rooms=16 deploy_rooms=11
+OK  vip_recovery rooms=15 deploy_rooms=9
+OK  hive_purge rooms=16 deploy_rooms=10
+-- Multi-squad / hive smoke tests --
+OK  roster constants 3x4=12
+OK  generate_full_roster (12 operators)
+OK  MissionTaskBoard
+OK  SquadsManager defaults
+OK  medium map 17 rooms
+OK  hive_purge large map hives=3 rooms=28
+OK  hive_purge objective template
+OK  Hive combat destruction
+OK  squad_status hive engagement
+OK  objective doctrine mapping
+=== QA VALIDATION END ===
+RESULT: PASS

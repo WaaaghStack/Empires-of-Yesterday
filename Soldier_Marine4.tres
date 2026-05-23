@@ -6,10 +6,13 @@
 script = ExtResource("1")
 soldier_name = "Knox"
 marine_class = 3
-health = 130
+health = 145
+defense = 14
 damage = 32
-speed = 125.0
+speed = 59.0
 attack_range = 95.0
 fire_rate = 1.2
 ability_name = "Breaching Charge"
-description = "Breacher. Clears rooms fast up close."
+default_order = 3
+description = "Breacher — armored close-quarters clearing."
+bio = "Knox carries the squad's breaching kit. Opens bulkheads on command and clears chokepoints for the team."

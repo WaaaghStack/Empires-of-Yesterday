@@ -6,22 +6,55 @@ var edges: Array[Array] = []
 var door_connections: Array[Dictionary] = []
 var room_name_to_node: Dictionary = {}
 var corridor_rects: Array[Rect2] = []
+var corridor_segments: Array[Dictionary] = []
+var _path_cache: Dictionary = {}
+var _cache_hits: int = 0
+
+
+func invalidate_cache_for_door(_door_node_id: String = "") -> void:
+	_path_cache.clear()
+
 
 func find_path(from_pos: Vector2, to_pos: Vector2, blocked_nodes: Array[String] = [], from_room: Room = null, to_room: Room = null) -> PackedVector2Array:
+	if from_room and to_room and from_room.map_room_id != "" and to_room.map_room_id != "":
+		var cache_key := "%s|%s|%s" % [from_room.map_room_id, to_room.map_room_id, str(blocked_nodes)]
+		if _path_cache.has(cache_key):
+			_cache_hits += 1
+			var cached: PackedVector2Array = _path_cache[cache_key]
+			if not cached.is_empty():
+				return cached
 	var start_id: String = _nearest_node(from_pos, from_room)
 	var end_id: String = _nearest_node(to_pos, to_room)
 	if start_id.is_empty() or end_id.is_empty():
-		return PackedVector2Array([from_pos, to_pos])
+		return _fallback_path(from_pos, to_pos, from_room, to_room)
 	if start_id == end_id:
-		return PackedVector2Array([from_pos, to_pos])
+		var inside := _path_inside_same_node(from_pos, to_pos, from_room, to_room)
+		if not inside.is_empty():
+			return inside
+		return _fallback_path(from_pos, to_pos, from_room, to_room)
 	var ids: Array[String] = _a_star(start_id, end_id, blocked_nodes)
+	if ids.is_empty() and not blocked_nodes.is_empty():
+		var retry_blocked: Array[String] = []
+		ids = _a_star(start_id, end_id, retry_blocked)
 	if ids.is_empty():
-		return PackedVector2Array([from_pos, to_pos])
-	var points: PackedVector2Array = [from_pos]
-	for id in ids:
-		points.append(nodes[id])
-	points.append(to_pos)
-	return _dedupe_points(points)
+		return _fallback_path(from_pos, to_pos, from_room, to_room)
+	var result := _build_corridor_points(from_pos, ids, to_pos)
+	if from_room and to_room and from_room.map_room_id != "" and to_room.map_room_id != "":
+		var cache_key := "%s|%s|%s" % [from_room.map_room_id, to_room.map_room_id, str(blocked_nodes)]
+		_path_cache[cache_key] = result
+	return result
+
+func find_room_route(from_room_id: String, to_room_id: String, blocked_nodes: Array[String] = []) -> Array[String]:
+	if from_room_id.is_empty() or to_room_id.is_empty() or from_room_id == to_room_id:
+		return [from_room_id] if not from_room_id.is_empty() else []
+	var ids: Array[String] = _a_star(from_room_id, to_room_id, blocked_nodes)
+	if ids.is_empty() and not blocked_nodes.is_empty():
+		var retry_blocked: Array[String] = []
+		ids = _a_star(from_room_id, to_room_id, retry_blocked)
+	return ids
+
+func is_in_corridor(pos: Vector2) -> bool:
+	return _point_in_corridor(pos)
 
 func get_door_positions() -> Array[Dictionary]:
 	var door_list: Array[Dictionary] = []
@@ -43,44 +76,82 @@ func get_door_positions() -> Array[Dictionary]:
 func room_to_node(room_name: String) -> String:
 	return room_name_to_node.get(room_name, "")
 
+func _fallback_path(from_pos: Vector2, to_pos: Vector2, from_room: Room, to_room: Room) -> PackedVector2Array:
+	if not from_room or not to_room or from_room == to_room:
+		return PackedVector2Array()
+	var ids: Array[String] = find_room_route(from_room.map_room_id, to_room.map_room_id)
+	if ids.is_empty():
+		return PackedVector2Array()
+	return _build_corridor_points(from_pos, ids, to_pos)
+
+func _path_inside_same_node(from_pos: Vector2, to_pos: Vector2, from_room: Room, to_room: Room) -> PackedVector2Array:
+	if from_pos.distance_to(to_pos) <= 8.0:
+		return PackedVector2Array()
+	if from_room and to_room and from_room == to_room:
+		if from_room.contains_local_point(from_pos, 8.0) and from_room.contains_local_point(to_pos, 8.0):
+			return PackedVector2Array([to_pos])
+	if _point_in_corridor(from_pos) and _point_in_corridor(to_pos):
+		return PackedVector2Array([to_pos])
+	return PackedVector2Array()
+
+func _build_corridor_points(from_pos: Vector2, ids: Array[String], to_pos: Vector2) -> PackedVector2Array:
+	var points := PackedVector2Array()
+	var cursor := from_pos
+	for i in range(ids.size()):
+		var id: String = ids[i]
+		var is_door: bool = id.contains("_door_")
+		var is_final_room: bool = i == ids.size() - 1 and not is_door
+		if not is_door and not is_final_room:
+			continue
+		var node_pos: Vector2 = nodes[id]
+		if cursor.distance_to(node_pos) <= 4.0:
+			continue
+		points.append(node_pos)
+		cursor = node_pos
+	if cursor.distance_to(to_pos) > 4.0:
+		points.append(to_pos)
+	return points
+
 func _nearest_node(pos: Vector2, room_hint: Room = null) -> String:
-	if room_hint and room_hint.map_room_id != "" and room_hint.contains_local_point(pos, 0.0):
+	if room_hint and room_hint.map_room_id != "" and room_hint.contains_local_point(pos, 12.0):
 		if nodes.has(room_hint.map_room_id):
 			return room_hint.map_room_id
-	if _point_in_corridor(pos):
-		var junction_id := _nearest_junction(pos)
-		if not junction_id.is_empty():
-			return junction_id
+	var corridor_node := _nearest_corridor_node(pos)
+	if not corridor_node.is_empty():
+		return corridor_node
 	var best_id := ""
 	var best_dist: float = INF
 	for id in nodes.keys():
+		if str(id).contains("_door_"):
+			continue
 		var node_pos: Vector2 = nodes[id]
-		if str(id).ends_with("_junction"):
-			continue
-		if not _point_in_corridor(pos):
-			var dist: float = pos.distance_to(node_pos)
-			if dist < best_dist:
-				best_dist = dist
-				best_id = id
-	if best_id.is_empty():
-		return _nearest_junction(pos)
-	return best_id
-
-func _nearest_junction(pos: Vector2) -> String:
-	var best_id := ""
-	var best_dist: float = INF
-	for id in nodes.keys():
-		if not str(id).ends_with("_junction"):
-			continue
-		var dist: float = pos.distance_to(nodes[id])
+		var dist: float = pos.distance_to(node_pos)
 		if dist < best_dist:
 			best_dist = dist
 			best_id = id
 	return best_id
 
+func _nearest_corridor_node(pos: Vector2) -> String:
+	for segment in corridor_segments:
+		var rect: Rect2 = segment.get("rect", Rect2())
+		if rect.size == Vector2.ZERO or not rect.has_point(pos):
+			continue
+		var door_a: String = segment.get("door_a", "")
+		var door_b: String = segment.get("door_b", "")
+		if not nodes.has(door_a) or not nodes.has(door_b):
+			continue
+		if pos.distance_to(nodes[door_a]) <= pos.distance_to(nodes[door_b]):
+			return door_a
+		return door_b
+	return ""
+
 func _point_in_corridor(pos: Vector2) -> bool:
 	for rect in corridor_rects:
 		if rect.has_point(pos):
+			return true
+	for segment in corridor_segments:
+		var rect: Rect2 = segment.get("rect", Rect2())
+		if rect.size != Vector2.ZERO and rect.has_point(pos):
 			return true
 	return false
 

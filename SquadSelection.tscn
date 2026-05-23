@@ -18,6 +18,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
 color = Color(0.05, 0.06, 0.09, 1)
 
 [node name="MainPanel" type="PanelContainer" parent="."]
@@ -53,28 +54,72 @@ horizontal_alignment = 1
 layout_mode = 2
 theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
-text = "Choose up to four operators for the purge mission."
+text = "Configure Alpha, Bravo, and Charlie — 4 random operators per squad."
 horizontal_alignment = 1
 
 [node name="SelectionCounter" type="Label" parent="MainPanel/VBox/Header"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
-text = "0 / 4 OPERATORS SELECTED"
+text = "3 / 3 SQUADS READY"
 horizontal_alignment = 1
 
-[node name="SoldierContainer" type="GridContainer" parent="MainPanel/VBox"]
+[node name="TokensLabel" type="Label" parent="MainPanel/VBox/Header"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 15
+theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
+text = "Command Tokens: 0"
+horizontal_alignment = 1
+
+[node name="SeedRow" type="HBoxContainer" parent="MainPanel/VBox"]
+layout_mode = 2
+alignment = 1
+
+[node name="SeedLabel" type="Label" parent="MainPanel/VBox/SeedRow"]
+layout_mode = 2
+text = "Custom seed (optional):"
+
+[node name="SeedInput" type="LineEdit" parent="MainPanel/VBox/SeedRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+placeholder_text = "Random"
+
+[node name="RerollRow" type="HBoxContainer" parent="MainPanel/VBox"]
+layout_mode = 2
+alignment = 1
+
+[node name="RerollAllButton" type="Button" parent="MainPanel/VBox/RerollRow"]
+layout_mode = 2
+text = "Reroll All Squads"
+
+[node name="SquadScroll" type="ScrollContainer" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 380)
 layout_mode = 2
 size_flags_vertical = 3
-theme_override_constants/h_separation = 20
-theme_override_constants/v_separation = 20
-columns = 3
+
+[node name="SquadContainer" type="VBoxContainer" parent="MainPanel/VBox/SquadScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 16
 
 [node name="DeployButton" type="Button" parent="MainPanel/VBox"]
 custom_minimum_size = Vector2(0, 52)
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
-text = "Select Marines to Deploy"
+text = "Start Run — 3 Squads × 4 Operators"
+
+[node name="PortraitButton" type="Button" parent="MainPanel/VBox"]
+layout_mode = 2
+text = "Unlock Portraits (Codex)"
+
+[node name="BackButton" type="Button" parent="."]
+layout_mode = 1
+anchors_preset = 0
+offset_left = 24.0
+offset_top = 24.0
+offset_right = 160.0
+offset_bottom = 64.0
+text = "Main Menu"
 
 [node name="QuitButton" type="Button" parent="."]
 layout_mode = 1
