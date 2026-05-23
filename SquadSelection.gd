@@ -1,59 +1,56 @@
 # SquadSelection.gd
 extends Control
 
+signal squad_selected(soldiers: Array[SoldierResource])
+
 @export var soldier_resources: Array[SoldierResource] = []
+
+var selected_soldiers: Array[SoldierResource] = []
 
 @onready var soldier_container: GridContainer = $SoldierContainer
 @onready var deploy_button: Button = $DeployButton
 
 func _ready():
-    print("DEBUG: _ready() called")
-    print("DEBUG: Node name: ", name)
-    print("DEBUG: SoldierContainer exists: ", has_node("SoldierContainer"))
-    print("DEBUG: DeployButton exists: ", has_node("DeployButton"))
-    
-    print("DEBUG: About to call load_soldiers()")
     load_soldiers()
-    print("DEBUG: Finished load_soldiers(), have ", soldier_resources.size(), " soldiers")
-    
-    print("DEBUG: About to call populate_soldier_cards()")
     populate_soldier_cards()
-    print("DEBUG: Finished populate_soldier_cards()")
-    
     deploy_button.pressed.connect(_on_deploy_pressed)
     deploy_button.disabled = true
 
 func load_soldiers():
-    print("DEBUG: load_soldiers() started")
     soldier_resources.clear()
     soldier_resources.append(preload("res://Soldier_Marine1.tres"))
     soldier_resources.append(preload("res://Soldier_Marine2.tres"))
     soldier_resources.append(preload("res://Soldier_Marine3.tres"))
     soldier_resources.append(preload("res://Soldier_Marine4.tres"))
     soldier_resources.append(preload("res://Soldier_Marine5.tres"))
-    print("DEBUG: load_soldiers() finished")
 
 func populate_soldier_cards():
-    print("DEBUG: populate_soldier_cards() started")
     for child in soldier_container.get_children():
         child.queue_free()
     
-    print("DEBUG: Cleared existing children, now creating cards...")
-    for i in range(soldier_resources.size()):
-        var soldier = soldier_resources[i]
-        print("DEBUG: Processing soldier ", i, ": ", soldier.soldier_name)
+    for soldier in soldier_resources:
         var card_scene = preload("res://SoldierCard.tscn")
         if card_scene:
-            print("DEBUG: SoldierCard.tscn preloaded successfully")
             var card = card_scene.instantiate()
-            print("DEBUG: Card instantiated")
             card.setup(soldier)
-            print("DEBUG: Card setup complete")
+            card.selected.connect(_on_soldier_selected.bind(soldier))
+            card.deselected.connect(_on_soldier_deselected.bind(soldier))
             soldier_container.add_child(card)
-            print("DEBUG: Card added to container")
-        else:
-            print("DEBUG: ERROR - Could not preload SoldierCard.tscn")
-    print("DEBUG: populate_soldier_cards() finished")
+
+func _on_soldier_selected(soldier: SoldierResource):
+    if soldier not in selected_soldiers and selected_soldiers.size() < 4:
+        selected_soldiers.append(soldier)
+        update_deploy_button()
+
+func _on_soldier_deselected(soldier: SoldierResource):
+    selected_soldiers.erase(soldier)
+    update_deploy_button()
+
+func update_deploy_button():
+    deploy_button.disabled = selected_soldiers.is_empty()
 
 func _on_deploy_pressed():
-    print("DEBUG: Deploy button pressed!")
+    if not selected_soldiers.is_empty():
+        # Pass selected soldiers to the next scene
+        get_tree().set_meta("selected_soldiers", selected_soldiers)
+        get_tree().change_scene_to_file("res://TacticalMap.tscn")
