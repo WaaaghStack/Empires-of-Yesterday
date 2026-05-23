@@ -1,8 +1,6 @@
 # SquadSelection.gd
 extends Control
 
-signal squad_selected(soldiers: Array[SoldierResource])
-
 @export var soldier_resources: Array[SoldierResource] = []
 
 var selected_soldiers: Array[SoldierResource] = []
@@ -33,8 +31,9 @@ func populate_soldier_cards():
         if card_scene:
             var card = card_scene.instantiate()
             card.setup(soldier)
-            card.selected.connect(_on_soldier_selected.bind(soldier))
-            card.deselected.connect(_on_soldier_deselected.bind(soldier))
+            # Connect without .bind() - SoldierCard already passes the soldier
+            card.selected.connect(_on_soldier_selected)
+            card.deselected.connect(_on_soldier_deselected)
             soldier_container.add_child(card)
 
 func _on_soldier_selected(soldier: SoldierResource):
@@ -51,6 +50,5 @@ func update_deploy_button():
 
 func _on_deploy_pressed():
     if not selected_soldiers.is_empty():
-        # Pass selected soldiers to the next scene
         get_tree().set_meta("selected_soldiers", selected_soldiers)
         get_tree().change_scene_to_file("res://TacticalMap.tscn")
