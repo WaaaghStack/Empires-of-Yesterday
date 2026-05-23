@@ -53,7 +53,5 @@ func _on_checkbox_toggled(toggled_on: bool):
     is_selected = toggled_on
     if toggled_on:
         selected.emit(soldier_data)
-        theme_override_styles/panel = load("res://selected_style.tres") if ResourceLoader.exists("res://selected_style.tres") else null
     else:
         deselected.emit(soldier_data)
-        theme_override_styles/panel = null
