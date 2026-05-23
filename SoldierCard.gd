@@ -14,10 +14,10 @@ var stats_label: Label
 var checkbox: CheckBox
 
 func _ready():
-    portrait = $MarginContainer/VBoxContainer/Portrait
-    name_label = $MarginContainer/VBoxContainer/Name
-    stats_label = $MarginContainer/VBoxContainer/Stats
-    checkbox = $MarginContainer/VBoxContainer/CheckBox
+    portrait = $VBoxContainer/Portrait
+    name_label = $VBoxContainer/Name
+    stats_label = $VBoxContainer/Stats
+    checkbox = $VBoxContainer/CheckBox
     
     if checkbox:
         checkbox.toggled.connect(_on_checkbox_toggled)
