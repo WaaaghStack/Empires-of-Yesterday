@@ -11,7 +11,9 @@ var selected_soldiers: Array[SoldierResource] = []
 @onready var deploy_button: Button = $DeployButton
 
 func _ready():
+    print("SquadSelection: _ready() called")
     load_soldiers()
+    print("SquadSelection: Loaded ", soldier_resources.size(), " soldiers")
     populate_soldier_cards()
     deploy_button.pressed.connect(_on_deploy_pressed)
     deploy_button.disabled = true
@@ -25,10 +27,12 @@ func load_soldiers():
     soldier_resources.append(preload("res://Soldier_Marine5.tres"))
 
 func populate_soldier_cards():
+    print("SquadSelection: populate_soldier_cards() called")
     for child in soldier_container.get_children():
         child.queue_free()
     
     for soldier in soldier_resources:
+        print("SquadSelection: Creating card for ", soldier.soldier_name)
         var card_scene = preload("res://SoldierCard.tscn")
         if card_scene:
             var card = card_scene.instantiate()
@@ -36,6 +40,9 @@ func populate_soldier_cards():
             card.selected.connect(_on_soldier_selected.bind(soldier))
             card.deselected.connect(_on_soldier_deselected.bind(soldier))
             soldier_container.add_child(card)
+            print("SquadSelection: Card added to container")
+        else:
+            print("SquadSelection: ERROR - Could not preload SoldierCard.tscn")
 
 func _on_soldier_selected(soldier: SoldierResource):
     if soldier not in selected_soldiers and selected_soldiers.size() < 4:
@@ -54,4 +61,3 @@ func _on_deploy_pressed():
     if not selected_soldiers.is_empty():
         squad_selected.emit(selected_soldiers)
         print("Squad deployed: ", selected_soldiers.map(func(s): return s.soldier_name))
-        # TODO: Change scene to map/deployment screen
