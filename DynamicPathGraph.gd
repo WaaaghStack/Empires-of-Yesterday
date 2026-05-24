@@ -9,6 +9,15 @@ var corridor_rects: Array[Rect2] = []
 var corridor_segments: Array[Dictionary] = []
 var _path_cache: Dictionary = {}
 var _cache_hits: int = 0
+var _finds_this_frame: int = 0
+var _find_budget_frame: int = -1
+const MAX_FINDS_PER_FRAME_DEFAULT := 4
+const DOOR_ENTRY_INSET := 14.0
+var _max_finds_per_frame: int = MAX_FINDS_PER_FRAME_DEFAULT
+
+
+func set_max_finds_per_frame(max_finds: int) -> void:
+	_max_finds_per_frame = maxi(1, max_finds)
 
 
 func invalidate_cache_for_door(_door_node_id: String = "") -> void:
@@ -23,6 +32,13 @@ func find_path(from_pos: Vector2, to_pos: Vector2, blocked_nodes: Array[String] 
 			var cached: PackedVector2Array = _path_cache[cache_key]
 			if not cached.is_empty():
 				return cached
+	var frame := Engine.get_process_frames()
+	if _find_budget_frame != frame:
+		_find_budget_frame = frame
+		_finds_this_frame = 0
+	if _finds_this_frame >= _max_finds_per_frame:
+		return _fallback_path(from_pos, to_pos, from_room, to_room)
+	_finds_this_frame += 1
 	var start_id: String = _nearest_node(from_pos, from_room)
 	var end_id: String = _nearest_node(to_pos, to_room)
 	if start_id.is_empty() or end_id.is_empty():
@@ -104,6 +120,16 @@ func _build_corridor_points(from_pos: Vector2, ids: Array[String], to_pos: Vecto
 		if not is_door and not is_final_room:
 			continue
 		var node_pos: Vector2 = nodes[id]
+		if is_door:
+			var toward_pos: Vector2 = to_pos
+			for j in range(i + 1, ids.size()):
+				var next_id: String = ids[j]
+				if nodes.has(next_id):
+					toward_pos = nodes[next_id]
+					break
+			var inset_dir: Vector2 = toward_pos - node_pos
+			if inset_dir.length_squared() > 1.0:
+				node_pos += inset_dir.normalized() * DOOR_ENTRY_INSET
 		if cursor.distance_to(node_pos) <= 4.0:
 			continue
 		points.append(node_pos)

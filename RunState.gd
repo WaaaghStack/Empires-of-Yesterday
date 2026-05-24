@@ -1,6 +1,11 @@
 # RunState.gd — autoload singleton for hybrid roguelite runs.
 extends Node
 
+const PlanetMapDataScript := preload("res://PlanetMapData.gd")
+const EvolutionBoardLib := preload("res://EvolutionBoard.gd")
+
+enum PlanetPhase { DEPLOY, PURGE, ESCALATION, QUEEN, EXTRACT }
+
 const OBJECTIVE_TEMPLATES: Array[String] = [
 	"standard", "silent_extract", "scavenge", "hold_purge", "black_site", "vip_recovery", "hive_purge",
 ]
@@ -43,10 +48,40 @@ var daily_seed_mode: bool = false
 var run_total_elapsed: float = 0.0
 var run_total_casualties: int = 0
 
+## Single-planet reclamation run (replaces discrete 4-op loop when enabled).
+var planet_mode: bool = false
+var legacy_ops_mode: bool = false
+var planet_phase: PlanetPhase = PlanetPhase.DEPLOY
+var planet_map_data = null
+var overmind_destroyed: bool = false
+var extract_window_open: bool = false
+var extract_window_remaining: float = 0.0
+var regular_hives_destroyed: int = 0
+var regular_hives_total: int = 0
+var yesterdays_echoes: int = 0
+var squad_stances: Dictionary = {}
+var squad_loadout_presets: Dictionary = {}
+var orbital_charges: float = 100.0
+var orbital_charge_max: float = 100.0
+var evolution_boards: Dictionary = {}
+var active_mutators: Array[String] = []
+
+const MUTATOR_IDS: Array[String] = ["dense_spores", "quiet_deck", "reinforced"]
+
 var _rng := RandomNumberGenerator.new()
 
 
+var legacy_biomass: int:
+	get:
+		return run_credits
+	set(value):
+		run_credits = value
+
+
 func start_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
+	_reset_planet_state()
+	planet_mode = false
+	legacy_ops_mode = true
 	run_active = true
 	op_index = 1
 	cleared_ops = 0
@@ -76,6 +111,58 @@ func start_run(squad_resources: Array[SoldierResource], seed_override: int = -1,
 	run_total_casualties = 0
 
 
+func start_planet_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
+	_reset_planet_state()
+	planet_mode = true
+	legacy_ops_mode = false
+	run_active = true
+	op_index = 1
+	cleared_ops = 0
+	run_credits = 0
+	squad.clear()
+	for res in squad_resources:
+		var copy: SoldierResource = res.duplicate_for_deploy()
+		copy.reset_for_new_run()
+		squad.append(copy)
+	_init_squad_assignments()
+	daily_seed_mode = use_daily_seed
+	if seed_override >= 0:
+		run_seed = seed_override
+	elif use_daily_seed:
+		run_seed = _daily_seed_value()
+	else:
+		_rng.randomize()
+		run_seed = _rng.randi()
+	active_modifier = null
+	active_run_augment = null
+	pending_intel.clear()
+	objective_template = "planet_reclamation"
+	deploy_assignments.clear()
+	active_squad_id = "alpha"
+	last_mission_stats = {}
+	run_total_elapsed = 0.0
+	run_total_casualties = 0
+	planet_phase = PlanetPhase.DEPLOY
+	planet_map_data = null
+	overmind_destroyed = false
+	extract_window_open = false
+	extract_window_remaining = 0.0
+	regular_hives_destroyed = 0
+	regular_hives_total = 0
+	yesterdays_echoes = 0
+	squad_stances.clear()
+	squad_loadout_presets.clear()
+	orbital_charges = orbital_charge_max
+	evolution_boards.clear()
+	active_mutators.clear()
+	active_mutators.clear()
+	for squad_id in SQUAD_IDS:
+		squad_stances[squad_id] = "balanced"
+		var board: EvolutionBoardLib = EvolutionBoardLib.new()
+		board.reset(squad_id)
+		evolution_boards[squad_id] = board
+
+
 func sync_from_units(units: Array) -> void:
 	for unit in units:
 		if not unit is SoldierUnit:
@@ -90,6 +177,8 @@ func sync_from_units(units: Array) -> void:
 			roster.current_hp = soldier_unit.current_health
 			roster.is_kia = false
 			roster.is_injured = roster.current_hp < roster.health
+			if soldier_unit.source_resource:
+				roster.stress = soldier_unit.source_resource.stress
 		else:
 			roster.is_kia = true
 			roster.current_hp = 0
@@ -119,6 +208,113 @@ func end_run() -> void:
 	active_run_augment = null
 	pending_intel.clear()
 	last_mission_stats = {}
+	_reset_planet_state()
+
+
+func is_planet_run_active() -> bool:
+	return run_active and planet_mode
+
+
+func get_planet_phase_name() -> String:
+	return PlanetPhase.keys()[planet_phase]
+
+
+func advance_planet_phase(new_phase: PlanetPhase) -> void:
+	if not planet_mode:
+		return
+	if new_phase == planet_phase:
+		return
+	planet_phase = new_phase
+	RunLog.info("Planet phase -> %s" % get_planet_phase_name())
+
+
+func begin_planet_purge() -> void:
+	if not planet_mode:
+		return
+	advance_planet_phase(PlanetPhase.PURGE)
+
+
+func on_regular_hive_destroyed() -> void:
+	if not planet_mode:
+		return
+	regular_hives_destroyed += 1
+	if regular_hives_total <= 0:
+		return
+	var ratio := float(regular_hives_destroyed) / float(regular_hives_total)
+	if planet_phase == PlanetPhase.PURGE and ratio >= 0.5:
+		advance_planet_phase(PlanetPhase.ESCALATION)
+	if regular_hives_destroyed >= regular_hives_total:
+		advance_planet_phase(PlanetPhase.QUEEN)
+
+
+func on_overmind_destroyed() -> void:
+	if not planet_mode:
+		return
+	overmind_destroyed = true
+	extract_window_open = true
+	extract_window_remaining = 0.0
+	advance_planet_phase(PlanetPhase.EXTRACT)
+
+
+func award_biomass(amount: int) -> void:
+	if amount <= 0:
+		return
+	run_credits += amount
+
+
+func award_echoes(amount: int) -> void:
+	if amount <= 0:
+		return
+	yesterdays_echoes += amount
+
+
+func set_squad_stance(squad_id: String, stance: String) -> void:
+	squad_stances[squad_id] = stance.to_lower()
+
+
+func get_squad_stance(squad_id: String) -> String:
+	return str(squad_stances.get(squad_id, "balanced"))
+
+
+func set_squad_loadout_preset(squad_id: String, preset_id: String) -> void:
+	squad_loadout_presets[squad_id] = preset_id
+
+
+func get_evolution_board(squad_id: String) -> EvolutionBoardLib:
+	if evolution_boards.has(squad_id):
+		return evolution_boards[squad_id] as EvolutionBoardLib
+	var board: EvolutionBoardLib = EvolutionBoardLib.new()
+	board.reset(squad_id)
+	evolution_boards[squad_id] = board
+	return board
+
+
+func apply_evolution_upgrade(squad_id: String, upgrade_id: String, units: Array = []) -> bool:
+	var board: EvolutionBoardLib = get_evolution_board(squad_id)
+	var upgrade_script: Script = preload("res://EvolutionUpgrade.gd")
+	var upgrade = upgrade_script.get_by_id(upgrade_id)
+	if upgrade == null or not board.can_apply(upgrade):
+		return false
+	return board.apply_upgrade(upgrade, units)
+
+
+func spend_orbital_charge(cost: float) -> bool:
+	if orbital_charges < cost:
+		return false
+	orbital_charges -= cost
+	return true
+
+
+func regen_orbital_charge(delta: float, bonus: float = 0.0) -> void:
+	var rate := 4.0 + bonus
+	orbital_charges = minf(orbital_charge_max, orbital_charges + rate * delta)
+
+
+func store_planet_map(map_data) -> void:
+	planet_map_data = map_data
+	if map_data and map_data is PlanetMapDataScript:
+		regular_hives_total = map_data.planet_hive_target
+		regular_hives_destroyed = 0
 
 
 func has_ops_remaining() -> bool:
@@ -200,7 +396,7 @@ func get_intel_cost(intel_type: String) -> int:
 
 
 func has_pending_intel(intel_type: String) -> bool:
-	return bool(pending_intel.get(intel_type, false))
+	return pending_intel.get(intel_type, false)
 
 
 func purchase_intel(intel_type: String) -> bool:
@@ -263,6 +459,8 @@ func record_mission_stats(stats: Dictionary) -> void:
 
 
 func get_difficulty_config() -> Dictionary:
+	if planet_mode:
+		return get_planet_config()
 	var map_tier := "medium"
 	if op_index >= 3 and op_index < ops_per_run:
 		map_tier = "large"
@@ -278,11 +476,43 @@ func get_difficulty_config() -> Dictionary:
 	}
 
 
+func get_planet_config() -> Dictionary:
+	return {
+		"op_index": 3,
+		"objective_template": "planet_reclamation",
+		"difficulty_tier": 3,
+		"map_tier": "planet",
+		"squad_count": SQUAD_COUNT,
+		"modifier": active_modifier,
+		"planet_mode": true,
+		"planet_room_min": 12,
+		"planet_room_max": 16,
+		"mutators": active_mutators.duplicate(),
+	}
+
+
+func set_mutator(mutator_id: String, enabled: bool) -> void:
+	if mutator_id not in MUTATOR_IDS:
+		return
+	if enabled and mutator_id not in active_mutators:
+		active_mutators.append(mutator_id)
+	elif not enabled:
+		active_mutators.erase(mutator_id)
+
+
+func has_mutator(mutator_id: String) -> bool:
+	return mutator_id in active_mutators
+
+
+func toggle_mutator(mutator_id: String) -> void:
+	set_mutator(mutator_id, not has_mutator(mutator_id))
+
+
 func get_squad_id_for_index(index: int) -> String:
 	if squad_assignments.has(index):
 		return str(squad_assignments[index])
-	var squad_idx: int = int(float(index) / float(OPERATORS_PER_SQUAD))
-	return SQUAD_IDS[clampi(squad_idx, 0, SQUAD_IDS.size() - 1)]
+	var squad_index: int = int(index / OPERATORS_PER_SQUAD)
+	return SQUAD_IDS[clampi(squad_index, 0, SQUAD_IDS.size() - 1)]
 
 
 func assign_operator_to_squad(index: int, squad_id: String) -> void:
@@ -394,3 +624,21 @@ func get_daily_seed() -> int:
 func _daily_seed_value() -> int:
 	var today := Time.get_date_dict_from_system()
 	return hash("%04d-%02d-%02d" % [today.year, today.month, today.day]) & 0x7FFFFFFF
+
+
+func _reset_planet_state() -> void:
+	planet_mode = false
+	legacy_ops_mode = false
+	planet_phase = PlanetPhase.DEPLOY
+	planet_map_data = null
+	overmind_destroyed = false
+	extract_window_open = false
+	extract_window_remaining = 0.0
+	regular_hives_destroyed = 0
+	regular_hives_total = 0
+	yesterdays_echoes = 0
+	squad_stances.clear()
+	squad_loadout_presets.clear()
+	orbital_charges = orbital_charge_max
+	evolution_boards.clear()
+	active_mutators.clear()

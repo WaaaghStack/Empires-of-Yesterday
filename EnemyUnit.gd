@@ -22,7 +22,7 @@ var current_health: int = 50
 var is_alive := true
 var is_visible_to_player := false
 var home_room: Room = null
-var enemy_archetype: Enemy.Archetype = Enemy.Archetype.RIFLEMAN
+var enemy_archetype: Enemy.Kind = Enemy.Kind.RIFLEMAN
 var fire_cooldown: float = 0.0
 var path_queue: Array[Vector2] = []
 var path_index: int = 0
@@ -35,6 +35,10 @@ var _alarm_called := false
 var _ai_skip_frames: int = 0
 var _ai_process_interval: int = 2
 var _overwatch_anchor: Vector2 = Vector2.ZERO
+var all_rooms: Array = []
+var _tactical_map: Node = null
+var _soldier_scan_cache: Array = []
+var _soldier_scan_frame: int = -1
 
 const WAYPOINT_RADIUS := 10.0
 const HUNT_SPEED_RATIO := 0.25
@@ -75,15 +79,18 @@ func setup_from_resource(resource: Enemy, room: Room = null) -> void:
 		_overwatch_anchor = home_room.position
 	_update_visuals()
 
+
+func bind_tactical_map(map_node: Node) -> void:
+	_tactical_map = map_node
+	if map_node and map_node.get("rooms"):
+		all_rooms = map_node.rooms
+
+
 func _physics_process(delta: float) -> void:
 	if not is_alive or _mission_paused():
 		return
-	if not is_visible_to_player:
-		_ai_skip_frames += 1
-		if _ai_skip_frames % _ai_process_interval != 0:
-			return
-	else:
-		_ai_skip_frames = 0
+	if not _should_run_ai_this_frame():
+		return
 	if focus_mark_timer > 0.0:
 		focus_mark_timer = maxf(0.0, focus_mark_timer - delta)
 		if focus_mark_timer <= 0.0:
@@ -109,6 +116,56 @@ func _physics_process(delta: float) -> void:
 			return
 	_process_search_destroy(delta)
 
+func _should_run_ai_this_frame() -> bool:
+	if is_visible_to_player:
+		_ai_skip_frames = 0
+		return true
+	var interval := _ai_process_interval
+	var nearest_dist := _distance_to_nearest_soldier()
+	if nearest_dist > 640.0:
+		interval = 3
+	_ai_skip_frames += 1
+	return _ai_skip_frames % interval == 0
+
+
+func _distance_to_nearest_soldier() -> float:
+	var nearest := INF
+	for soldier in _living_soldiers_source():
+		if soldier is SoldierUnit and soldier.is_alive:
+			nearest = minf(nearest, position.distance_to(soldier.position))
+	return nearest
+
+
+func _living_soldiers_source() -> Array:
+	var frame := Engine.get_process_frames()
+	if _tactical_map and _tactical_map.has_method("get_living_soldiers_cached"):
+		return _tactical_map.get_living_soldiers_cached()
+	if _tactical_map and _tactical_map.get("entity_index"):
+		return _tactical_map.entity_index.get_all_living_soldiers()
+	if _soldier_scan_frame == frame:
+		return _soldier_scan_cache
+	_soldier_scan_frame = frame
+	_soldier_scan_cache.clear()
+	for node in get_tree().get_nodes_in_group("soldiers"):
+		if node is SoldierUnit and node.is_alive:
+			_soldier_scan_cache.append(node)
+	return _soldier_scan_cache
+
+
+func _rooms_source() -> Array:
+	if not all_rooms.is_empty():
+		return all_rooms
+	return get_tree().get_nodes_in_group("rooms")
+
+
+func _get_doors() -> Array:
+	if _tactical_map and _tactical_map.get("doors"):
+		var cached: Array = _tactical_map.doors
+		if not cached.is_empty():
+			return cached
+	return get_tree().get_nodes_in_group("doors")
+
+
 func _get_hunt_speed() -> float:
 	return _average_soldier_speed() * HUNT_SPEED_RATIO
 
@@ -117,7 +174,7 @@ func _average_soldier_speed() -> float:
 		return 56.0
 	var total: float = 0.0
 	var count: int = 0
-	for node in get_tree().get_nodes_in_group("soldiers"):
+	for node in _living_soldiers_source():
 		if node is SoldierUnit and node.is_alive:
 			total += node.speed
 			count += 1
@@ -127,14 +184,14 @@ func _average_soldier_speed() -> float:
 
 func _chase_soldier(delta: float, target: SoldierUnit) -> void:
 	var move_speed := speed
-	if enemy_archetype == Enemy.Archetype.HEAVY:
+	if enemy_archetype == Enemy.Kind.HEAVY:
 		move_speed *= 0.82
 	var my_room := _room_containing(position)
 	var target_room := _room_containing(target.position)
 	if my_room and target_room and my_room == target_room:
 		_move_direct(delta, target.position, move_speed)
 		return
-	if enemy_archetype == Enemy.Archetype.HEAVY and _is_near_choke_door() and my_room != target_room:
+	if enemy_archetype == Enemy.Kind.HEAVY and _is_near_choke_door() and my_room != target_room:
 		_face_target(target)
 		return
 	if hunt_room != target_room or path_queue.is_empty():
@@ -159,7 +216,7 @@ func _process_search_destroy(delta: float) -> void:
 func _find_hunt_room() -> Room:
 	var best_room: Room = null
 	var best_dist: float = INF
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and _room_has_soldier(node):
 			var dist: float = position.distance_to(node.position)
 			if dist < best_dist:
@@ -171,13 +228,13 @@ func _room_has_soldier(room: Room) -> bool:
 	for soldier in room.soldiers_inside:
 		if soldier is SoldierUnit and soldier.is_alive:
 			return true
-	for node in get_tree().get_nodes_in_group("soldiers"):
+	for node in _living_soldiers_source():
 		if node is SoldierUnit and node.is_alive and room.contains_local_point(node.position, 10.0):
 			return true
 	return false
 
 func _any_soldiers_alive() -> bool:
-	for node in get_tree().get_nodes_in_group("soldiers"):
+	for node in _living_soldiers_source():
 		if node is SoldierUnit and node.is_alive:
 			return true
 	return false
@@ -259,7 +316,7 @@ func _move_direct(delta: float, target_pos: Vector2, move_speed: float) -> void:
 		body_poly.rotation = to_target.angle()
 
 func _room_containing(pos: Vector2) -> Room:
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and node.contains_local_point(pos, 10.0):
 			return node
 	return null
@@ -283,6 +340,8 @@ func _is_walkable(pos: Vector2) -> bool:
 	return false
 
 func _get_path_graph() -> RefCounted:
+	if _tactical_map and _tactical_map.get("path_graph"):
+		return _tactical_map.path_graph as RefCounted
 	for node in get_tree().get_nodes_in_group("tactical_map"):
 		return node.path_graph as RefCounted
 	return null
@@ -291,7 +350,7 @@ func _find_blocking_door_ahead(waypoint: Vector2) -> Node2D:
 	var move_dir: Vector2 = waypoint - position
 	if move_dir.length() < 0.001:
 		return null
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if not node.has_method("blocks_travel"):
 			continue
 		if node.blocks_travel():
@@ -312,20 +371,20 @@ func _face_target(target: Node2D) -> void:
 
 func _get_effective_aggro_range() -> float:
 	var range_val := aggro_range
-	if enemy_archetype == Enemy.Archetype.HEAVY and _is_near_choke_door():
+	if enemy_archetype == Enemy.Kind.HEAVY and _is_near_choke_door():
 		range_val *= HEAVY_DOOR_AGGRO_MULT
 	return range_val
 
 
 func _is_near_choke_door() -> bool:
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if node is Node2D and position.distance_to(node.position) <= HEAVY_DOOR_PROXIMITY:
 			return true
 	return false
 
 
 func _should_hold_overwatch(target: SoldierUnit) -> bool:
-	if enemy_archetype != Enemy.Archetype.SNIPER or not home_room:
+	if enemy_archetype != Enemy.Kind.SNIPER or not home_room:
 		return false
 	var my_room := _room_containing(position)
 	var target_room := _room_containing(target.position)
@@ -351,8 +410,8 @@ func _find_nearest_soldier(max_range: float = -1.0) -> SoldierUnit:
 	var nearest: SoldierUnit = null
 	var nearest_dist: float = search_range
 	var rooms: Array[Room] = _get_rooms()
-	var door_nodes: Array = get_tree().get_nodes_in_group("doors")
-	for node in get_tree().get_nodes_in_group("soldiers"):
+	var door_nodes: Array = _get_doors()
+	for node in _living_soldiers_source():
 		if node is SoldierUnit and node.is_alive:
 			var dist: float = position.distance_to(node.position)
 			if dist >= nearest_dist:
@@ -391,7 +450,7 @@ func _apply_visibility() -> void:
 
 func _get_rooms() -> Array[Room]:
 	var result: Array[Room] = []
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room:
 			result.append(node)
 	return result
@@ -406,7 +465,7 @@ func _try_attack_target(target: SoldierUnit) -> void:
 	CombatFxLib.spawn_impact(target, Color(1.0, 0.15, 0.35, 0.85))
 	_flash_attack()
 	combat_hit.emit(enemy_name, target.soldier_name, damage, was_alive and not target.is_alive)
-	if enemy_archetype == Enemy.Archetype.RIFLEMAN and not _alarm_called:
+	if enemy_archetype == Enemy.Kind.RIFLEMAN and not _alarm_called:
 		_alarm_called = true
 		alarm_triggered.emit(self)
 
@@ -453,9 +512,9 @@ func _update_visuals() -> void:
 		health_bar.value = current_health
 	if body_poly:
 		match enemy_archetype:
-			Enemy.Archetype.SNIPER:
+			Enemy.Kind.SNIPER:
 				body_poly.color = Color(0.55, 0.22, 0.82, 1.0)
-			Enemy.Archetype.HEAVY:
+			Enemy.Kind.HEAVY:
 				body_poly.color = Color(0.72, 0.28, 0.18, 1.0)
 			_:
 				body_poly.color = Color(0.82, 0.12, 0.48, 1.0)

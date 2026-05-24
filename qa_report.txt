@@ -9,17 +9,23 @@ OK  res://Door.gd
 OK  res://DynamicPathGraph.gd
 OK  res://Enemy.gd
 OK  res://EnemyUnit.gd
+OK  res://EvolutionBoard.gd
+OK  res://EvolutionNode.gd
+OK  res://EvolutionUpgrade.gd
 OK  res://GameTheme.gd
 OK  res://LineOfSight.gd
+OK  res://LoadoutPreset.gd
 OK  res://MainMenu.gd
 OK  res://MapVisuals.gd
 OK  res://MissionDebrief.gd
 OK  res://MissionMapData.gd
+OK  res://PlanetMapData.gd
+OK  res://OvermindHive.gd
 OK  res://MissionState.gd
 OK  res://MissionTaskBoard.gd
 OK  res://MissionEntityIndex.gd
-OK  res://SquadsManager.gd
-OK  res://Hive.gd
+OK  res://CombatCoordinator.gd
+OK  res://OrbitalCarrier.gd
 OK  res://OpModifier.gd
 OK  res://OperatorRosterCard.gd
 OK  res://OrderType.gd
@@ -33,6 +39,9 @@ OK  res://SaveManager.gd
 OK  res://SoldierCard.gd
 OK  res://SoldierResource.gd
 OK  res://SoldierUnit.gd
+OK  res://SquadsManager.gd
+OK  res://SwarmDirector.gd
+OK  res://Hive.gd
 OK  res://SquadRosterPanel.gd
 OK  res://SquadSelection.gd
 OK  res://TacticalMap.gd
@@ -43,9 +52,14 @@ OK  res://Codex.tscn
 OK  res://ControlsOverlay.tscn
 OK  res://Door.tscn
 OK  res://Hive.tscn
+OK  res://OvermindHive.tscn
 OK  res://EnemyUnit.tscn
 OK  res://MainMenu.tscn
 OK  res://MissionDebrief.tscn
+OK  res://OrbitalCarrier.tscn
+OK  res://OvermindHive.tscn
+OK  res://EvolutionNode.tscn
+OK  res://PlanetMission.tscn
 OK  res://OperatorRosterCard.tscn
 OK  res://Room.tscn
 OK  res://RunSummary.tscn
@@ -53,6 +67,7 @@ OK  res://SoldierCard.tscn
 OK  res://SoldierUnit.tscn
 OK  res://SquadSelection.tscn
 OK  res://TacticalMap.tscn
+OK  res://PlanetMission.tscn
 -- Soldier resources --
 OK  res://Soldier_Marine1.tres (Vega)
 OK  res://Soldier_Marine2.tres (Hayes)
@@ -73,9 +88,9 @@ OK  RunState transitions
 OK  RunLog session=C:/Users/Komba/OneDrive/Documents/GitHub/Empires-of-Yesterday/logs/latest_run.txt
 -- Phase A-E / F smoke tests --
 OK  objective templates (7)
-OK  hold_purge hold_room_id=room_13
+OK  hold_purge hold_room_id=room_1
 OK  run augments script
-OK  facility theme bio
+OK  facility theme jungle
 OK  handcrafted finale (5 rooms)
 OK  daily share code EOY-2026-05-23-12345
 -- Objective template smoke tests --
@@ -97,5 +112,11 @@ OK  hive_purge objective template
 OK  Hive combat destruction
 OK  squad_status hive engagement
 OK  objective doctrine mapping
+-- Planet run smoke tests --
+OK  planet map rooms=26 size=(2230.6, 2484.8) hives=6 overmind=overmind_core
+OK  start_planet_run defaults
+OK  planet phase enum transitions
+OK  PlanetPhase enum (DEPLOY, PURGE, ESCALATION, QUEEN, EXTRACT)
+OK  planet run smoke tests
 === QA VALIDATION END ===
 RESULT: PASS

@@ -2,6 +2,7 @@ class_name ProceduralMapGenerator
 extends RefCounted
 
 const MissionMapDataScript := preload("res://MissionMapData.gd")
+const PlanetMapDataScript := preload("res://PlanetMapData.gd")
 const MapVisualsLib := preload("res://MapVisuals.gd")
 
 const ROOM_NAME_POOL: Array[String] = [
@@ -30,7 +31,7 @@ const PIECE_MARGIN := 8.0
 
 static func generate(custom_seed: int = -1, config: Dictionary = {}):
 	var op_index: int = int(config.get("op_index", 1))
-	if op_index >= 4 and bool(config.get("handcrafted_finale", true)):
+	if op_index >= 4 and config.get("handcrafted_finale", true):
 		return _generate_finale_map(custom_seed, config)
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	var seed_value: int = custom_seed if custom_seed >= 0 else rng.randi()
@@ -107,6 +108,86 @@ static func generate(custom_seed: int = -1, config: Dictionary = {}):
 	_finalize_links(data, layout.link_specs)
 	data.hull_outline = _build_hull(data)
 	data.map_size = _compute_map_size(data)
+	return data
+
+
+static func generate_planet(custom_seed: int = -1, config: Dictionary = {}):
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	var seed_value: int = custom_seed if custom_seed >= 0 else rng.randi()
+	rng.seed = seed_value
+	var op_index: int = int(config.get("op_index", 3))
+	var data: RefCounted = PlanetMapDataScript.new()
+	data.map_seed = seed_value
+	data.objective_template = "planet_reclamation"
+	data.op_index = op_index
+	data.map_tier = "planet"
+	data.map_scale = _map_scale_for_tier("planet")
+	data.facility_theme = MapVisualsLib.pick_facility_theme(rng)
+	data.enemy_stat_scale = _enemy_scale_for_op(op_index)
+	data.evac_reveal_after_searches = 0
+	var room_min: int = int(config.get("planet_room_min", 12))
+	var room_max: int = int(config.get("planet_room_max", 16))
+	var room_count: int = rng.randi_range(room_min, room_max)
+	var names: Array[String] = _pick_room_names(room_count, rng)
+	var roles: Array[Dictionary] = _assign_planet_roles(room_count, rng, op_index, config)
+	var layout := _build_lego_layout(room_count, rng, false, data.map_scale)
+	_center_layout(layout)
+	var theme_palette: Dictionary = MapVisualsLib.get_facility_palette(data.facility_theme)
+	var theme_room_colors: Array = theme_palette.get("room_colors", ROOM_COLOR_POOL)
+	for i in range(room_count):
+		var piece: Dictionary = layout.rooms[i]
+		var role: Dictionary = roles[i]
+		var room_id: String = str(role.get("id_override", "room_%d" % i))
+		data.rooms.append({
+			"id": room_id,
+			"name": names[i],
+			"pos": piece.pos,
+			"size": piece.size,
+			"shape": piece.get("shape", "standard"),
+			"color": theme_room_colors[i % theme_room_colors.size()],
+			"extract": role.get("extract", false),
+			"clear": role.get("clear", false),
+			"enemies": role.get("enemies", 0),
+			"spawn_eligible": role.get("spawn_eligible", false),
+			"scavenge_bonus": false,
+			"elite_slot": role.get("elite_slot", false),
+			"hold_room": false,
+			"intel_terminal": false,
+			"vip_room": false,
+			"loot_branch": false,
+			"hive_room": role.get("hive_room", false),
+			"overmind_room": role.get("overmind_room", false),
+			"evolution_node": role.get("evolution_node", false),
+			"sector": data.sector_tags.get(room_id, "central"),
+			"stat_scale": data.enemy_stat_scale,
+		})
+		if role.get("hive_room", false) and not role.get("overmind_room", false):
+			data.hive_room_ids.append(room_id)
+			data.regular_hive_room_ids.append(room_id)
+		if role.get("overmind_room", false):
+			data.overmind_room_id = room_id
+			data.hive_room_ids.append(room_id)
+		if role.get("evolution_node", false):
+			data.evolution_node_room_ids.append(room_id)
+		data.sector_tags[room_id] = _sector_tag_for_pos(piece.pos)
+	_finalize_links(data, layout.link_specs)
+	data.hull_outline = _build_hull(data)
+	data.map_size = _compute_map_size(data)
+	data.planet_hive_target = data.regular_hive_room_ids.size()
+	if _mutators_include(config, "reinforced"):
+		data.enemy_stat_scale *= 1.12
+		for room_data: Dictionary in data.rooms:
+			if int(room_data.get("enemies", 0)) > 0:
+				room_data["enemies"] = maxi(1, int(room_data["enemies"]) - 1)
+	if MapVisualsLib.normalize_theme(data.facility_theme) == "colony":
+		data.enemy_stat_scale *= 0.96
+	for sector in ["north", "south", "east", "west", "central"]:
+		var count := 0
+		for room_data: Dictionary in data.rooms:
+			if str(room_data.get("sector", "central")) == sector:
+				count += 1
+		if count > 0:
+			data.sector_room_counts[sector] = count
 	return data
 
 
@@ -190,6 +271,8 @@ static func _enemy_scale_for_op(op_index: int) -> float:
 
 static func _room_count_for_tier(map_tier: String, rng: RandomNumberGenerator) -> int:
 	match map_tier:
+		"planet":
+			return rng.randi_range(40, 60)
 		"large":
 			return rng.randi_range(22, 30)
 		"medium":
@@ -202,6 +285,8 @@ static func _room_count_for_tier(map_tier: String, rng: RandomNumberGenerator) -
 
 static func _map_scale_for_tier(map_tier: String) -> float:
 	match map_tier:
+		"planet":
+			return 2.35
 		"large":
 			return 2.0
 		"medium":
@@ -221,6 +306,8 @@ static func _sector_tag_for_pos(pos: Vector2) -> String:
 static func _hostile_room_count(op_index: int, objective_template: String, map_tier: String = "medium") -> int:
 	var base := clampi(op_index + 1, 2, 4)
 	match map_tier:
+		"planet":
+			base = clampi(op_index + 18, 24, 34)
 		"large":
 			base = clampi(op_index + 5, 8, 12)
 		"medium":
@@ -234,16 +321,16 @@ static func _hive_count_for_tier(map_tier: String, objective_template: String, r
 	if objective_template == "hive_purge":
 		match map_tier:
 			"large":
-				return rng.randi_range(3, 4)
-			"medium":
 				return rng.randi_range(2, 3)
-			_:
+			"medium":
 				return rng.randi_range(1, 2)
+			_:
+				return 1
 	match map_tier:
 		"large":
-			return rng.randi_range(2, 4)
-		"medium":
 			return rng.randi_range(1, 2)
+		"medium":
+			return rng.randi_range(0, 1)
 		_:
 			return 0
 
@@ -442,8 +529,8 @@ static func _assign_roles(
 	var hold_room_idx: int = hostile_indices[0] if objective_template == "hold_purge" and hostile_count > 0 else -1
 	var terminal_pool: Array[int] = []
 	if objective_template == "black_site":
-		for idx in hostile_indices:
-			terminal_pool.append(idx)
+		for hi in range(hostile_count):
+			terminal_pool.append(hostile_indices[hi])
 		terminal_pool.shuffle()
 	var terminal_count := mini(3, maxi(2, terminal_pool.size()))
 	var terminal_indices: Dictionary = {}
@@ -509,6 +596,84 @@ static func _assign_roles(
 			roles[hive_idx]["enemies"] = maxi(int(roles[hive_idx]["enemies"]), 1)
 			roles[hive_idx]["id_override"] = "hive_%d" % h
 	return roles
+
+
+static func _assign_planet_roles(count: int, rng: RandomNumberGenerator, op_index: int, config: Dictionary = {}) -> Array[Dictionary]:
+	var roles: Array[Dictionary] = []
+	for _i in range(count):
+		roles.append({"extract": false, "clear": false, "enemies": 0, "spawn_eligible": true})
+	roles[0]["spawn_eligible"] = true
+	roles[0]["clear"] = false
+	roles[0]["enemies"] = 0
+	roles[0]["id_override"] = "planet_deploy"
+	roles[count - 1]["extract"] = true
+	roles[count - 1]["spawn_eligible"] = false
+	roles[count - 1]["id_override"] = "planet_extract"
+	var hostile_indices: Array[int] = []
+	for i in range(1, count - 1):
+		hostile_indices.append(i)
+	hostile_indices.shuffle()
+	var hostile_count: int = mini(_hostile_room_count(op_index, "planet_reclamation", "planet"), hostile_indices.size())
+	var per_room: int = _enemies_per_room(op_index, rng)
+	for i in range(hostile_count):
+		var idx: int = hostile_indices[i]
+		roles[idx]["clear"] = true
+		roles[idx]["spawn_eligible"] = false
+		roles[idx]["enemies"] = per_room + (1 if i >= hostile_count - 2 else 0)
+		if _mutators_include(config, "quiet_deck"):
+			roles[idx]["enemies"] = maxi(0, int(roles[idx]["enemies"]) - 1)
+		if i >= hostile_count - 2:
+			roles[idx]["elite_slot"] = true
+	var hive_count := rng.randi_range(1, 2)
+	if _mutators_include(config, "dense_spores"):
+		hive_count += 1
+	if hive_count > 0:
+		hive_count = mini(hive_count, maxi(1, hostile_indices.size() - 1))
+	var hive_pool: Array[int] = []
+	for idx in hostile_indices:
+		hive_pool.append(idx)
+	hive_pool.shuffle()
+	for h in range(mini(hive_count, hive_pool.size())):
+		var hive_idx: int = hive_pool[h]
+		roles[hive_idx]["hive_room"] = true
+		roles[hive_idx]["enemies"] = maxi(int(roles[hive_idx]["enemies"]), 1)
+		roles[hive_idx]["id_override"] = "hive_%d" % h
+	var overmind_idx := _pick_overmind_room_index(count, hostile_indices)
+	if overmind_idx >= 0:
+		roles[overmind_idx]["hive_room"] = true
+		roles[overmind_idx]["overmind_room"] = true
+		roles[overmind_idx]["clear"] = true
+		roles[overmind_idx]["enemies"] = maxi(int(roles[overmind_idx]["enemies"]), 2)
+		roles[overmind_idx]["elite_slot"] = true
+		roles[overmind_idx]["id_override"] = "overmind_core"
+	var evo_pool: Array[int] = []
+	for idx in hostile_indices:
+		if idx != overmind_idx and not roles[idx].get("hive_room", false):
+			evo_pool.append(idx)
+	evo_pool.shuffle()
+	var evo_count := mini(rng.randi_range(1, 2), evo_pool.size())
+	for e in range(evo_count):
+		var evo_idx: int = evo_pool[e]
+		roles[evo_idx]["evolution_node"] = true
+		if not roles[evo_idx].has("id_override"):
+			roles[evo_idx]["id_override"] = "evo_%d" % e
+	return roles
+
+
+static func _pick_overmind_room_index(count: int, hostile_indices: Array[int]) -> int:
+	if hostile_indices.is_empty():
+		return count - 2 if count > 2 else -1
+	var best_idx: int = hostile_indices[0]
+	var best_dist := 0.0
+	for idx in hostile_indices:
+		if idx <= 0 or idx >= count - 1:
+			continue
+		var dist := absf(float(idx - (count / 2)))
+		if dist > best_dist:
+			best_dist = dist
+			best_idx = idx
+	return best_idx
+
 
 static func _opposite_dir(dir: String) -> String:
 	match dir:
@@ -648,3 +813,10 @@ static func _compute_map_size(data: RefCounted) -> Vector2:
 	var min_pos: Vector2 = outline[0]
 	var max_pos: Vector2 = outline[2]
 	return max_pos - min_pos
+
+
+static func _mutators_include(config: Dictionary, mutator_id: String) -> bool:
+	var raw = config.get("mutators", [])
+	if raw is Array:
+		return mutator_id in raw
+	return false

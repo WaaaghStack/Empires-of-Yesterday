@@ -23,6 +23,10 @@ enum MarineClass { ASSAULT, SUPPORT, MARKSMAN, BREACHER }
 @export var is_kia: bool = false
 @export var is_injured: bool = false
 @export var squad_id: String = "alpha"
+@export var trait_id: String = ""
+@export var loadout_preset_id: String = ""
+@export var weapon_tag: String = "kinetic"
+@export var stress: float = 0.0
 
 const INJURY_SPEED_PENALTY := 0.10
 const INJURY_FIRE_RATE_PENALTY := 0.15
@@ -131,6 +135,31 @@ func reset_for_new_run() -> void:
 	current_hp = -1
 	is_kia = false
 	is_injured = false
+	stress = 0.0
+
+
+static func apply_trait_passive(resource: SoldierResource) -> void:
+	match resource.trait_id:
+		"Steady":
+			resource.fire_rate = maxf(0.1, resource.fire_rate * 1.05)
+		"Reckless":
+			resource.damage = int(resource.damage * 1.1)
+			resource.defense = maxi(0, resource.defense - 1)
+		"Hive-Hater":
+			resource.damage = int(resource.damage * 1.08)
+		"Veteran":
+			resource.health = int(resource.health * 1.06)
+		"Ghost":
+			resource.speed = resource.speed * 1.06
+
+
+func get_stress_accuracy_penalty() -> float:
+	return clampf(stress * 0.08, 0.0, 0.35)
+
+
+func add_stress(amount: float) -> void:
+	stress = clampf(stress + amount, 0.0, 1.0)
+
 
 func duplicate_for_deploy() -> SoldierResource:
 	var copy: SoldierResource = duplicate(true) as SoldierResource
@@ -139,5 +168,9 @@ func duplicate_for_deploy() -> SoldierResource:
 	copy.is_kia = is_kia
 	copy.is_injured = is_injured
 	copy.squad_id = squad_id
+	copy.trait_id = trait_id
+	copy.loadout_preset_id = loadout_preset_id
+	copy.weapon_tag = weapon_tag
+	copy.stress = stress
 	apply_class_flavor(copy)
 	return copy

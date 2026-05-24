@@ -11,6 +11,7 @@ const CLASS_UNLOCK_COSTS: Dictionary = {
 }
 
 var command_tokens: int = 0
+var carrier_biomass: int = 0
 var total_runs: int = 0
 var total_ops_cleared: int = 0
 var best_run_depth: int = 0
@@ -51,6 +52,7 @@ func load_profile() -> void:
 		return
 	var data: Dictionary = parsed
 	command_tokens = int(data.get("command_tokens", 0))
+	carrier_biomass = int(data.get("carrier_biomass", 0))
 	total_runs = int(data.get("total_runs", 0))
 	total_ops_cleared = int(data.get("total_ops_cleared", 0))
 	best_run_depth = int(data.get("best_run_depth", 0))
@@ -71,6 +73,7 @@ func load_profile() -> void:
 func save_profile() -> void:
 	var data := {
 		"command_tokens": command_tokens,
+		"carrier_biomass": carrier_biomass,
 		"total_runs": total_runs,
 		"total_ops_cleared": total_ops_cleared,
 		"best_run_depth": best_run_depth,
@@ -167,18 +170,42 @@ func _is_better_daily_score(ops_cleared: int, total_kia: int, elapsed_seconds: f
 	return elapsed_seconds < daily_best_time
 
 
-func record_run_end(ops_cleared: int, run_won: bool) -> Dictionary:
+func record_run_end(ops_cleared: int, run_won: bool, planet_stats: Dictionary = {}) -> Dictionary:
 	total_runs += 1
 	total_ops_cleared += ops_cleared
 	best_run_depth = maxi(best_run_depth, ops_cleared)
 	var tokens_earned := maxi(1, ops_cleared) + (2 if run_won else 0)
+	if not planet_stats.is_empty():
+		tokens_earned += int(planet_stats.get("token_bonus", 0))
+		if run_won:
+			var biomass_bonus: int = int(int(planet_stats.get("legacy_biomass", 0)) / 10)
+			carrier_biomass += maxi(1, biomass_bonus)
 	command_tokens += tokens_earned
 	save_profile()
 	return {
 		"tokens_earned": tokens_earned,
 		"new_best": ops_cleared >= best_run_depth,
 		"ops_cleared": ops_cleared,
+		"carrier_biomass": carrier_biomass,
 	}
+
+
+func compute_imperial_reclamation_rank(stats: Dictionary) -> Dictionary:
+	var purge_pct: float = float(stats.get("purge_pct", 0.0))
+	var biomass: int = int(stats.get("legacy_biomass", 0))
+	var echoes: int = int(stats.get("yesterdays_echoes", 0))
+	var evo_tier: int = int(stats.get("evolution_tier", 0))
+	var score: int = int(purge_pct * 100.0) + biomass + echoes * 25 + evo_tier * 40
+	var rank := "Initiate"
+	if score >= 900:
+		rank = "Arch-Reclaimer"
+	elif score >= 650:
+		rank = "Legion Prefect"
+	elif score >= 420:
+		rank = "Sector Marshal"
+	elif score >= 220:
+		rank = "Strike Commander"
+	return {"score": score, "rank": rank, "purge_pct": purge_pct}
 
 
 func is_class_unlocked(marine_class: SoldierResource.MarineClass) -> bool:

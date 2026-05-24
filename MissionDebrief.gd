@@ -20,8 +20,8 @@ func _ready() -> void:
 
 func _populate() -> void:
 	var stats: Dictionary = RunState.last_mission_stats
-	var victory: bool = bool(stats.get("victory", false))
-	var partial: bool = bool(stats.get("partial", false))
+	var victory: bool = stats.get("victory", false)
+	var partial: bool = stats.get("partial", false)
 	if victory:
 		outcome_label.text = "OPERATION SUCCESS"
 		outcome_label.modulate = GameTheme.ACCENT_SUCCESS
@@ -73,7 +73,7 @@ func _on_end_run_pressed() -> void:
 	CombatAudio.play_ui_click(self)
 	RunLog.info("Debrief end run from op %d" % RunState.op_index)
 	var stats: Dictionary = RunState.last_mission_stats
-	var won: bool = bool(stats.get("victory", false))
+	var won: bool = stats.get("victory", false)
 	var ops_cleared: int = RunState.cleared_ops
 	if won:
 		ops_cleared += 1

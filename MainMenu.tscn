@@ -70,7 +70,18 @@ autowrap_mode = 2
 custom_minimum_size = Vector2(0, 48)
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
-text = "New Run"
+text = "New Planet Run"
+
+[node name="LegacyOpsButton" type="Button" parent="MainPanel/VBox"]
+visible = false
+custom_minimum_size = Vector2(0, 40)
+layout_mode = 2
+text = "Legacy Ops (4-op run)"
+
+[node name="MoreButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+text = "More…"
 
 [node name="ContinueButton" type="Button" parent="MainPanel/VBox"]
 custom_minimum_size = Vector2(0, 44)

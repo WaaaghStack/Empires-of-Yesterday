@@ -4,7 +4,7 @@ extends RefCounted
 const SAVE_PATH := "user://save.cfg"
 
 const FLAG_DEPLOY := "hint_deploy"
-const FLAG_PAUSE := "hint_pause"
+const FLAG_SECTOR_OVERLAY := "hint_sector_overlay"
 const FLAG_CLEAR := "hint_clear"
 const FLAG_EXTRACT := "hint_extract"
 const FLAG_EXPLORE := "hint_explore"
@@ -32,6 +32,6 @@ static func mark_seen(flag: String) -> void:
 
 static func reset_all() -> void:
 	var cfg := ConfigFile.new()
-	for flag in [FLAG_DEPLOY, FLAG_PAUSE, FLAG_CLEAR, FLAG_EXTRACT, FLAG_EXPLORE]:
+	for flag in [FLAG_DEPLOY, FLAG_SECTOR_OVERLAY, FLAG_CLEAR, FLAG_EXTRACT, FLAG_EXPLORE]:
 		cfg.set_value("tutorial", flag, false)
 	_save_cfg(cfg)

@@ -15,6 +15,7 @@ signal died(unit: SoldierUnit)
 signal combat_hit(attacker_name: String, target_name: String, damage: int, killed: bool)
 signal health_changed(unit: SoldierUnit)
 signal extracted(unit: SoldierUnit)
+signal order_path_failed(unit: SoldierUnit, room: Room)
 
 @export var soldier_name: String = "Marine"
 @export var max_health: int = 100
@@ -72,16 +73,46 @@ var fire_cooldown: float = 0.0
 var source_resource: SoldierResource
 var squad_id: String = "alpha"
 var formation_slot: int = 0
+var weapon_tag: String = "kinetic"
+var evolution_ids: Array[String] = []
+var chain_damage_pct: float = 0.0
+var biomass_on_kill: int = 0
+var stress: float = 0.0
 var task_board: MissionTaskBoardLib = null
 var all_rooms: Array = []
+var _tactical_map: Node = null
+var _ui_refresh_timer: float = 0.0
+var _separation_timer: float = 0.0
+var _path_rebuild_timer: float = 0.0
+var _path_rebuild_pending := false
+var coordinator_assigned_target: Node2D = null
+var _marine_sprites: Dictionary = {}
+var _facing_dir: String = "south"
+var path_failed := false
+var _path_fail_reported := false
+var _nav_path_preview_enabled := false
+
+const NAV_PATH_MAX_SEGMENT := 220.0
 
 const MIN_UNIT_SEPARATION := 28.0
-
+const SEPARATION_INTERVAL := 0.05
+const UI_REFRESH_INTERVAL := 0.25
+const PATH_REBUILD_INTERVAL := 1.0
 const ADRENALINE_DURATION := 6.0
 const REPAIR_AURA_DURATION := 8.0
 const REPAIR_AURA_HEAL_PER_SEC := 0.025
 const FOCUS_MARK_DURATION := 10.0
 
+const MARINE_SPRITE_PATHS: Dictionary = {
+	"north": "res://assets/Soldiers/marine_topdown_north.png",
+	"south": "res://assets/Soldiers/marine_topdown_south.png",
+	"east": "res://assets/Soldiers/marine_topdown_east.png",
+	"west": "res://assets/Soldiers/marine_topdown_west.png",
+}
+## Source art is 1536px wide; scale to ~22px collision footprint (BodyPoly was 22x22).
+const MARINE_SPRITE_TARGET_PX := 26.0
+
+@onready var body_sprite: Sprite2D = $BodySprite
 @onready var body_poly: Polygon2D = $BodyPoly
 @onready var selection_ring: Line2D = $SelectionRing
 @onready var health_bar: ProgressBar = $HealthBar
@@ -91,14 +122,74 @@ const FOCUS_MARK_DURATION := 10.0
 
 func _ready() -> void:
 	add_to_group("soldiers")
+	_load_marine_sprites()
 	update_visuals()
 	if selection_ring:
 		selection_ring.visible = false
 	if path_line:
 		path_line.visible = false
+	if body_sprite:
+		body_sprite.visible = false
+	if body_poly:
+		body_poly.visible = false
 	for label_node in [name_label, order_label, health_bar]:
 		if label_node:
 			label_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+
+func _load_marine_sprites() -> void:
+	_marine_sprites.clear()
+	for dir in MARINE_SPRITE_PATHS.keys():
+		var path: String = MARINE_SPRITE_PATHS[dir]
+		if ResourceLoader.exists(path):
+			_marine_sprites[dir] = load(path) as Texture2D
+	if body_sprite and _marine_sprites.is_empty():
+		if body_poly:
+			body_poly.visible = true
+		return
+	_apply_marine_sprite_scale()
+
+
+func _apply_marine_sprite_scale() -> void:
+	if not body_sprite:
+		return
+	var tex: Texture2D = body_sprite.texture
+	if tex == null and not _marine_sprites.is_empty():
+		tex = _marine_sprites.values()[0]
+	if tex == null:
+		return
+	var tex_w: float = float(tex.get_width())
+	if tex_w <= 0.0:
+		return
+	var s: float = MARINE_SPRITE_TARGET_PX / tex_w
+	body_sprite.scale = Vector2(s, s)
+
+
+func _reset_body_sprite_rotation() -> void:
+	if body_sprite:
+		body_sprite.rotation = 0.0
+	elif body_poly:
+		body_poly.rotation = 0.0
+
+
+func _set_facing_from_direction(direction: Vector2) -> void:
+	if direction.length_squared() < 0.0001:
+		return
+	var facing := "east" if direction.x >= 0.0 else "west"
+	if absf(direction.y) > absf(direction.x):
+		facing = "south" if direction.y >= 0.0 else "north"
+	if facing == _facing_dir:
+		return
+	_facing_dir = facing
+	if body_sprite and _marine_sprites.has(facing):
+		body_sprite.texture = _marine_sprites[facing]
+
+
+func _apply_body_tint(tint: Color) -> void:
+	if body_sprite and body_sprite.visible:
+		body_sprite.modulate = tint
+	elif body_poly:
+		body_poly.color = tint
 
 func setup_from_resource(resource: SoldierResource) -> void:
 	if not resource:
@@ -123,7 +214,95 @@ func setup_from_resource(resource: SoldierResource) -> void:
 	preferred_order = resource.default_order
 	portrait = resource.portrait
 	squad_id = resource.squad_id if resource.squad_id != "" else "alpha"
+	weapon_tag = resource.weapon_tag if resource.weapon_tag != "" else "kinetic"
+	stress = resource.stress
+	_apply_stance_modifiers()
 	update_visuals()
+
+
+func bind_tactical_map(map_node: Node) -> void:
+	_tactical_map = map_node
+
+
+func apply_coordinator_target(target: Node2D) -> void:
+	coordinator_assigned_target = target
+	if is_searching:
+		return
+	if current_order not in [
+		OrderTypeLib.Type.SEARCH_DESTROY,
+		OrderTypeLib.Type.CLEAR,
+		OrderTypeLib.Type.DEFEND,
+		OrderTypeLib.Type.EXPLORE,
+		OrderTypeLib.Type.EXTRACT,
+	]:
+		return
+	if target and _target_is_alive(target):
+		current_target = target
+		if current_order == OrderTypeLib.Type.SEARCH_DESTROY:
+			if target is EnemyUnit and target.home_room:
+				order_room = target.home_room
+			elif target is Hive and target.home_room:
+				order_room = target.home_room
+	elif current_target and not _target_is_alive(current_target):
+		current_target = null
+
+
+func _apply_stance_modifiers() -> void:
+	var stance := RunState.get_squad_stance(squad_id) if RunState.run_active else "balanced"
+	match stance:
+		"aggressive":
+			speed *= 1.08
+			fire_rate *= 1.05
+		"cautious":
+			speed *= 0.94
+			defense += 1
+
+
+func apply_evolution_upgrade(upgrade) -> void:
+	if upgrade == null or upgrade.id in evolution_ids:
+		return
+	evolution_ids.append(upgrade.id)
+	damage = maxi(1, int(damage * upgrade.damage_mult))
+	fire_rate = maxf(0.1, fire_rate * upgrade.fire_rate_mult)
+	max_health = maxi(1, int(max_health * upgrade.health_mult))
+	current_health = mini(current_health, max_health)
+	defense = maxi(0, defense + upgrade.defense_bonus)
+	speed = maxf(10.0, speed * upgrade.speed_mult)
+	chain_damage_pct = maxf(chain_damage_pct, upgrade.chain_damage_pct)
+	biomass_on_kill += upgrade.biomass_on_kill
+	if upgrade.tier >= 2:
+		var tint := GameTheme.class_color(marine_class)
+		if squad_id != "":
+			tint = tint.lerp(GameTheme.squad_color(squad_id), 0.35)
+		_apply_body_tint(tint.lerp(Color(0.85, 0.55, 1.0), 0.35))
+	update_visuals()
+
+
+func get_effective_damage() -> int:
+	var mult := 1.0
+	if source_resource:
+		mult -= source_resource.get_stress_accuracy_penalty()
+	return maxi(1, int(damage * mult))
+
+
+func hive_damage_multiplier(target: Node2D) -> float:
+	if target is Hive and source_resource and source_resource.trait_id == "Hive-Hater":
+		return 1.35
+	return 1.0
+
+
+func get_effective_damage_against(target: Node2D) -> int:
+	var final_damage := int(get_effective_damage() * hive_damage_multiplier(target))
+	if target is Hive and source_resource and source_resource.trait_id == "Hive-Hater":
+		final_damage = maxi(1, int(float(final_damage) * 1.2))
+	return final_damage
+
+
+func add_stress(amount: float) -> void:
+	stress = clampf(stress + amount, 0.0, 1.0)
+	if source_resource:
+		source_resource.stress = stress
+
 
 func update_visuals() -> void:
 	if name_label:
@@ -131,19 +310,23 @@ func update_visuals() -> void:
 	if health_bar:
 		health_bar.max_value = max_health
 		health_bar.value = current_health
-	if body_poly:
-		var tint := GameTheme.class_color(marine_class)
-		if squad_id != "":
-			tint = tint.lerp(GameTheme.squad_color(squad_id), 0.35)
-		body_poly.color = tint
-	if order_label:
-		order_label.text = OrderTypeLib.get_label(current_order)
+	var tint := GameTheme.class_color(marine_class)
+	if squad_id != "":
+		tint = tint.lerp(GameTheme.squad_color(squad_id), 0.35)
+	_apply_body_tint(tint)
+	if body_sprite and _marine_sprites.has(_facing_dir):
+		body_sprite.texture = _marine_sprites[_facing_dir]
+		body_sprite.visible = is_alive and not is_extracted
+	_update_trust_status_label()
 	_update_health_color()
 
 func set_selected(now_selected: bool) -> void:
 	is_selected = now_selected
+	if not now_selected:
+		_nav_path_preview_enabled = false
 	if selection_ring:
 		selection_ring.visible = now_selected
+	_sync_navigation_path_line()
 
 func issue_order(order: OrderTypeLib.Type, target_pos: Vector2, room: Room = null) -> void:
 	current_order = order
@@ -153,6 +336,7 @@ func issue_order(order: OrderTypeLib.Type, target_pos: Vector2, room: Room = nul
 	current_target = null
 	awaiting_at_destination = false
 	is_searching = false
+	_reset_body_sprite_rotation()
 	search_timer = 0.0
 	has_searched_room = false
 	is_extracting = false
@@ -185,15 +369,12 @@ func issue_order(order: OrderTypeLib.Type, target_pos: Vector2, room: Room = nul
 		_advance_explore()
 		_update_explore_label()
 	else:
-		_rebuild_corridor_path()
-	if order_label:
-		if order == OrderTypeLib.Type.SEARCH_DESTROY:
-			_update_snd_label()
-		elif order == OrderTypeLib.Type.EXPLORE:
-			_update_explore_label()
-		else:
-			order_label.text = OrderTypeLib.get_label(order)
-	_update_path_line(true)
+		_request_path_rebuild(true)
+	path_failed = false
+	_path_fail_reported = false
+	_evaluate_path_availability()
+	_update_trust_status_label()
+	_notify_path_failure_if_needed()
 	order_changed.emit(self, order)
 
 func cancel_order() -> void:
@@ -203,6 +384,7 @@ func cancel_order() -> void:
 	awaiting_at_destination = false
 	is_moving = false
 	is_searching = false
+	_reset_body_sprite_rotation()
 	has_searched_room = false
 	is_extracting = false
 	extract_timer = 0.0
@@ -217,8 +399,10 @@ func cancel_order() -> void:
 	_pathing_to_room = null
 	if path_line:
 		path_line.visible = false
-	if order_label:
-		order_label.text = "Idle"
+	path_failed = false
+	_path_fail_reported = false
+	_update_trust_status_label()
+	_sync_navigation_path_line()
 
 func _mission_paused() -> bool:
 	return MissionStateLib.is_unit_actions_frozen(self)
@@ -228,7 +412,6 @@ func _process(delta: float) -> void:
 		return
 	fire_cooldown = max(0.0, fire_cooldown - delta)
 	ability_timer = max(0.0, ability_timer - delta)
-	MissionStateLib.tick_squad_mark(delta)
 	if adrenaline_timer > 0.0:
 		adrenaline_timer = max(0.0, adrenaline_timer - delta)
 		damage = int(base_damage * 1.2)
@@ -245,34 +428,116 @@ func _process(delta: float) -> void:
 		speed = source_resource.get_effective_speed() * 1.35
 	elif source_resource:
 		speed = source_resource.get_effective_speed()
-	_refresh_combat_target()
 	_process_search(delta)
 	_process_movement(delta)
 	_process_combat()
 	_process_extract(delta)
 	_process_order_behavior()
-	_apply_unit_separation(delta)
-	_update_snd_label()
-	_update_explore_label()
-	_update_path_line(false)
+	if _is_near_camera():
+		_separation_timer += delta
+		if _separation_timer >= SEPARATION_INTERVAL:
+			_separation_timer = 0.0
+			_apply_unit_separation()
+	_ui_refresh_timer += delta
+	if _ui_refresh_timer >= UI_REFRESH_INTERVAL:
+		_ui_refresh_timer = 0.0
+		_update_snd_label()
+		_update_explore_label()
+		_update_trust_status_label()
+		_sync_navigation_path_line()
 
-func _refresh_combat_target() -> void:
-	if current_order == OrderTypeLib.Type.SEARCH_DESTROY:
-		if current_target and _target_is_alive(current_target) and _can_see_combat_target(current_target):
-			return
-		current_target = _find_nearest_visible_enemy()
-		if not current_target:
-			current_target = _find_nearest_attackable_hive()
-		if current_target is EnemyUnit and current_target.home_room:
-			order_room = current_target.home_room
-		elif current_target is Hive and current_target.home_room:
-			order_room = current_target.home_room
-	elif current_order == OrderTypeLib.Type.CLEAR and order_room and has_searched_room:
-		current_target = _find_priority_combat_target_in_room()
-	elif current_order == OrderTypeLib.Type.DEFEND and order_room and awaiting_at_destination:
-		current_target = _find_defend_combat_target()
-	elif current_target and not _target_is_alive(current_target):
-		current_target = null
+func get_trust_status() -> String:
+	if not is_alive:
+		return "KIA"
+	if is_extracted:
+		return "EXTRACTED"
+	if is_extracting:
+		return "EXTRACTING"
+	if is_searching:
+		return "SEARCHING"
+	if _is_engaged():
+		return "ENGAGED"
+	if waiting_at_door and is_instance_valid(waiting_at_door):
+		if waiting_at_door.has_method("blocks_travel") and waiting_at_door.blocks_travel():
+			return "BLOCKED"
+	if path_failed and is_moving:
+		return "NO PATH"
+	if awaiting_at_destination and current_order != OrderTypeLib.Type.NONE:
+		return "HOLDING"
+	if is_moving and order_room:
+		return "MOVING"
+	if is_moving:
+		return "MOVING"
+	if current_order != OrderTypeLib.Type.NONE:
+		return OrderTypeLib.get_label(current_order)
+	return "IDLE"
+
+func _is_engaged() -> bool:
+	if not current_target or not _target_is_alive(current_target):
+		return false
+	if not _can_see_combat_target(current_target):
+		return false
+	if position.distance_to(current_target.position) <= attack_range * 1.05:
+		return true
+	return fire_cooldown < fire_rate * 0.85 and fire_cooldown > 0.0
+
+func _update_trust_status_label() -> void:
+	if not order_label:
+		return
+	var status := get_trust_status()
+	match status:
+		"ENGAGED":
+			order_label.text = "ENGAGED"
+		"BLOCKED":
+			order_label.text = "BLOCKED — door"
+		"NO PATH":
+			order_label.text = "NO PATH"
+		"HOLDING":
+			var order_name := OrderTypeLib.get_label(current_order)
+			if order_room:
+				order_label.text = "HOLDING — %s" % order_room.room_name
+			else:
+				order_label.text = "HOLDING — %s" % order_name
+		"MOVING":
+			if order_room:
+				order_label.text = "MOVING → %s" % order_room.room_name
+			else:
+				order_label.text = "MOVING"
+		"SEARCHING":
+			order_label.text = "Searching"
+		"EXTRACTING":
+			order_label.text = "Extracting"
+		"EXTRACTED":
+			order_label.text = "Extracted"
+		"KIA":
+			order_label.text = "KIA"
+		_:
+			if current_order == OrderTypeLib.Type.SEARCH_DESTROY:
+				_update_snd_label()
+			elif current_order == OrderTypeLib.Type.EXPLORE:
+				_update_explore_label()
+			elif current_order != OrderTypeLib.Type.NONE:
+				order_label.text = OrderTypeLib.get_label(current_order)
+			else:
+				order_label.text = "Idle"
+
+func _evaluate_path_availability() -> void:
+	path_failed = false
+	if not is_moving or is_searching or not order_room:
+		return
+	var my_room := _room_containing(position)
+	if my_room == order_room:
+		return
+	if not _needs_corridor_path():
+		return
+	if path_queue.is_empty():
+		path_failed = true
+
+func _notify_path_failure_if_needed() -> void:
+	if not path_failed or _path_fail_reported or not order_room:
+		return
+	_path_fail_reported = true
+	order_path_failed.emit(self, order_room)
 
 func _get_movement_target() -> Vector2:
 	if current_order == OrderTypeLib.Type.DEFEND and awaiting_at_destination:
@@ -334,18 +599,7 @@ func _move_along_path(delta: float, waypoint: Vector2) -> void:
 		return
 	var before: Vector2 = position
 	var step: float = speed * delta
-	if _is_in_corridor_at(position) or _is_in_corridor_at(waypoint):
-		if absf(to_waypoint.x) >= absf(to_waypoint.y):
-			position.x += signf(to_waypoint.x) * minf(absf(to_waypoint.x), step)
-		else:
-			position.y += signf(to_waypoint.y) * minf(absf(to_waypoint.y), step)
-	elif _room_containing(position):
-		position += to_waypoint.normalized() * minf(to_waypoint.length(), step)
-	else:
-		if absf(to_waypoint.x) >= absf(to_waypoint.y):
-			position.x += signf(to_waypoint.x) * minf(absf(to_waypoint.x), step)
-		else:
-			position.y += signf(to_waypoint.y) * minf(absf(to_waypoint.y), step)
+	position += to_waypoint.normalized() * minf(to_waypoint.length(), step)
 	if not _is_walkable(position):
 		position = before
 		return
@@ -359,7 +613,7 @@ func _rebuild_path_to_room(room: Room) -> void:
 	order_room = room
 	order_target = room.position
 	_pathing_to_room = room
-	_rebuild_corridor_path()
+	_request_path_rebuild(true)
 
 func _get_stop_distance() -> float:
 	if current_order == OrderTypeLib.Type.DEFEND:
@@ -391,7 +645,7 @@ func _apply_objective_doctrine(start_room: Room = null) -> void:
 				order_room = hold
 				order_target = hold.get_formation_position(formation_slot, 4, 0)
 				defend_anchor = order_target
-				_rebuild_corridor_path()
+				_request_path_rebuild(true)
 			else:
 				current_order = OrderTypeLib.Type.SEARCH_DESTROY
 				_build_search_destroy_queue(start_room)
@@ -428,24 +682,39 @@ func _rooms_source() -> Array:
 	return get_tree().get_nodes_in_group("rooms")
 
 
-func _apply_unit_separation(_delta: float) -> void:
+func _is_near_camera() -> bool:
+	if not _tactical_map or not _tactical_map.get("map_camera"):
+		return true
+	var camera: Camera2D = _tactical_map.map_camera
+	if not camera:
+		return true
+	var zoom := maxf(camera.zoom.x, 0.01)
+	return position.distance_to(camera.position) <= 900.0 / zoom
+
+
+func _apply_unit_separation() -> void:
 	var my_room := _room_containing(position)
 	if not my_room:
 		return
-	for node in get_tree().get_nodes_in_group("soldiers"):
-		if node == self or not node is SoldierUnit:
+	var mates: Array = []
+	if _tactical_map and _tactical_map.has_method("get_squad_mates"):
+		mates = _tactical_map.get_squad_mates(squad_id, self)
+	else:
+		for node in get_tree().get_nodes_in_group("soldiers"):
+			if node is SoldierUnit and (node as SoldierUnit).squad_id == squad_id and node != self:
+				mates.append(node)
+	var sep_sq := MIN_UNIT_SEPARATION * MIN_UNIT_SEPARATION
+	for other in mates:
+		if not other is SoldierUnit or not other.is_alive or other.is_extracted:
 			continue
-		var other: SoldierUnit = node as SoldierUnit
-		if not other.is_alive or other.is_extracted:
+		var dist_sq: float = position.distance_squared_to(other.position)
+		if dist_sq >= sep_sq or dist_sq < 0.0001:
 			continue
-		if other.squad_id != squad_id:
-			continue
-		var dist: float = position.distance_to(other.position)
-		if dist < MIN_UNIT_SEPARATION and dist > 0.01:
-			var push: Vector2 = (position - other.position).normalized() * (MIN_UNIT_SEPARATION - dist) * 0.5
-			var candidate: Vector2 = position + push
-			if my_room.contains_local_point(candidate, 0.0):
-				position = candidate
+		var dist: float = sqrt(dist_sq)
+		var push: Vector2 = (position - other.position).normalized() * (MIN_UNIT_SEPARATION - dist) * 0.5
+		var candidate: Vector2 = position + push
+		if my_room.contains_local_point(candidate, 0.0):
+			position = candidate
 
 
 func _build_search_destroy_queue(start_room: Room = null) -> void:
@@ -482,6 +751,8 @@ func _build_search_destroy_queue(start_room: Room = null) -> void:
 	snd_index = 0
 
 func _count_living_enemies() -> int:
+	if _tactical_map and _tactical_map.get("entity_index"):
+		return _tactical_map.entity_index.living_enemy_count()
 	var count: int = 0
 	for node in get_tree().get_nodes_in_group("enemies"):
 		if node is EnemyUnit and node.is_alive:
@@ -494,7 +765,7 @@ func _any_living_enemies() -> bool:
 func _next_hostile_room() -> Room:
 	var nearest: Room = null
 	var nearest_dist: float = INF
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and not node.is_spawn_room and node.has_living_enemies():
 			var dist: float = position.distance_to(node.position)
 			if dist < nearest_dist:
@@ -525,14 +796,14 @@ func _update_snd_label() -> void:
 
 func _build_explore_queue() -> void:
 	explore_rooms.clear()
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and not node.is_spawn_room and not node.is_searched:
 			explore_rooms.append(node)
 	explore_rooms.sort_custom(func(a, b): return position.distance_to(a.position) < position.distance_to(b.position))
 
 func _count_unexplored_rooms() -> int:
 	var count: int = 0
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and not node.is_spawn_room and not node.is_searched:
 			count += 1
 	return count
@@ -556,7 +827,7 @@ func _assign_explore_room(room: Room) -> void:
 	awaiting_at_destination = false
 	is_moving = true
 	_pathing_to_room = null
-	_rebuild_corridor_path()
+	_request_path_rebuild(true)
 
 func _advance_explore() -> void:
 	while explore_index < explore_rooms.size():
@@ -593,7 +864,7 @@ func _assign_search_destroy_room(room: Room) -> void:
 	awaiting_at_destination = false
 	is_moving = true
 	_pathing_to_room = null
-	_rebuild_corridor_path()
+	_request_path_rebuild(true)
 
 func _advance_search_destroy() -> void:
 	if not _any_living_enemies():
@@ -629,16 +900,46 @@ func _advance_search_destroy() -> void:
 	_update_snd_label()
 
 func _get_visible_rooms() -> Array[Room]:
+	if not all_rooms.is_empty():
+		return all_rooms
 	var room_list: Array[Room] = []
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room:
 			room_list.append(node)
 	return room_list
 
+
+func _get_doors() -> Array:
+	if _tactical_map and _tactical_map.get("doors"):
+		var cached: Array = _tactical_map.doors
+		if not cached.is_empty():
+			return cached
+	return get_tree().get_nodes_in_group("doors")
+
+
+func _living_enemies_source() -> Array:
+	if _tactical_map and _tactical_map.get("entity_index"):
+		return _tactical_map.entity_index.get_all_living_enemies()
+	var result: Array = []
+	for node in get_tree().get_nodes_in_group("enemies"):
+		if node is EnemyUnit and node.is_alive:
+			result.append(node)
+	return result
+
+
+func _attackable_hives_source() -> Array:
+	if _tactical_map and _tactical_map.get("active_hives"):
+		return _tactical_map.active_hives
+	var result: Array = []
+	for node in get_tree().get_nodes_in_group("hives"):
+		if node is Hive:
+			result.append(node)
+	return result
+
 func _can_see_enemy(enemy: EnemyUnit) -> bool:
 	if not enemy or not enemy.is_alive:
 		return false
-	var door_nodes: Array = get_tree().get_nodes_in_group("doors")
+	var door_nodes: Array = _get_doors()
 	return LineOfSightLib.has_line_of_sight(position, enemy.position, _get_visible_rooms(), door_nodes)
 
 func _target_is_alive(target: Node2D) -> bool:
@@ -650,7 +951,7 @@ func _can_see_combat_target(target: Node2D) -> bool:
 	if target is EnemyUnit:
 		return _can_see_enemy(target as EnemyUnit)
 	if target is Hive:
-		var door_nodes: Array = get_tree().get_nodes_in_group("doors")
+		var door_nodes: Array = _get_doors()
 		return LineOfSightLib.has_line_of_sight(position, target.position, _get_visible_rooms(), door_nodes)
 	return false
 
@@ -664,9 +965,14 @@ func _combat_target_name(target: Node2D) -> String:
 func _hive_in_room(room: Room) -> Hive:
 	if not room:
 		return null
-	var hive = room.get_meta("hive", null)
-	if hive is Hive and hive.is_attackable():
-		return hive
+	if _tactical_map and _tactical_map.get("entity_index"):
+		var indexed: Hive = _tactical_map.entity_index.get_hive_in_room(room)
+		if indexed:
+			return indexed
+	if room.has_method("get_attached_hive"):
+		var hive: Hive = room.get_attached_hive()
+		if hive and hive.is_attackable():
+			return hive
 	return null
 
 func _find_attackable_hive_in_room(room: Room) -> Hive:
@@ -678,7 +984,7 @@ func _find_attackable_hive_in_room(room: Room) -> Hive:
 func _find_nearest_attackable_hive() -> Hive:
 	var nearest: Hive = null
 	var nearest_dist: float = INF
-	for node in get_tree().get_nodes_in_group("hives"):
+	for node in _attackable_hives_source():
 		if node is Hive and node.is_attackable() and _can_see_combat_target(node):
 			var dist: float = position.distance_to(node.position)
 			if dist < nearest_dist:
@@ -694,30 +1000,44 @@ func _has_spotted_enemies_in_room() -> bool:
 			return true
 	return false
 
-func _rebuild_corridor_path() -> void:
+func _request_path_rebuild(force: bool = false) -> void:
+	_path_rebuild_pending = true
+	if force:
+		_path_rebuild_timer = 0.0
+	if force or _path_rebuild_timer <= 0.0:
+		_rebuild_corridor_path_now()
+
+
+func _rebuild_corridor_path_now() -> void:
 	var end_pos: Vector2 = order_target
 	if order_room:
-		end_pos = order_room.position
+		end_pos = order_room.get_formation_position(formation_slot, 4, 0)
 	path_queue.clear()
 	path_index = 0
 	_pathing_to_room = null
+	path_failed = false
 	var graph: RefCounted = _get_path_graph()
 	if graph:
 		var from_room := _room_containing(position)
 		var target_room: Room = order_room if order_room else from_room
-		var blocked: Array[String] = []
+		var blocked: Array[String] = _collect_blocked_path_nodes()
 		for point in graph.find_path(position, end_pos, blocked, from_room, target_room):
 			path_queue.append(point)
 	_pathing_to_room = order_room
 	while path_index < path_queue.size() - 1 and position.distance_to(path_queue[path_index]) < WAYPOINT_RADIUS:
 		path_index += 1
+	_evaluate_path_availability()
+	_notify_path_failure_if_needed()
 	_prime_doors_on_route()
+	_path_rebuild_pending = false
+	_path_rebuild_timer = PATH_REBUILD_INTERVAL
+	_sync_navigation_path_line()
 
 func _prime_doors_on_route() -> void:
 	if path_queue.is_empty():
 		return
 	var focus: Vector2 = path_queue[path_index] if path_index < path_queue.size() else order_target
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if not node.has_method("request_open"):
 			continue
 		var door_pos: Vector2 = (node as Node2D).position
@@ -727,7 +1047,7 @@ func _prime_doors_on_route() -> void:
 
 func _collect_blocked_path_nodes() -> Array[String]:
 	var blocked: Array[String] = []
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if node.has_method("get_blocked_path_nodes"):
 			for node_id in node.get_blocked_path_nodes():
 				if node_id not in blocked:
@@ -735,12 +1055,14 @@ func _collect_blocked_path_nodes() -> Array[String]:
 	return blocked
 
 func _room_containing(pos: Vector2) -> Room:
-	for node in get_tree().get_nodes_in_group("rooms"):
+	for node in _rooms_source():
 		if node is Room and node.contains_local_point(pos, 10.0):
 			return node
 	return null
 
 func _get_path_graph() -> RefCounted:
+	if _tactical_map and _tactical_map.get("path_graph"):
+		return _tactical_map.path_graph as RefCounted
 	for node in get_tree().get_nodes_in_group("tactical_map"):
 		return node.path_graph as RefCounted
 	return null
@@ -749,11 +1071,14 @@ func _process_search(delta: float) -> void:
 	if not is_searching:
 		return
 	search_timer = max(0.0, search_timer - delta)
-	if body_poly:
+	if body_sprite and body_sprite.visible:
+		body_sprite.rotation = sin((SEARCH_DURATION - search_timer) * 5.0) * 0.12
+	elif body_poly:
 		body_poly.rotation = sin((SEARCH_DURATION - search_timer) * 5.0) * 0.45
 	var spotted := _find_visible_enemy_in_room()
 	if spotted:
 		is_searching = false
+		_reset_body_sprite_rotation()
 		has_searched_room = true
 		current_target = spotted
 		is_moving = true
@@ -764,6 +1089,7 @@ func _process_search(delta: float) -> void:
 	if search_timer > 0.0:
 		return
 	is_searching = false
+	_reset_body_sprite_rotation()
 	has_searched_room = true
 	awaiting_at_destination = false
 	if order_label:
@@ -812,16 +1138,24 @@ func _process_movement(delta: float) -> void:
 		return
 	if current_order == OrderTypeLib.Type.DEFEND and awaiting_at_destination:
 		return
-	if _needs_corridor_path() and path_queue.is_empty():
-		_rebuild_corridor_path()
+	_path_rebuild_timer = maxf(0.0, _path_rebuild_timer - delta)
+	if _needs_corridor_path():
+		if _path_rebuild_pending or path_queue.is_empty():
+			if _path_rebuild_timer <= 0.0:
+				_rebuild_corridor_path_now()
 		if path_queue.is_empty():
+			_evaluate_path_availability()
+			_update_trust_status_label()
+			_notify_path_failure_if_needed()
 			return
 	if waiting_at_door:
 		if waiting_at_door.blocks_travel():
 			waiting_at_door.request_open()
+			_update_trust_status_label()
 			return
 		waiting_at_door = null
-		_rebuild_corridor_path()
+		_path_rebuild_pending = true
+		_update_trust_status_label()
 
 	if _should_chase_in_room():
 		_move_direct_to_target(delta)
@@ -835,6 +1169,7 @@ func _process_movement(delta: float) -> void:
 	var to_waypoint: Vector2 = waypoint - position
 	if to_waypoint.length() <= WAYPOINT_RADIUS:
 		path_index += 1
+		_sync_navigation_path_line()
 		if path_index >= path_queue.size():
 			_on_reached_destination()
 		return
@@ -843,9 +1178,11 @@ func _process_movement(delta: float) -> void:
 	if blocking_door:
 		blocking_door.request_open()
 		waiting_at_door = blocking_door
+		_update_trust_status_label()
 		return
 
 	_move_along_path(delta, waypoint)
+	_evaluate_path_availability()
 
 func _current_waypoint() -> Vector2:
 	if path_index >= path_queue.size():
@@ -885,7 +1222,7 @@ func _find_blocking_door_ahead(waypoint: Vector2) -> Node2D:
 	var move_dir: Vector2 = waypoint - position
 	if move_dir.length() < 0.001:
 		return null
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if not node.has_method("blocks_travel"):
 			continue
 		if node.blocks_travel():
@@ -898,25 +1235,50 @@ func _find_blocking_door_ahead(waypoint: Vector2) -> Node2D:
 	return null
 
 func _update_facing(direction: Vector2) -> void:
-	if direction.length() > 0.01 and body_poly:
-		body_poly.rotation = direction.angle()
+	if direction.length() > 0.01:
+		_set_facing_from_direction(direction)
 
-func _update_path_line(force_visible: bool) -> void:
+func _update_path_line(_force_visible: bool = false) -> void:
+	_sync_navigation_path_line()
+
+
+func _sync_navigation_path_line() -> void:
 	if not path_line:
 		return
-	if not force_visible and not is_moving:
+	if (
+		not _nav_path_preview_enabled
+		or path_queue.is_empty()
+		or path_failed
+		or not is_moving
+		or is_searching
+		or _should_chase_in_room()
+	):
 		path_line.visible = false
 		return
-	var points := PackedVector2Array([Vector2.ZERO])
-	if _should_chase_in_room():
-		points.append(_get_movement_target() - position)
-	elif path_queue.size() > path_index:
-		for i in range(path_index, path_queue.size()):
-			points.append(path_queue[i] - position)
-	else:
-		points.append(_get_movement_target() - position)
-	path_line.points = points
-	path_line.visible = points.size() > 1
+	var pts := PackedVector2Array()
+	pts.append(Vector2.ZERO)
+	var prev := Vector2.ZERO
+	for i in range(path_index, path_queue.size()):
+		var local_pt := path_queue[i] - position
+		if prev.distance_to(local_pt) > NAV_PATH_MAX_SEGMENT:
+			path_line.visible = false
+			return
+		pts.append(local_pt)
+		prev = local_pt
+	if pts.size() < 2:
+		path_line.visible = false
+		return
+	path_line.points = pts
+	path_line.visible = true
+
+
+func set_navigation_path_visible(visible: bool) -> void:
+	_nav_path_preview_enabled = visible
+	if not visible:
+		if path_line:
+			path_line.visible = false
+		return
+	_sync_navigation_path_line()
 
 func _process_combat() -> void:
 	if is_searching:
@@ -928,6 +1290,7 @@ func _process_combat() -> void:
 	var target := _pick_combat_target()
 	if not target:
 		return
+	_update_trust_status_label()
 	if position.distance_to(target.position) > attack_range:
 		if _should_chase_in_room():
 			is_moving = true
@@ -940,19 +1303,26 @@ func _process_combat() -> void:
 				awaiting_at_destination = false
 		return
 	_face_target(target)
+	_update_trust_status_label()
 	_attack_target(target)
 
 func _pick_combat_target() -> Node2D:
+	var marked := _find_squad_marked_target()
+	if marked:
+		return marked
+	if coordinator_assigned_target and _target_is_alive(coordinator_assigned_target):
+		if _can_see_combat_target(coordinator_assigned_target):
+			return coordinator_assigned_target
 	if current_target and _target_is_alive(current_target):
 		return current_target
-	return _find_combat_target()
+	return coordinator_assigned_target
 
 func _face_target(target: Node2D) -> void:
-	if not target or not body_poly:
+	if not target:
 		return
 	var direction := target.position - position
 	if direction.length() > 0.01:
-		body_poly.rotation = direction.angle()
+		_set_facing_from_direction(direction)
 
 func _should_engage() -> bool:
 	return current_order in [
@@ -966,7 +1336,7 @@ func _should_engage() -> bool:
 func _find_nearest_visible_enemy() -> EnemyUnit:
 	var nearest: EnemyUnit = null
 	var nearest_dist: float = INF
-	for node in get_tree().get_nodes_in_group("enemies"):
+	for node in _living_enemies_source():
 		if node is EnemyUnit and node.is_alive and _can_see_enemy(node):
 			var dist: float = position.distance_to(node.position)
 			if dist < nearest_dist:
@@ -1065,14 +1435,14 @@ func _find_combat_target() -> Node2D:
 			return room_target
 	var nearest: Node2D = null
 	var nearest_dist: float = attack_range
-	for node in get_tree().get_nodes_in_group("enemies"):
+	for node in _living_enemies_source():
 		if node is EnemyUnit and node.is_alive and _can_see_enemy(node):
 			var dist: float = position.distance_to(node.position)
 			if dist > attack_range or dist >= nearest_dist:
 				continue
 			nearest_dist = dist
 			nearest = node
-	for node in get_tree().get_nodes_in_group("hives"):
+	for node in _attackable_hives_source():
 		if node is Hive and node.is_attackable() and _can_see_combat_target(node):
 			var dist: float = position.distance_to(node.position)
 			if dist > attack_range or dist >= nearest_dist:
@@ -1084,12 +1454,12 @@ func _find_combat_target() -> Node2D:
 func _attack_target(target: Node2D) -> void:
 	if fire_cooldown > 0.0 or not _target_is_alive(target):
 		return
-	var final_damage := damage
+	var final_damage := get_effective_damage_against(target)
 	if marine_class == SoldierResource.MarineClass.MARKSMAN and target.position.distance_to(position) > attack_range * 0.65:
-		final_damage = int(damage * 1.35)
+		final_damage = int(final_damage * 1.35)
 	var room_has_hostiles := order_room and (order_room.has_living_enemies() or _hive_in_room(order_room) != null)
 	if marine_class == SoldierResource.MarineClass.BREACHER and room_has_hostiles:
-		final_damage = int(damage * 1.2)
+		final_damage = int(final_damage * 1.2)
 	var was_alive := _target_is_alive(target)
 	if target is EnemyUnit:
 		(target as EnemyUnit).take_damage(final_damage, self)
@@ -1097,16 +1467,41 @@ func _attack_target(target: Node2D) -> void:
 		(target as Hive).take_damage(final_damage, self)
 	else:
 		return
+	_report_damage_tag(final_damage)
 	fire_cooldown = 1.0 / fire_rate
 	CombatFxLib.spawn_shot(self, target.global_position, Color(0.45, 0.85, 1.0, 0.95), 2.5)
 	CombatFxLib.spawn_impact(target, Color(1.0, 0.35, 0.25, 0.85))
 	_flash_attack()
+	var killed := was_alive and not _target_is_alive(target)
 	combat_hit.emit(
 		soldier_name,
 		_combat_target_name(target),
 		final_damage,
-		was_alive and not _target_is_alive(target)
+		killed
 	)
+	if killed:
+		_on_kill_target(target)
+
+
+func _report_damage_tag(amount: int) -> void:
+	var map := get_tree().get_first_node_in_group("tactical_map")
+	if map and map.has_method("register_swarm_damage"):
+		map.register_swarm_damage(weapon_tag, amount)
+
+
+func _on_kill_target(target: Node2D) -> void:
+	if biomass_on_kill > 0 and RunState.run_active:
+		RunState.award_biomass(biomass_on_kill)
+	if chain_damage_pct > 0.0 and target is EnemyUnit:
+		var splash := int(float(get_effective_damage()) * chain_damage_pct)
+		for node in _living_enemies_source():
+			if node is EnemyUnit and node != target and node.is_alive:
+				if node.position.distance_to(target.position) < attack_range * 0.5:
+					(node as EnemyUnit).take_damage(splash, self)
+					break
+	var stance := RunState.get_squad_stance(squad_id) if RunState.run_active else "balanced"
+	var stress_gain := 0.03 if stance == "aggressive" else 0.015
+	add_stress(stress_gain)
 
 func _process_order_behavior() -> void:
 	if current_order == OrderTypeLib.Type.SEARCH_DESTROY:
@@ -1135,7 +1530,7 @@ func _process_order_behavior() -> void:
 			is_moving = true
 			if path_queue.is_empty():
 				_pathing_to_room = null
-				_rebuild_corridor_path()
+				_request_path_rebuild(true)
 		elif order_room and has_searched_room and order_room.has_living_enemies() and not is_searching and not _has_spotted_enemies_in_room():
 			is_searching = true
 			search_timer = SEARCH_DURATION * 0.65
@@ -1243,6 +1638,8 @@ func _complete_extraction() -> void:
 	current_target = null
 	if path_line:
 		path_line.visible = false
+	if body_sprite:
+		body_sprite.visible = false
 	if body_poly:
 		body_poly.visible = false
 	if selection_ring:
@@ -1263,7 +1660,16 @@ func _find_squad_marked_target() -> Node2D:
 func _tick_repair_aura(delta: float) -> void:
 	if not repair_aura_room:
 		return
-	for node in get_tree().get_nodes_in_group("soldiers"):
+	var allies: Array = []
+	if _tactical_map and _tactical_map.get("entity_index"):
+		var idx = _tactical_map.entity_index
+		if idx:
+			allies = idx.get_soldiers_in_room(repair_aura_room)
+	else:
+		for node in get_tree().get_nodes_in_group("soldiers"):
+			if node is SoldierUnit and node.is_alive:
+				allies.append(node)
+	for node in allies:
 		if node is SoldierUnit and node.is_alive:
 			if repair_aura_room.contains_local_point(node.position, 12.0):
 				node.heal(maxi(1, int(node.max_health * REPAIR_AURA_HEAL_PER_SEC * delta)))
@@ -1343,7 +1749,7 @@ func use_ability(_allies: Array[SoldierUnit]) -> bool:
 
 func _breach_nearby_doors(radius: float) -> int:
 	var breached := 0
-	for node in get_tree().get_nodes_in_group("doors"):
+	for node in _get_doors():
 		if not node.has_method("force_open") or not node.has_method("blocks_travel"):
 			continue
 		if not node.blocks_travel():
@@ -1356,7 +1762,7 @@ func _breach_nearby_doors(radius: float) -> int:
 	if breached > 0:
 		waiting_at_door = null
 		if not path_queue.is_empty():
-			_rebuild_corridor_path()
+			_request_path_rebuild(true)
 	return breached
 
 func heal(amount: int) -> void:
@@ -1384,9 +1790,15 @@ func take_damage(amount: int, _from: Node2D = null) -> void:
 
 func _on_death() -> void:
 	is_alive = false
+	coordinator_assigned_target = null
+	process_mode = Node.PROCESS_MODE_DISABLED
+	set_process(false)
+	set_physics_process(false)
 	cancel_order()
 	CombatFxLib.spawn_death(self)
-	if body_poly:
+	if body_sprite:
+		body_sprite.modulate = Color(0.35, 0.35, 0.35, 0.6)
+	elif body_poly:
 		body_poly.modulate = Color(0.35, 0.35, 0.35, 0.6)
 	if name_label:
 		name_label.text = soldier_name + " (KIA)"
@@ -1404,10 +1816,11 @@ func _update_health_color() -> void:
 		health_bar.modulate = GameTheme.ACCENT_DANGER
 
 func _flash_attack() -> void:
-	if body_poly:
+	var flash_target: CanvasItem = body_sprite if body_sprite and body_sprite.visible else body_poly
+	if flash_target:
 		var tween := create_tween()
-		tween.tween_property(body_poly, "modulate", Color(1.3, 1.3, 1.3), 0.05)
-		tween.tween_property(body_poly, "modulate", Color.WHITE, 0.08)
+		tween.tween_property(flash_target, "modulate", Color(1.3, 1.3, 1.3), 0.05)
+		tween.tween_property(flash_target, "modulate", Color.WHITE, 0.08)
 
 func _on_input_event(_viewport, event, _shape_idx) -> void:
 	if not is_alive:

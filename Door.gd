@@ -10,6 +10,7 @@ var spine_node_id: String = ""
 var is_open := false
 var _open_progress: float = 0.0
 var _idle_close_timer: float = 0.0
+var _tactical_map: Node = null
 
 @onready var frame_line: Line2D = $FrameLine
 @onready var door_panel: Polygon2D = $DoorPanel
@@ -22,6 +23,10 @@ func setup(data: Dictionary) -> void:
 	rotation = data.get("rotation", 0.0)
 	queue_redraw()
 
+func bind_tactical_map(map_node: Node) -> void:
+	_tactical_map = map_node
+
+
 func _process(delta: float) -> void:
 	if is_open and _open_progress < 1.0:
 		_open_progress = minf(_open_progress + delta * 3.0, 1.0)
@@ -33,12 +38,14 @@ func _process(delta: float) -> void:
 		_idle_close_timer -= delta
 		if _idle_close_timer <= 0.0 and not _soldiers_nearby(56.0):
 			request_close()
+	_sync_process_mode()
 
 func request_open() -> void:
 	if is_open:
 		return
 	is_open = true
 	_idle_close_timer = 2.5
+	set_process(true)
 	opened.emit(self)
 
 func request_breach() -> void:
@@ -74,11 +81,24 @@ func get_blocked_path_nodes() -> Array[String]:
 	return blocked
 
 func _soldiers_nearby(radius: float) -> bool:
+	var radius_sq := radius * radius
+	if _tactical_map and _tactical_map.has_method("get_living_soldiers_cached"):
+		for node in _tactical_map.get_living_soldiers_cached():
+			if node is SoldierUnit and node.is_alive:
+				if position.distance_squared_to(node.position) <= radius_sq:
+					return true
+		return false
 	for node in get_tree().get_nodes_in_group("soldiers"):
 		if node is SoldierUnit and node.is_alive:
-			if node.position.distance_to(position) <= radius:
+			if position.distance_squared_to(node.position) <= radius_sq:
 				return true
 	return false
+
+
+func _sync_process_mode() -> void:
+	var animating := (is_open and _open_progress < 1.0) or (not is_open and _open_progress > 0.0)
+	var idle_open := is_open and _open_progress >= 0.85
+	set_process(animating or idle_open)
 
 func _update_visual() -> void:
 	if not door_panel:
@@ -90,3 +110,4 @@ func _update_visual() -> void:
 func _ready() -> void:
 	add_to_group("doors")
 	_update_visual()
+	set_process(false)

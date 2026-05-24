@@ -2,6 +2,13 @@ extends RefCounted
 
 const SIGHT_RANGE := 420.0
 
+static var _room_cache: Dictionary = {}
+
+
+static func begin_frame_cache() -> void:
+	_room_cache.clear()
+
+
 static func has_line_of_sight(from_pos: Vector2, to_pos: Vector2, rooms: Array[Room], doors: Array) -> bool:
 	if from_pos.distance_to(to_pos) > SIGHT_RANGE:
 		return false
@@ -69,9 +76,14 @@ static func _has_open_door_to_room(from_pos: Vector2, room: Room, doors: Array) 
 	return false
 
 static func _room_containing(pos: Vector2, rooms: Array[Room]) -> Room:
+	var key := Vector2i(roundi(pos.x / 32.0), roundi(pos.y / 32.0))
+	if _room_cache.has(key):
+		return _room_cache[key]
 	for room in rooms:
 		if room.contains_local_point(pos, 0.0):
+			_room_cache[key] = room
 			return room
+	_room_cache[key] = null
 	return null
 
 static func _segment_blocked_by_doors(a: Vector2, b: Vector2, doors: Array) -> bool:
@@ -84,10 +96,10 @@ static func _segment_blocked_by_doors(a: Vector2, b: Vector2, doors: Array) -> b
 	return false
 
 static func _segment_passes_through_room(a: Vector2, b: Vector2, rooms: Array[Room], ignore_room: Room) -> bool:
+	var room_at_a := _room_containing(a, rooms)
+	var room_at_b := _room_containing(b, rooms)
 	for room in rooms:
-		if room == ignore_room:
-			continue
-		if _room_containing(a, rooms) == room or _room_containing(b, rooms) == room:
+		if room == ignore_room or room == room_at_a or room == room_at_b:
 			continue
 		var rect: Rect2 = _room_rect(room)
 		if _segment_intersects_rect(a, b, rect):

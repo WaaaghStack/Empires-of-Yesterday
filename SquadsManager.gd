@@ -6,9 +6,21 @@ const MissionStateLib := preload("res://MissionState.gd")
 
 const SQUAD_IDS: Array[String] = ["alpha", "bravo", "charlie"]
 const SQUAD_LABELS: Array[String] = ["Alpha", "Bravo", "Charlie"]
+const SECTOR_TAGS: Array[String] = ["north", "south", "east", "west", "central"]
+
+enum SectorDoctrine {
+	NONE,
+	ASSAULT_SECTOR,
+	HOLD_CHOKE,
+	SCOUT_SECTOR,
+	ASSAULT_HIVE,
+}
 
 var members_by_squad: Dictionary = {}
 var doctrines: Dictionary = {}
+var sector_doctrines: Dictionary = {}
+var sector_assignments: Dictionary = {}
+var squad_stances: Dictionary = {}
 var deploy_rooms: Dictionary = {}
 var active_squad_id: String = "alpha"
 
@@ -16,11 +28,17 @@ var active_squad_id: String = "alpha"
 func reset() -> void:
 	members_by_squad.clear()
 	doctrines.clear()
+	sector_doctrines.clear()
+	sector_assignments.clear()
+	squad_stances.clear()
 	deploy_rooms.clear()
 	active_squad_id = "alpha"
 	for squad_id in SQUAD_IDS:
 		members_by_squad[squad_id] = []
 		doctrines[squad_id] = OrderTypeLib.Type.CLEAR
+		sector_doctrines[squad_id] = SectorDoctrine.NONE
+		sector_assignments[squad_id] = ""
+		squad_stances[squad_id] = "balanced"
 
 
 func register_unit(unit: SoldierUnit, squad_id: String) -> void:
@@ -86,6 +104,94 @@ func get_doctrine(squad_id: String) -> OrderTypeLib.Type:
 	return doctrines.get(squad_id, OrderTypeLib.Type.CLEAR) as OrderTypeLib.Type
 
 
+func set_sector_doctrine(squad_id: String, doctrine: SectorDoctrine) -> void:
+	sector_doctrines[squad_id] = doctrine
+
+
+func get_sector_doctrine(squad_id: String) -> SectorDoctrine:
+	return sector_doctrines.get(squad_id, SectorDoctrine.NONE) as SectorDoctrine
+
+
+func set_sector_assignment(squad_id: String, sector: String) -> void:
+	sector_assignments[squad_id] = sector
+
+
+func get_sector_assignment(squad_id: String) -> String:
+	return str(sector_assignments.get(squad_id, ""))
+
+
+func set_squad_stance(squad_id: String, stance: String) -> void:
+	squad_stances[squad_id] = stance.to_lower()
+
+
+func get_squad_stance(squad_id: String) -> String:
+	return str(squad_stances.get(squad_id, "balanced"))
+
+
+static func sector_doctrine_label(doctrine: SectorDoctrine) -> String:
+	match doctrine:
+		SectorDoctrine.ASSAULT_SECTOR:
+			return "Assault Sector"
+		SectorDoctrine.HOLD_CHOKE:
+			return "Hold Choke"
+		SectorDoctrine.SCOUT_SECTOR:
+			return "Scout Sector"
+		SectorDoctrine.ASSAULT_HIVE:
+			return "Assault Hive"
+		_:
+			return "None"
+
+
+static func order_for_sector_doctrine(doctrine: SectorDoctrine) -> OrderTypeLib.Type:
+	match doctrine:
+		SectorDoctrine.ASSAULT_SECTOR, SectorDoctrine.ASSAULT_HIVE:
+			return OrderTypeLib.Type.SEARCH_DESTROY
+		SectorDoctrine.HOLD_CHOKE:
+			return OrderTypeLib.Type.DEFEND
+		SectorDoctrine.SCOUT_SECTOR:
+			return OrderTypeLib.Type.EXPLORE
+		_:
+			return OrderTypeLib.Type.CLEAR
+
+
+func rooms_for_sector(rooms: Array, sector: String) -> Array:
+	if sector.is_empty():
+		return rooms
+	var result: Array = []
+	for room in rooms:
+		if room is Room and str(room.sector_tag) == sector:
+			result.append(room)
+	return result
+
+
+func pick_target_room(squad_id: String, rooms: Array, hives: Array = []) -> Room:
+	var sector: String = get_sector_assignment(squad_id)
+	var doctrine: SectorDoctrine = get_sector_doctrine(squad_id)
+	var pool: Array = rooms_for_sector(rooms, sector) if not sector.is_empty() else rooms.duplicate()
+	if pool.is_empty():
+		pool = rooms.duplicate()
+	match doctrine:
+		SectorDoctrine.ASSAULT_HIVE:
+			for hive in hives:
+				if hive and hive.home_room and hive.home_room in pool and hive.is_attackable():
+					return hive.home_room
+		SectorDoctrine.HOLD_CHOKE:
+			for room in pool:
+				if room is Room and str(room.get_meta("room_shape", "")) == "choke":
+					return room
+		SectorDoctrine.SCOUT_SECTOR:
+			for room in pool:
+				if room is Room and not room.is_revealed:
+					return room
+		SectorDoctrine.ASSAULT_SECTOR, _:
+			for room in pool:
+				if room is Room and room.requires_clear and not room.is_cleared:
+					return room
+	if not pool.is_empty():
+		return pool[0]
+	return null
+
+
 func set_deploy_room(squad_id: String, room: Room) -> void:
 	deploy_rooms[squad_id] = room
 
@@ -117,8 +223,24 @@ func squad_status(squad_id: String) -> String:
 	return "READY"
 
 
+func squad_status_display(squad_id: String) -> String:
+	match squad_status(squad_id):
+		"ENGAGED":
+			return "IN CONTACT"
+		"MOVING":
+			return "MOVING"
+		"EXTRACTING":
+			return "EXTRACTING"
+		"WIPED":
+			return "WIPED"
+		_:
+			return "HOLDING"
+
+
 static func doctrine_for_objective(objective_template: String) -> OrderTypeLib.Type:
 	match objective_template:
+		"planet_reclamation":
+			return OrderTypeLib.Type.SEARCH_DESTROY
 		"silent_extract", "scavenge":
 			return OrderTypeLib.Type.EXPLORE
 		"hold_purge":

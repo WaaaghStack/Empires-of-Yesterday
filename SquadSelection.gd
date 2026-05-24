@@ -5,6 +5,7 @@ const SoldierCardScene := preload("res://SoldierCard.tscn")
 
 var _squads: Array = [[], [], []]
 var _use_daily_seed := false
+var _use_legacy_ops := false
 
 @onready var squad_scroll: ScrollContainer = $MainPanel/VBox/SquadScroll
 @onready var squad_container: VBoxContainer = $MainPanel/VBox/SquadScroll/SquadContainer
@@ -24,6 +25,9 @@ func _ready() -> void:
 	_use_daily_seed = get_tree().has_meta("daily_seed_run")
 	if _use_daily_seed:
 		get_tree().remove_meta("daily_seed_run")
+	_use_legacy_ops = get_tree().has_meta("legacy_ops_mode")
+	if _use_legacy_ops:
+		get_tree().remove_meta("legacy_ops_mode")
 	_generate_all_squads()
 	_refresh_ui()
 	deploy_button.pressed.connect(_on_deploy_pressed)
@@ -42,6 +46,9 @@ func _ready() -> void:
 		subtitle_label.modulate = GameTheme.ACCENT
 		seed_input.text = str(daily_seed)
 		seed_input.editable = false
+	elif _use_legacy_ops:
+		subtitle_label.text = "Legacy mode — four discrete operations with between-op hub."
+		subtitle_label.modulate = GameTheme.ACCENT_WARN
 
 
 func _generate_all_squads() -> void:
@@ -135,7 +142,11 @@ func _update_header() -> void:
 		)
 		subtitle_label.modulate = GameTheme.ACCENT_SUCCESS
 	tokens_label.text = "Command Tokens: %d" % SaveManager.command_tokens
-	deploy_button.text = "Start Run — 3 Squads × 4 Operators"
+	deploy_button.text = (
+		"Start Legacy Run — 3 Squads × 4 Operators"
+		if _use_legacy_ops
+		else "Start Planet Run — 3 Squads × 4 Operators"
+	)
 
 
 func _on_reroll_squad_pressed(squad_idx: int) -> void:
@@ -154,13 +165,23 @@ func _on_deploy_pressed() -> void:
 			run_squad.append(op.duplicate_for_deploy())
 	if run_squad.size() < RunState.ROSTER_SIZE:
 		return
-	RunState.start_run(run_squad, _read_seed_override(), _use_daily_seed)
+	if _use_legacy_ops:
+		RunState.start_run(run_squad, _read_seed_override(), _use_daily_seed)
+	else:
+		RunState.start_planet_run(run_squad, _read_seed_override(), _use_daily_seed)
 	RunLog.note_run_seed(RunState.run_seed)
 	RunLog.info(
-		"Run started — squad=%d squads=%d daily=%s seed=%d"
-		% [run_squad.size(), RunState.SQUAD_COUNT, str(_use_daily_seed), RunState.run_seed]
+		"Run started — squad=%d squads=%d daily=%s seed=%d planet=%s"
+		% [
+			run_squad.size(),
+			RunState.SQUAD_COUNT,
+			str(_use_daily_seed),
+			RunState.run_seed,
+			str(not _use_legacy_ops),
+		]
 	)
-	get_tree().change_scene_to_file("res://TacticalMap.tscn")
+	var mission_scene := "res://TacticalMap.tscn" if _use_legacy_ops else "res://PlanetMission.tscn"
+	get_tree().change_scene_to_file(mission_scene)
 
 
 func _on_back_pressed() -> void:

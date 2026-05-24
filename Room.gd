@@ -28,6 +28,7 @@ var order_target_highlight: bool = false
 var intel_scan_label: String = ""
 var room_size: Vector2 = Vector2(180, 130)
 var _status_text: String = "CLEAR"
+var _last_drawn_status: String = ""
 
 @onready var fill_poly: Polygon2D = $FillPoly
 @onready var border_line: Line2D = $BorderLine
@@ -65,6 +66,20 @@ func configure(size: Vector2, color: Color) -> void:
 	if is_node_ready():
 		_apply_size(size)
 		_update_visuals()
+
+
+func apply_colony_floor(tile_id: String = "floor") -> void:
+	const MapVisualsLib := preload("res://MapVisuals.gd")
+	var tex := MapVisualsLib.get_colony_tile(tile_id)
+	if tex == null or not fill_poly:
+		return
+	fill_poly.texture = tex
+	fill_poly.texture_offset = Vector2(-room_size.x * 0.5, -room_size.y * 0.5)
+	fill_poly.texture_scale = Vector2(
+		room_size.x / float(MapVisualsLib.COLONY_TILE_SIZE),
+		room_size.y / float(MapVisualsLib.COLONY_TILE_SIZE),
+	)
+	fill_poly.color = Color(1, 1, 1, 0.92)
 
 func _apply_size(size: Vector2) -> void:
 	var half := size * 0.5
@@ -225,7 +240,17 @@ func mark_contested() -> void:
 	is_cleared = false
 	_refresh_status()
 
+
+func get_attached_hive() -> Hive:
+	if not has_meta("hive"):
+		return null
+	var hive = get_meta("hive")
+	if hive is Hive and is_instance_valid(hive):
+		return hive
+	return null
+
 func _refresh_status() -> void:
+	var prev_text := _status_text
 	if not is_revealed:
 		_status_text = "UNKNOWN"
 	elif not intel_scan_label.is_empty():
@@ -272,7 +297,8 @@ func _refresh_status() -> void:
 		else:
 			border_line.default_color = Color(0.5, 0.75, 1.0, 0.75)
 			border_line.width = 2.0
-	queue_redraw()
+	if _status_text != prev_text:
+		queue_redraw()
 
 func _update_visuals() -> void:
 	if fill_poly:
@@ -289,7 +315,6 @@ func mark_hostile_contact(contact_label: String = "") -> void:
 	if contact_label != "":
 		set_meta("last_contact_label", contact_label)
 	_refresh_status()
-	queue_redraw()
 
 func clear_hostile_contact() -> void:
 	if not last_hostile_contact:
@@ -298,7 +323,6 @@ func clear_hostile_contact() -> void:
 	if has_meta("last_contact_label"):
 		remove_meta("last_contact_label")
 	_refresh_status()
-	queue_redraw()
 
 func set_order_target_highlight(active: bool) -> void:
 	if order_target_highlight == active:

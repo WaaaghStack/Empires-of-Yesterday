@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://OvermindHive.gd" id="1"]
+
+[node name="OvermindHive" type="Node2D"]
+script = ExtResource("1")
+base_spawn_interval = 18.0
+min_spawn_interval = 6.0
+spawn_cap = 7
+wave_size_base = 2
+max_health = 380

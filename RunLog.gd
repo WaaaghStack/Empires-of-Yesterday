@@ -2,6 +2,8 @@
 extends Node
 
 const LATEST_FILENAME := "latest_run.txt"
+const FLUSH_INTERVAL_SEC := 0.25
+const MAX_SESSION_LINES := 10000
 
 var _log_dir := ""
 var _latest_path := ""
@@ -11,6 +13,12 @@ var _copy_file: FileAccess = null
 var _run_seed_note := "(not started)"
 var _mutex := Mutex.new()
 var _engine_logger: _RunEngineLogger = null
+var _verbose := false
+var _capture_prints := false
+var _pending_lines: PackedStringArray = PackedStringArray()
+var _flush_timer := 0.0
+var _line_count := 0
+var _truncated := false
 
 
 class _RunEngineLogger extends Logger:
@@ -22,8 +30,10 @@ class _RunEngineLogger extends Logger:
 	func _log_message(message: String, error: bool) -> void:
 		if _owner == null:
 			return
-		var level := "ERROR" if error else "PRINT"
-		_owner._write_engine_line(level, message)
+		if error:
+			_owner._write_engine_line("ERROR", message)
+		elif _owner._capture_prints:
+			_owner._write_engine_line("PRINT", message)
 
 	func _log_error(
 		function: String,
@@ -54,9 +64,36 @@ func _init() -> void:
 
 
 func _ready() -> void:
+	set_process(true)
 	var announcement := get_startup_announcement()
 	print(announcement)
 	info("RunLog ready — %s" % announcement)
+
+
+func _process(delta: float) -> void:
+	_flush_timer += delta
+	if _flush_timer >= FLUSH_INTERVAL_SEC:
+		_flush_timer = 0.0
+		_flush_pending()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_flush_pending()
+
+
+func _exit_tree() -> void:
+	_flush_pending()
+	_close_files()
+
+
+func set_verbose(enabled: bool) -> void:
+	_verbose = enabled
+	_capture_prints = enabled
+
+
+func is_verbose() -> bool:
+	return _verbose
 
 
 func get_session_path() -> String:
@@ -69,6 +106,11 @@ func get_workspace_log_dir() -> String:
 
 func get_disk_hint() -> String:
 	return _latest_path
+
+
+func debug(msg: String) -> void:
+	if _verbose:
+		_write_line("DEBUG", msg)
 
 
 func info(msg: String) -> void:
@@ -85,6 +127,11 @@ func error(msg: String) -> void:
 
 func comms(msg: String) -> void:
 	_write_line("COMMS", msg)
+
+
+func perf(msg: String) -> void:
+	if _verbose:
+		_write_line("PERF", msg)
 
 
 func note_run_seed(run_seed: int) -> void:
@@ -109,6 +156,9 @@ func _get_workspace_log_dir() -> String:
 func _begin_session() -> void:
 	_mutex.lock()
 	_close_files()
+	_pending_lines.clear()
+	_line_count = 0
+	_truncated = false
 	_log_dir = _get_workspace_log_dir()
 	if DirAccess.make_dir_recursive_absolute(_log_dir) != OK:
 		push_error("RunLog: failed to create %s" % _log_dir)
@@ -124,6 +174,7 @@ func _begin_session() -> void:
 		_mutex.unlock()
 		return
 	_write_header()
+	_flush_pending(true)
 	_mutex.unlock()
 
 
@@ -147,26 +198,57 @@ func _write_header() -> void:
 		"",
 	])
 	for line in header_lines:
-		_write_raw(line)
+		_enqueue_raw(line)
 
 
 func _write_line(level: String, msg: String) -> void:
 	var stamp := Time.get_datetime_string_from_system(true)
-	_write_raw("[%s] [%s] %s" % [stamp, level, msg])
+	_enqueue_raw("[%s] [%s] %s" % [stamp, level, msg])
 
 
 func _write_engine_line(level: String, msg: String) -> void:
 	var stamp := Time.get_datetime_string_from_system(true)
-	_write_raw("[%s] [ENGINE:%s] %s" % [stamp, level, msg])
+	_enqueue_raw("[%s] [ENGINE:%s] %s" % [stamp, level, msg])
 
 
-func _write_raw(line: String) -> void:
+func _enqueue_raw(line: String) -> void:
+	if _truncated:
+		return
 	_mutex.lock()
+	_pending_lines.append(line)
+	_mutex.unlock()
+
+
+func _flush_pending(_force: bool = false) -> void:
+	_mutex.lock()
+	if _pending_lines.is_empty():
+		_mutex.unlock()
+		return
+	var batch := _pending_lines
+	_pending_lines = PackedStringArray()
+	_mutex.unlock()
+	if _file == null and _copy_file == null:
+		return
+	_mutex.lock()
+	for line in batch:
+		if _line_count >= MAX_SESSION_LINES:
+			if not _truncated:
+				_truncated = true
+				var note := "... [RunLog truncated — max %d lines per session] ..." % MAX_SESSION_LINES
+				if _file:
+					_file.store_line(note)
+				if _copy_file:
+					_copy_file.store_line(note)
+				_line_count += 1
+			break
+		if _file:
+			_file.store_line(line)
+		if _copy_file:
+			_copy_file.store_line(line)
+		_line_count += 1
 	if _file:
-		_file.store_line(line)
 		_file.flush()
 	if _copy_file:
-		_copy_file.store_line(line)
 		_copy_file.flush()
 	_mutex.unlock()
 

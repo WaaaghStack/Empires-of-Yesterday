@@ -16,17 +16,23 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://DynamicPathGraph.gd",
 	"res://Enemy.gd",
 	"res://EnemyUnit.gd",
+	"res://EvolutionBoard.gd",
+	"res://EvolutionNode.gd",
+	"res://EvolutionUpgrade.gd",
 	"res://GameTheme.gd",
 	"res://LineOfSight.gd",
+	"res://LoadoutPreset.gd",
 	"res://MainMenu.gd",
 	"res://MapVisuals.gd",
 	"res://MissionDebrief.gd",
 	"res://MissionMapData.gd",
+	"res://PlanetMapData.gd",
+	"res://OvermindHive.gd",
 	"res://MissionState.gd",
 	"res://MissionTaskBoard.gd",
 	"res://MissionEntityIndex.gd",
-	"res://SquadsManager.gd",
-	"res://Hive.gd",
+	"res://CombatCoordinator.gd",
+	"res://OrbitalCarrier.gd",
 	"res://OpModifier.gd",
 	"res://OperatorRosterCard.gd",
 	"res://OrderType.gd",
@@ -40,6 +46,13 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://SoldierCard.gd",
 	"res://SoldierResource.gd",
 	"res://SoldierUnit.gd",
+	"res://SquadsManager.gd",
+	"res://SwarmDirector.gd",
+	"res://Hive.gd",
+	"res://HivePressure.gd",
+	"res://CommsTemplates.gd",
+	"res://HivePressure.gd",
+	"res://CommsTemplates.gd",
 	"res://SquadRosterPanel.gd",
 	"res://SquadSelection.gd",
 	"res://TacticalMap.gd",
@@ -52,9 +65,14 @@ const SCENE_PATHS: Array[String] = [
 	"res://ControlsOverlay.tscn",
 	"res://Door.tscn",
 	"res://Hive.tscn",
+	"res://OvermindHive.tscn",
 	"res://EnemyUnit.tscn",
 	"res://MainMenu.tscn",
 	"res://MissionDebrief.tscn",
+	"res://OrbitalCarrier.tscn",
+	"res://OvermindHive.tscn",
+	"res://EvolutionNode.tscn",
+	"res://PlanetMission.tscn",
 	"res://OperatorRosterCard.tscn",
 	"res://Room.tscn",
 	"res://RunSummary.tscn",
@@ -62,6 +80,7 @@ const SCENE_PATHS: Array[String] = [
 	"res://SoldierUnit.tscn",
 	"res://SquadSelection.tscn",
 	"res://TacticalMap.tscn",
+	"res://PlanetMission.tscn",
 ]
 
 const RESOURCE_PATHS: Array[String] = [
@@ -88,6 +107,8 @@ func _ready() -> void:
 	_validate_phase_features()
 	_validate_objective_templates()
 	_validate_multi_squad_and_hives()
+	_validate_planet_run()
+	_validate_v2_features()
 	_print_summary()
 	_write_report()
 	get_tree().quit(1 if not _failures.is_empty() else 0)
@@ -450,6 +471,139 @@ func _validate_multi_squad_and_hives() -> void:
 		_fail("silent_extract doctrine should be EXPLORE")
 	else:
 		_log("OK  objective doctrine mapping")
+
+
+func _validate_planet_run() -> void:
+	_log("-- Planet run smoke tests --")
+	const PlanetMapDataScript := preload("res://PlanetMapData.gd")
+	var planet_map = ProceduralMapGenerator.generate_planet(13579, RunState.get_planet_config())
+	if planet_map == null:
+		_fail("generate_planet returned null")
+		return
+	if not planet_map is PlanetMapDataScript:
+		_fail("generate_planet should return PlanetMapData")
+	var room_count: int = planet_map.get_room_dicts().size()
+	if room_count < 18 or room_count > 24:
+		_fail("planet map room count out of range: %d" % room_count)
+	elif planet_map.map_size.x < 1400.0 or planet_map.map_size.y < 1400.0:
+		_fail("planet map size too small: %s" % str(planet_map.map_size))
+	elif planet_map.overmind_room_id.is_empty():
+		_fail("planet map missing overmind room")
+	elif planet_map.regular_hive_room_ids.is_empty():
+		_fail("planet map missing regular hive rooms")
+	elif planet_map.regular_hive_room_ids.size() > 2:
+		_fail("planet map hive count out of range: %d (expected 1-2)" % planet_map.regular_hive_room_ids.size())
+	else:
+		_log(
+			"OK  planet map rooms=%d size=%s hives=%d overmind=%s"
+			% [
+				room_count,
+				str(planet_map.map_size),
+				planet_map.regular_hive_room_ids.size(),
+				planet_map.overmind_room_id,
+			]
+		)
+	var quiet_map = ProceduralMapGenerator.generate_planet(99999, {
+		"planet_room_min": 12,
+		"planet_room_max": 16,
+		"mutators": ["quiet_deck"],
+	})
+	if quiet_map and quiet_map.regular_hive_room_ids.size() != 0:
+		_fail("quiet_deck mutator should remove regular hives")
+	elif quiet_map:
+		_log("OK  quiet_deck mutator (0 regular hives)")
+	_validate_mission_unpaused_start()
+	var squad: Array[SoldierResource] = RunState.generate_full_roster()
+	RunState.start_planet_run(squad, 24680, false)
+	if not RunState.planet_mode:
+		_fail("start_planet_run did not enable planet_mode")
+	elif RunState.planet_phase != RunState.PlanetPhase.DEPLOY:
+		_fail("start_planet_run should begin in DEPLOY phase")
+	elif RunState.legacy_biomass != 0:
+		_fail("legacy_biomass alias should start at 0")
+	else:
+		_log("OK  start_planet_run defaults")
+	RunState.begin_planet_purge()
+	if RunState.planet_phase != RunState.PlanetPhase.PURGE:
+		_fail("begin_planet_purge failed")
+	RunState.regular_hives_total = 4
+	for i in range(4):
+		RunState.on_regular_hive_destroyed()
+	if RunState.planet_phase != RunState.PlanetPhase.QUEEN:
+		_fail("planet phase should reach QUEEN after all hives destroyed")
+	RunState.on_overmind_destroyed()
+	if RunState.planet_phase != RunState.PlanetPhase.EXTRACT:
+		_fail("planet phase should reach EXTRACT after overmind destroyed")
+	elif not RunState.extract_window_open:
+		_fail("evac should unlock after overmind destroyed")
+	else:
+		_log("OK  planet phase enum transitions")
+	var phases: Array = RunState.PlanetPhase.keys()
+	if phases.size() != 5:
+		_fail("PlanetPhase enum expected 5 values, got %d" % phases.size())
+	else:
+		_log("OK  PlanetPhase enum (%s)" % ", ".join(phases))
+	RunState.end_run()
+	_log("OK  planet run smoke tests")
+
+
+func _validate_v2_features() -> void:
+	_log("-- V2 feature smoke tests --")
+	var pressure := HivePressure.new()
+	pressure.reset()
+	pressure.configure("colony", [])
+	var profile := pressure.profile
+	if int(profile.get("spawn_cap", 0)) < 1:
+		_fail("HivePressure colony baseline missing spawn_cap")
+	else:
+		_log("OK  HivePressure colony baseline")
+	pressure.configure("colony", ["accelerated_swarm"])
+	if float(pressure.profile.get("base_spawn_interval", 99.0)) >= float(profile.get("base_spawn_interval", 99.0)):
+		_fail("accelerated_swarm should reduce hive interval")
+	else:
+		_log("OK  accelerated_swarm mutator pressure")
+	if CommsTemplates.nests_halfway(1, 2).is_empty():
+		_fail("CommsTemplates returned empty string")
+	else:
+		_log("OK  CommsTemplates military tone")
+	var planet_map: RefCounted = ProceduralMapGenerator.generate_planet(99992, RunState.get_planet_config())
+	var evo_count: int = planet_map.evolution_node_room_ids.size()
+	if evo_count < 2 or evo_count > 3:
+		_fail("expected 2-3 evolution nodes, got %d" % evo_count)
+	else:
+		_log("OK  evolution node count 2-3")
+	MapVisuals._ensure_colony_tiles()
+	if MapVisuals.get_colony_tile("floor") == null:
+		_fail("colony placeholder floor tile missing")
+	else:
+		_log("OK  colony placeholder tiles")
+	var stim := EvolutionUpgrade.get_by_id("stim_injector")
+	var predator := EvolutionUpgrade.get_by_id("predator_instinct")
+	if stim == null or predator == null:
+		_fail("predator instinct synergy chain missing from EvolutionUpgrade catalog")
+	elif predator.synergy_requires.is_empty():
+		_fail("predator_instinct should require synergy tag")
+	else:
+		_log("OK  predator instinct synergy chain")
+	_log("OK  V2 feature smoke tests")
+
+
+func _validate_mission_unpaused_start() -> void:
+	_log("-- Mission unpaused start --")
+	var probe := Node.new()
+	probe.add_to_group("tactical_map")
+	add_child(probe)
+	probe.set("game_active", true)
+	probe.set("mission_complete", false)
+	probe.set("spawn_selection_active", true)
+	if not MissionStateLib.is_unit_actions_frozen(probe):
+		_fail("deploy selection should freeze unit actions")
+	probe.set("spawn_selection_active", false)
+	if MissionStateLib.is_unit_actions_frozen(probe):
+		_fail("active unpaused mission should not freeze unit actions")
+	else:
+		_log("OK  MissionState deploy-only freeze")
+	probe.queue_free()
 
 
 func _print_summary() -> void:
