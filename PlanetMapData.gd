@@ -3,7 +3,6 @@ extends MissionMapData
 
 ## Single-planet hull persisted for the duration of a run.
 var is_planet_map: bool = true
-var overmind_room_id: String = ""
 var planet_hive_target: int = 0
 var regular_hive_room_ids: Array[String] = []
 var sector_room_counts: Dictionary = {}

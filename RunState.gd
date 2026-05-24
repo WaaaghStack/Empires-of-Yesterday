@@ -3,6 +3,7 @@ extends Node
 
 const PlanetMapDataScript := preload("res://PlanetMapData.gd")
 const EvolutionBoardLib := preload("res://EvolutionBoard.gd")
+const CampaignGraphGeneratorLib := preload("res://CampaignGraphGenerator.gd")
 
 enum PlanetPhase { DEPLOY, PURGE, ESCALATION, QUEEN, EXTRACT }
 
@@ -48,9 +49,13 @@ var daily_seed_mode: bool = false
 var run_total_elapsed: float = 0.0
 var run_total_casualties: int = 0
 
-## Single-planet reclamation run (replaces discrete 4-op loop when enabled).
+## Single-planet reclamation run (legacy; default run uses campaign_mode).
 var planet_mode: bool = false
 var legacy_ops_mode: bool = false
+## Branching mission-to-mission campaign (default New Run from carrier).
+var campaign_mode: bool = false
+var campaign_graph = null
+var missions_cleared: int = 0
 var planet_phase: PlanetPhase = PlanetPhase.DEPLOY
 var planet_map_data = null
 var overmind_destroyed: bool = false
@@ -80,6 +85,7 @@ var legacy_biomass: int:
 
 func start_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
 	_reset_planet_state()
+	_reset_campaign_state()
 	planet_mode = false
 	legacy_ops_mode = true
 	run_active = true
@@ -111,7 +117,55 @@ func start_run(squad_resources: Array[SoldierResource], seed_override: int = -1,
 	run_total_casualties = 0
 
 
+func start_campaign_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
+	_reset_planet_state()
+	_reset_campaign_state()
+	campaign_mode = true
+	planet_mode = false
+	legacy_ops_mode = false
+	run_active = true
+	op_index = 1
+	cleared_ops = 0
+	missions_cleared = 0
+	run_credits = 0
+	squad.clear()
+	for res in squad_resources:
+		var copy: SoldierResource = res.duplicate_for_deploy()
+		copy.reset_for_new_run()
+		squad.append(copy)
+	_init_squad_assignments()
+	daily_seed_mode = use_daily_seed
+	if seed_override >= 0:
+		run_seed = seed_override
+	elif use_daily_seed:
+		run_seed = _daily_seed_value()
+	else:
+		_rng.randomize()
+		run_seed = _rng.randi()
+	active_modifier = null
+	active_run_augment = null
+	pending_intel.clear()
+	objective_template = "standard"
+	deploy_assignments.clear()
+	active_squad_id = "alpha"
+	last_mission_stats = {}
+	run_total_elapsed = 0.0
+	run_total_casualties = 0
+	squad_stances.clear()
+	squad_loadout_presets.clear()
+	orbital_charges = orbital_charge_max
+	evolution_boards.clear()
+	active_mutators.clear()
+	for squad_id in SQUAD_IDS:
+		squad_stances[squad_id] = "balanced"
+		var board: EvolutionBoardLib = EvolutionBoardLib.new()
+		board.reset(squad_id)
+		evolution_boards[squad_id] = board
+	campaign_graph = CampaignGraphGeneratorLib.generate(run_seed)
+
+
 func start_planet_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
+	_reset_campaign_state()
 	_reset_planet_state()
 	planet_mode = true
 	legacy_ops_mode = false
@@ -209,6 +263,68 @@ func end_run() -> void:
 	pending_intel.clear()
 	last_mission_stats = {}
 	_reset_planet_state()
+	_reset_campaign_state()
+
+
+func is_campaign_run_active() -> bool:
+	return run_active and campaign_mode
+
+
+func begin_campaign_mission(node_id: String) -> void:
+	if not campaign_mode or campaign_graph == null:
+		return
+	campaign_graph.pending_mission_node_id = node_id
+	var node_cfg: Dictionary = campaign_graph.get_node_config(node_id)
+	objective_template = str(node_cfg.get("objective_template", "standard"))
+
+
+func complete_current_mission_node() -> void:
+	if not campaign_mode or campaign_graph == null:
+		return
+	var node_id := str(campaign_graph.pending_mission_node_id)
+	if node_id.is_empty():
+		return
+	if node_id not in campaign_graph.completed_ids:
+		campaign_graph.completed_ids.append(node_id)
+	campaign_graph.current_node_id = node_id
+	campaign_graph.pending_mission_node_id = ""
+	missions_cleared = campaign_graph.missions_cleared_count()
+	cleared_ops = missions_cleared
+	op_index = missions_cleared + 1
+
+
+func is_campaign_complete() -> bool:
+	return campaign_mode and campaign_graph != null and campaign_graph.is_run_complete()
+
+
+func get_mission_seed_for_node(node_id: String) -> int:
+	return (run_seed + hash(node_id)) & 0x7FFFFFFF
+
+
+func get_mission_config_for_node(node_id: String) -> Dictionary:
+	if campaign_graph == null:
+		return get_difficulty_config()
+	var node_cfg: Dictionary = campaign_graph.get_node_config(node_id)
+	return {
+		"op_index": missions_cleared + 1,
+		"objective_template": str(node_cfg.get("objective_template", "standard")),
+		"difficulty_tier": missions_cleared + 1,
+		"map_tier": str(node_cfg.get("map_tier", "small")),
+		"squad_count": SQUAD_COUNT,
+		"modifier": active_modifier,
+		"campaign_boss": bool(node_cfg.get("campaign_boss", false)),
+		"node_type": str(node_cfg.get("node_type", "battle")),
+		"mutators": active_mutators.duplicate(),
+	}
+
+
+func get_active_mission_config() -> Dictionary:
+	if not campaign_mode or campaign_graph == null:
+		return get_difficulty_config()
+	var node_id := str(campaign_graph.pending_mission_node_id)
+	if node_id.is_empty():
+		return get_difficulty_config()
+	return get_mission_config_for_node(node_id)
 
 
 func is_planet_run_active() -> bool:
@@ -459,6 +575,8 @@ func record_mission_stats(stats: Dictionary) -> void:
 
 
 func get_difficulty_config() -> Dictionary:
+	if campaign_mode:
+		return get_active_mission_config()
 	if planet_mode:
 		return get_planet_config()
 	var map_tier := "medium"
@@ -624,6 +742,12 @@ func get_daily_seed() -> int:
 func _daily_seed_value() -> int:
 	var today := Time.get_date_dict_from_system()
 	return hash("%04d-%02d-%02d" % [today.year, today.month, today.day]) & 0x7FFFFFFF
+
+
+func _reset_campaign_state() -> void:
+	campaign_mode = false
+	campaign_graph = null
+	missions_cleared = 0
 
 
 func _reset_planet_state() -> void:

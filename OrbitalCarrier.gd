@@ -18,6 +18,7 @@ var _mutators_enabled: Dictionary = {
 	"accelerated_swarm": false,
 }
 var _use_daily_seed := false
+var _legacy_planet_run := false
 
 @onready var squad_scroll: ScrollContainer = $MainPanel/VBox/SquadScroll
 @onready var squad_container: VBoxContainer = $MainPanel/VBox/SquadScroll/SquadContainer
@@ -36,6 +37,9 @@ func _ready() -> void:
 	_use_daily_seed = get_tree().has_meta("daily_seed_run")
 	if _use_daily_seed:
 		get_tree().remove_meta("daily_seed_run")
+	_legacy_planet_run = get_tree().has_meta("legacy_planet_run")
+	if _legacy_planet_run:
+		get_tree().remove_meta("legacy_planet_run")
 	_generate_all_squads()
 	_refresh_ui()
 	deploy_button.pressed.connect(_on_deploy_pressed)
@@ -52,8 +56,11 @@ func _ready() -> void:
 		subtitle_label.modulate = GameTheme.ACCENT
 		seed_input.text = str(daily_seed)
 		seed_input.editable = false
+	elif _legacy_planet_run:
+		subtitle_label.text = "Legacy planet reclamation — single persistent facility map."
+		subtitle_label.modulate = GameTheme.ACCENT_WARN
 	else:
-		subtitle_label.text = "Orbital Carrier — assign presets, pilot traits, drop sectors, and squad stances."
+		subtitle_label.text = "Orbital Carrier — configure task force, then choose your campaign path."
 		subtitle_label.modulate = GameTheme.ACCENT_SUCCESS
 
 
@@ -264,7 +271,10 @@ func _on_deploy_pressed() -> void:
 			run_squad.append(op)
 	if run_squad.size() < RunState.ROSTER_SIZE:
 		return
-	RunState.start_planet_run(run_squad, _read_seed_override(), _use_daily_seed)
+	if _legacy_planet_run:
+		RunState.start_planet_run(run_squad, _read_seed_override(), _use_daily_seed)
+	else:
+		RunState.start_campaign_run(run_squad, _read_seed_override(), _use_daily_seed)
 	for mutator_id in RunState.MUTATOR_IDS:
 		RunState.set_mutator(mutator_id, bool(_mutators_enabled.get(mutator_id, false)))
 	for squad_idx in range(RunState.SQUAD_COUNT):
@@ -273,11 +283,18 @@ func _on_deploy_pressed() -> void:
 		RunState.set_squad_loadout_preset(squad_id, _squad_presets[squad_idx])
 		RunState.deploy_assignments[squad_id] = _squad_drop_sectors[squad_idx]
 	RunLog.note_run_seed(RunState.run_seed)
-	RunLog.info(
-		"Planet run started — squads=%d daily=%s seed=%d"
-		% [RunState.SQUAD_COUNT, str(_use_daily_seed), RunState.run_seed]
-	)
-	get_tree().change_scene_to_file("res://PlanetMission.tscn")
+	if _legacy_planet_run:
+		RunLog.info(
+			"Planet run started — squads=%d daily=%s seed=%d"
+			% [RunState.SQUAD_COUNT, str(_use_daily_seed), RunState.run_seed]
+		)
+		get_tree().change_scene_to_file("res://PlanetMission.tscn")
+	else:
+		RunLog.info(
+			"Campaign run started — squads=%d daily=%s seed=%d"
+			% [RunState.SQUAD_COUNT, str(_use_daily_seed), RunState.run_seed]
+		)
+		get_tree().change_scene_to_file("res://CampaignNavigation.tscn")
 
 
 func _on_back_pressed() -> void:

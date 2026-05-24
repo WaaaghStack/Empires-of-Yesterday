@@ -24,6 +24,7 @@ var is_handcrafted: bool = false
 var map_tier: String = "medium"
 var map_scale: float = 1.0
 var hive_room_ids: Array[String] = []
+var overmind_room_id: String = ""
 var sector_tags: Dictionary = {}
 
 func get_room_dicts() -> Array[Dictionary]:

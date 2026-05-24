@@ -56,14 +56,14 @@ static func _ensure_colony_tiles() -> void:
 		if ResourceLoader.exists(res_path):
 			continue
 		var disk_path := ProjectSettings.globalize_path(res_path)
-		var color := Color(0.14, 0.16, 0.22, 1.0)
+		var color := Color(0.11, 0.13, 0.19, 1.0)
 		match tile_id:
 			"floor_alt":
-				color = Color(0.16, 0.19, 0.26, 1.0)
+				color = Color(0.18, 0.22, 0.32, 1.0)
 			"corridor":
-				color = Color(0.11, 0.13, 0.18, 1.0)
+				color = Color(0.07, 0.08, 0.12, 1.0)
 			"corridor_stripe":
-				color = Color(0.22, 0.42, 0.78, 1.0)
+				color = Color(0.28, 0.5, 0.88, 1.0)
 		var image := Image.create(COLONY_TILE_SIZE, COLONY_TILE_SIZE, false, Image.FORMAT_RGBA8)
 		image.fill(color)
 		image.save_png(disk_path)

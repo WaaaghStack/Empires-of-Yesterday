@@ -1,7 +1,7 @@
 class_name MissionTaskBoard
 extends RefCounted
 
-## Shared room assignment — prevents duplicate S&D / explore targets across squads.
+## Explore: one marine per room (exclusive claims). S&D: shared targets — no room claims.
 
 var _room_claims: Dictionary = {}
 var _snd_queues: Dictionary = {}
@@ -51,11 +51,13 @@ func release_all_for_unit(unit: SoldierUnit) -> void:
 			_room_claims.erase(room_id)
 
 
-func is_room_claimed(room: Room, exclude_unit: SoldierUnit = null) -> bool:
+func is_room_claimed(room: Room, exclude_unit: SoldierUnit = null, task_type: String = "") -> bool:
 	if not room:
 		return false
 	var entry = _room_claims.get(room.map_room_id, null)
 	if entry == null:
+		return false
+	if not task_type.is_empty() and str(entry.get("task_type", "")) != task_type:
 		return false
 	var holder: SoldierUnit = entry.get("unit", null) as SoldierUnit
 	if not is_instance_valid(holder) or not holder.is_alive:
@@ -80,9 +82,10 @@ func build_snd_queue(
 		if not node is Room:
 			continue
 		var room: Room = node as Room
-		if room.is_spawn_room or not room.has_living_enemies():
+		if room.is_spawn_room:
 			continue
-		if is_room_claimed(room):
+		var needs_purge := room.requires_clear and not room.is_cleared
+		if not needs_purge and not room.has_living_enemies():
 			continue
 		hostile.append(room)
 	hostile.sort_custom(func(a, b): return origin.distance_to(a.position) < origin.distance_to(b.position))
@@ -114,7 +117,7 @@ func partition_rooms(rooms: Array, units: Array) -> Dictionary:
 	return result
 
 
-func next_unclaimed_hostile(origin: Vector2, unit: SoldierUnit, all_rooms: Array) -> Room:
+func next_nearest_hostile(origin: Vector2, all_rooms: Array) -> Room:
 	var best: Room = null
 	var best_dist: float = INF
 	for node in all_rooms:
@@ -123,10 +126,57 @@ func next_unclaimed_hostile(origin: Vector2, unit: SoldierUnit, all_rooms: Array
 		var room: Room = node as Room
 		if room.is_spawn_room or not room.has_living_enemies():
 			continue
-		if is_room_claimed(room, unit):
-			continue
 		var dist: float = origin.distance_to(room.position)
 		if dist < best_dist:
 			best_dist = dist
 			best = room
 	return best
+
+
+func assign_explore_rooms(units: Array, all_rooms: Array, priority_room: Room = null) -> Dictionary:
+	var result: Dictionary = {}
+	var unit_list: Array = []
+	for unit in units:
+		if unit is SoldierUnit and (unit as SoldierUnit).is_alive and not (unit as SoldierUnit).is_extracted:
+			unit_list.append(unit)
+	if unit_list.is_empty():
+		return result
+	unit_list.sort_custom(func(a, b): return (a as SoldierUnit).formation_slot < (b as SoldierUnit).formation_slot)
+	var candidates: Array[Room] = []
+	for node in all_rooms:
+		if node is Room and not node.is_spawn_room and not node.is_searched:
+			candidates.append(node)
+	if candidates.is_empty():
+		return result
+	var reserved: Dictionary = {}
+	if priority_room and not priority_room.is_spawn_room and not priority_room.is_searched:
+		var priority_holder: SoldierUnit = null
+		var priority_dist: float = INF
+		for unit in unit_list:
+			var u: SoldierUnit = unit as SoldierUnit
+			var dist: float = u.position.distance_to(priority_room.position)
+			if dist < priority_dist:
+				priority_dist = dist
+				priority_holder = u
+		if priority_holder:
+			reserved[priority_room.map_room_id] = true
+			result[priority_holder] = priority_room
+	for unit in unit_list:
+		var u: SoldierUnit = unit as SoldierUnit
+		if result.has(u):
+			continue
+		var best: Room = null
+		var best_dist: float = INF
+		for room in candidates:
+			if reserved.has(room.map_room_id):
+				continue
+			if is_room_claimed(room, u, "explore"):
+				continue
+			var dist: float = u.position.distance_to(room.position)
+			if dist < best_dist:
+				best_dist = dist
+				best = room
+		if best:
+			reserved[best.map_room_id] = true
+			result[u] = best
+	return result

@@ -91,8 +91,10 @@ var _facing_dir: String = "south"
 var path_failed := false
 var _path_fail_reported := false
 var _nav_path_preview_enabled := false
+var _snd_assign_pass: int = 0
 
 const NAV_PATH_MAX_SEGMENT := 220.0
+const MAX_SND_ASSIGN_PASSES := 48
 
 const MIN_UNIT_SEPARATION := 28.0
 const SEPARATION_INTERVAL := 0.05
@@ -329,47 +331,44 @@ func set_selected(now_selected: bool) -> void:
 	_sync_navigation_path_line()
 
 func issue_order(order: OrderTypeLib.Type, target_pos: Vector2, room: Room = null) -> void:
+	_reset_order_execution_state()
 	current_order = order
 	order_room = room
 	order_target = target_pos
 	defend_anchor = target_pos
-	current_target = null
-	awaiting_at_destination = false
-	is_searching = false
-	_reset_body_sprite_rotation()
-	search_timer = 0.0
-	has_searched_room = false
-	is_extracting = false
-	extract_timer = 0.0
-	_extract_tick_second = -1
-	waiting_at_door = null
-	snd_rooms.clear()
-	snd_index = 0
-	explore_rooms.clear()
-	explore_index = 0
-	_pathing_to_room = null
-	is_moving = true
+	var order_ready := false
 	if order == OrderTypeLib.Type.SEARCH_DESTROY:
 		_build_search_destroy_queue(room)
+		if snd_rooms.is_empty():
+			_append_snd_purge_fallback(room)
 		if snd_rooms.is_empty():
 			cancel_order()
 			return
 		_assign_search_destroy_room(snd_rooms[0])
 		_update_snd_label()
+		order_ready = current_order == OrderTypeLib.Type.SEARCH_DESTROY
 	elif order == OrderTypeLib.Type.OBJECTIVE:
 		_apply_objective_doctrine(room)
 		if current_order == OrderTypeLib.Type.NONE:
 			return
+		order_ready = true
 	elif order == OrderTypeLib.Type.EXPLORE:
-		_build_explore_queue()
+		_build_explore_queue(room)
 		explore_index = 0
 		if explore_rooms.is_empty():
 			cancel_order()
 			return
 		_advance_explore()
 		_update_explore_label()
+		order_ready = current_order == OrderTypeLib.Type.EXPLORE
 	else:
 		_request_path_rebuild(true)
+		order_ready = true
+	if not order_ready:
+		cancel_order()
+		return
+	is_moving = true
+	awaiting_at_destination = false
 	path_failed = false
 	_path_fail_reported = false
 	_evaluate_path_availability()
@@ -378,9 +377,11 @@ func issue_order(order: OrderTypeLib.Type, target_pos: Vector2, room: Room = nul
 	order_changed.emit(self, order)
 
 func cancel_order() -> void:
+	_release_task_claims()
 	current_order = OrderTypeLib.Type.NONE
 	order_room = null
 	current_target = null
+	coordinator_assigned_target = null
 	awaiting_at_destination = false
 	is_moving = false
 	is_searching = false
@@ -403,6 +404,38 @@ func cancel_order() -> void:
 	_path_fail_reported = false
 	_update_trust_status_label()
 	_sync_navigation_path_line()
+
+
+func _reset_order_execution_state() -> void:
+	_release_task_claims()
+	current_target = null
+	coordinator_assigned_target = null
+	awaiting_at_destination = false
+	is_searching = false
+	_reset_body_sprite_rotation()
+	search_timer = 0.0
+	has_searched_room = false
+	is_extracting = false
+	extract_timer = 0.0
+	_extract_tick_second = -1
+	waiting_at_door = null
+	snd_rooms.clear()
+	snd_index = 0
+	_snd_assign_pass = 0
+	explore_rooms.clear()
+	explore_index = 0
+	path_queue.clear()
+	path_index = 0
+	_pathing_to_room = null
+	path_failed = false
+	_path_fail_reported = false
+	if path_line:
+		path_line.visible = false
+
+
+func _release_task_claims() -> void:
+	if task_board:
+		task_board.release_all_for_unit(self)
 
 func _mission_paused() -> bool:
 	return MissionStateLib.is_unit_actions_frozen(self)
@@ -726,29 +759,64 @@ func _build_search_destroy_queue(start_room: Room = null) -> void:
 				squad_units.append(node)
 		var shared: Array = task_board.build_snd_queue(squad_units, _rooms_source(), start_room, squad_id)
 		for room in shared:
-			if room is Room:
+			if room is Room and room not in snd_rooms:
 				snd_rooms.append(room)
-		if formation_slot < snd_rooms.size():
-			var my_room: Room = snd_rooms[formation_slot % snd_rooms.size()]
-			snd_rooms = [my_room]
-			for i in range(shared.size()):
-				var r = shared[i]
-				if r != my_room and not task_board.is_room_claimed(r, self):
-					snd_rooms.append(r)
+		if snd_rooms.is_empty():
+			_append_snd_purge_fallback(start_room)
+			snd_index = 0
+			return
+		snd_rooms.sort_custom(func(a, b): return position.distance_to(a.position) < position.distance_to(b.position))
+		if start_room and not start_room.is_spawn_room:
+			if start_room in snd_rooms:
+				snd_rooms.erase(start_room)
+			snd_rooms.insert(0, start_room)
 		snd_index = 0
 		return
-	var hostile: Array = []
+	_append_snd_purge_fallback(start_room)
+	snd_index = 0
+
+
+func _append_snd_purge_fallback(start_room: Room = null) -> void:
+	var hostile: Array[Room] = []
 	for node in _rooms_source():
-		if node is Room and not node.is_spawn_room and node.has_living_enemies():
-			hostile.append(node)
+		if not node is Room:
+			continue
+		var room: Room = node as Room
+		if room.is_spawn_room:
+			continue
+		var needs_purge := room.requires_clear and not room.is_cleared
+		if needs_purge or room.has_living_enemies() or room.last_hostile_contact:
+			if room not in hostile:
+				hostile.append(room)
+	if hostile.is_empty() and _any_living_enemies():
+		var nearest_room := _nearest_room_with_enemy()
+		if nearest_room and nearest_room not in hostile:
+			hostile.append(nearest_room)
 	hostile.sort_custom(func(a, b): return position.distance_to(a.position) < position.distance_to(b.position))
 	for room in hostile:
-		snd_rooms.append(room)
+		if room not in snd_rooms:
+			snd_rooms.append(room)
+	snd_rooms.sort_custom(func(a, b): return position.distance_to(a.position) < position.distance_to(b.position))
 	if start_room and not start_room.is_spawn_room:
 		if start_room in snd_rooms:
 			snd_rooms.erase(start_room)
 		snd_rooms.insert(0, start_room)
-	snd_index = 0
+
+
+func _nearest_room_with_enemy() -> Room:
+	var nearest: Room = null
+	var nearest_dist: float = INF
+	for node in get_tree().get_nodes_in_group("enemies"):
+		if not node is EnemyUnit or not node.is_alive:
+			continue
+		var enemy_room := _room_containing(node.position)
+		if not enemy_room:
+			continue
+		var dist: float = position.distance_to(enemy_room.position)
+		if dist < nearest_dist:
+			nearest_dist = dist
+			nearest = enemy_room
+	return nearest
 
 func _count_living_enemies() -> int:
 	if _tactical_map and _tactical_map.get("entity_index"):
@@ -774,12 +842,20 @@ func _next_hostile_room() -> Room:
 	return nearest
 
 func _complete_search_destroy() -> void:
+	_release_task_claims()
 	is_moving = false
 	is_searching = false
-	awaiting_at_destination = true
+	awaiting_at_destination = false
 	current_target = null
+	current_order = OrderTypeLib.Type.NONE
+	order_room = null
 	snd_rooms.clear()
 	snd_index = 0
+	_snd_assign_pass = 0
+	path_queue.clear()
+	path_index = 0
+	_pathing_to_room = null
+	path_failed = false
 	if path_line:
 		path_line.visible = false
 	if order_label:
@@ -794,12 +870,19 @@ func _update_snd_label() -> void:
 	else:
 		order_label.text = "Area Clear"
 
-func _build_explore_queue() -> void:
+func _build_explore_queue(start_room: Room = null) -> void:
 	explore_rooms.clear()
 	for node in _rooms_source():
 		if node is Room and not node.is_spawn_room and not node.is_searched:
-			explore_rooms.append(node)
+			var room: Room = node as Room
+			if task_board and task_board.is_room_claimed(room, self, "explore"):
+				continue
+			explore_rooms.append(room)
 	explore_rooms.sort_custom(func(a, b): return position.distance_to(a.position) < position.distance_to(b.position))
+	if start_room and not start_room.is_spawn_room:
+		if start_room in explore_rooms:
+			explore_rooms.erase(start_room)
+		explore_rooms.insert(0, start_room)
 
 func _count_unexplored_rooms() -> int:
 	var count: int = 0
@@ -818,6 +901,8 @@ func _update_explore_label() -> void:
 		order_label.text = "Sweep Complete"
 
 func _assign_explore_room(room: Room) -> void:
+	if task_board and not task_board.claim_room(room, self, "explore"):
+		return
 	order_room = room
 	order_target = room.position
 	has_searched_room = false
@@ -829,32 +914,133 @@ func _assign_explore_room(room: Room) -> void:
 	_pathing_to_room = null
 	_request_path_rebuild(true)
 
+func _find_nearest_unexplored_room() -> Room:
+	var nearest: Room = null
+	var nearest_dist: float = INF
+	for node in _rooms_source():
+		if not node is Room:
+			continue
+		var room: Room = node as Room
+		if room.is_spawn_room or room.is_searched:
+			continue
+		if task_board and task_board.is_room_claimed(room, self, "explore"):
+			continue
+		var dist: float = position.distance_to(room.position)
+		if dist < nearest_dist:
+			nearest_dist = dist
+			nearest = room
+	return nearest
+
 func _advance_explore() -> void:
+	if order_room and task_board:
+		task_board.release_room(order_room, self)
 	while explore_index < explore_rooms.size():
 		var candidate: Room = explore_rooms[explore_index]
 		explore_index += 1
 		if candidate.is_searched:
 			continue
+		if task_board and task_board.is_room_claimed(candidate, self, "explore"):
+			continue
 		_assign_explore_room(candidate)
-		_update_explore_label()
-		return
+		if order_room:
+			_update_explore_label()
+			return
+	var fallback := _find_nearest_unexplored_room()
+	if fallback:
+		_assign_explore_room(fallback)
+		if order_room:
+			_update_explore_label()
+			return
 	_complete_explore()
 
 func _complete_explore() -> void:
+	_release_task_claims()
 	is_moving = false
 	is_searching = false
-	awaiting_at_destination = true
+	awaiting_at_destination = false
 	current_target = null
+	current_order = OrderTypeLib.Type.NONE
+	order_room = null
 	explore_rooms.clear()
 	explore_index = 0
+	path_queue.clear()
+	path_index = 0
+	_pathing_to_room = null
+	path_failed = false
 	if path_line:
 		path_line.visible = false
 	if order_label:
 		order_label.text = "Sweep Complete"
 
 func _assign_search_destroy_room(room: Room) -> void:
-	if task_board:
-		task_board.claim_room(room, self, "snd")
+	_snd_assign_pass += 1
+	if _snd_assign_pass > MAX_SND_ASSIGN_PASSES:
+		_complete_search_destroy()
+		return
+	var picked: Room = _pick_nearest_snd_room(room)
+	if not picked:
+		_complete_search_destroy()
+		return
+	_apply_search_destroy_room_move(picked)
+
+
+func _snd_room_needs_work(room: Room) -> bool:
+	if not room or not is_instance_valid(room) or room.is_spawn_room:
+		return false
+	if room.has_living_enemies():
+		return true
+	if room.requires_clear and not room.is_cleared:
+		return true
+	if room.last_hostile_contact and not room.is_cleared:
+		return true
+	if _hive_in_room(room):
+		return true
+	return false
+
+
+func _snd_room_is_clear(room: Room) -> bool:
+	if not room:
+		return true
+	if room.has_living_enemies() or _hive_in_room(room):
+		return false
+	if room.requires_clear and not room.is_cleared:
+		return false
+	return true
+
+
+func _pick_nearest_snd_room(preferred: Room = null) -> Room:
+	var best: Room = null
+	var best_dist: float = INF
+	if preferred and _snd_room_needs_work(preferred):
+		return preferred
+	for room in snd_rooms:
+		if not _snd_room_needs_work(room):
+			continue
+		var dist: float = position.distance_to(room.position)
+		if dist < best_dist:
+			best_dist = dist
+			best = room
+	for node in _rooms_source():
+		if not node is Room:
+			continue
+		var room: Room = node as Room
+		if not _snd_room_needs_work(room):
+			continue
+		var dist: float = position.distance_to(room.position)
+		if dist < best_dist:
+			best_dist = dist
+			best = room
+	return best
+
+
+func _any_snd_work_remains() -> bool:
+	for node in _rooms_source():
+		if node is Room and _snd_room_needs_work(node):
+			return true
+	return false
+
+
+func _apply_search_destroy_room_move(room: Room) -> void:
 	order_room = room
 	order_target = room.get_formation_position(formation_slot, 4, 0)
 	has_searched_room = false
@@ -865,39 +1051,27 @@ func _assign_search_destroy_room(room: Room) -> void:
 	is_moving = true
 	_pathing_to_room = null
 	_request_path_rebuild(true)
+	_update_snd_label()
+
 
 func _advance_search_destroy() -> void:
-	if not _any_living_enemies():
-		_complete_search_destroy()
-		return
 	if order_room:
 		order_room.mark_searched()
-	snd_index += 1
-	while snd_index < snd_rooms.size():
-		var candidate: Room = snd_rooms[snd_index]
-		if candidate.has_living_enemies() or not candidate.is_searched:
-			_assign_search_destroy_room(candidate)
-			_update_snd_label()
-			return
-		snd_index += 1
-	var next_room := _next_hostile_room()
-	if next_room:
-		_assign_search_destroy_room(next_room)
-		_update_snd_label()
+	if order_room and not _snd_room_is_clear(order_room):
 		return
-	if task_board:
-		var fallback: Room = task_board.next_unclaimed_hostile(position, self, _rooms_source())
-		if fallback:
-			_assign_search_destroy_room(fallback)
-			_update_snd_label()
-			return
-	_build_search_destroy_queue(null)
-	snd_index = 0
-	if snd_rooms.is_empty():
+	var next_room := _pick_nearest_snd_room(null)
+	if next_room:
+		_apply_search_destroy_room_move(next_room)
+		return
+	if not _any_living_enemies() and not _any_snd_work_remains():
 		_complete_search_destroy()
 		return
-	_assign_search_destroy_room(snd_rooms[0])
-	_update_snd_label()
+	_append_snd_purge_fallback(null)
+	next_room = _pick_nearest_snd_room(null)
+	if next_room:
+		_apply_search_destroy_room_move(next_room)
+	else:
+		_complete_search_destroy()
 
 func _get_visible_rooms() -> Array[Room]:
 	if not all_rooms.is_empty():
@@ -1105,7 +1279,7 @@ func _process_search(delta: float) -> void:
 		if order_label:
 			order_label.text = "Searching"
 	elif current_order == OrderTypeLib.Type.SEARCH_DESTROY:
-		if not _any_living_enemies():
+		if not _any_living_enemies() and not _any_snd_work_remains():
 			_complete_search_destroy()
 		else:
 			_advance_search_destroy()
@@ -1147,6 +1321,8 @@ func _process_movement(delta: float) -> void:
 			_evaluate_path_availability()
 			_update_trust_status_label()
 			_notify_path_failure_if_needed()
+			if path_failed:
+				is_moving = false
 			return
 	if waiting_at_door:
 		if waiting_at_door.blocks_travel():
@@ -1243,42 +1419,21 @@ func _update_path_line(_force_visible: bool = false) -> void:
 
 
 func _sync_navigation_path_line() -> void:
-	if not path_line:
-		return
-	if (
-		not _nav_path_preview_enabled
-		or path_queue.is_empty()
-		or path_failed
-		or not is_moving
-		or is_searching
-		or _should_chase_in_room()
-	):
+	if path_line:
 		path_line.visible = false
-		return
-	var pts := PackedVector2Array()
-	pts.append(Vector2.ZERO)
-	var prev := Vector2.ZERO
-	for i in range(path_index, path_queue.size()):
-		var local_pt := path_queue[i] - position
-		if prev.distance_to(local_pt) > NAV_PATH_MAX_SEGMENT:
-			path_line.visible = false
-			return
-		pts.append(local_pt)
-		prev = local_pt
-	if pts.size() < 2:
-		path_line.visible = false
-		return
-	path_line.points = pts
-	path_line.visible = true
 
 
 func set_navigation_path_visible(visible: bool) -> void:
-	_nav_path_preview_enabled = visible
-	if not visible:
-		if path_line:
-			path_line.visible = false
-		return
-	_sync_navigation_path_line()
+	_nav_path_preview_enabled = false
+	if path_line:
+		path_line.visible = false
+
+
+func set_labels_visible(show: bool) -> void:
+	if name_label:
+		name_label.visible = show
+	if order_label:
+		order_label.visible = show
 
 func _process_combat() -> void:
 	if is_searching:
@@ -1505,7 +1660,7 @@ func _on_kill_target(target: Node2D) -> void:
 
 func _process_order_behavior() -> void:
 	if current_order == OrderTypeLib.Type.SEARCH_DESTROY:
-		if not _any_living_enemies():
+		if not _any_living_enemies() and not _any_snd_work_remains():
 			_complete_search_destroy()
 			return
 		if current_target and _target_is_alive(current_target) and _can_see_combat_target(current_target):
@@ -1523,7 +1678,7 @@ func _process_order_behavior() -> void:
 			awaiting_at_destination = false
 			if not is_moving:
 				is_moving = true
-		elif order_room and has_searched_room and not order_room.has_living_enemies() and not is_searching:
+		elif order_room and has_searched_room and _snd_room_is_clear(order_room) and not is_searching:
 			_advance_search_destroy()
 		elif order_room and not has_searched_room and not is_searching:
 			awaiting_at_destination = false

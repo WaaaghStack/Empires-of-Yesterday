@@ -34,7 +34,17 @@ func _populate() -> void:
 			daily_block += "New daily best! "
 		daily_block += SaveManager.format_daily_best_line()
 	var planet_block := ""
-	if summary.get("planet_run", false):
+	if summary.get("campaign_run", false):
+		planet_block = (
+			"\nCampaign complete: [color=#88ccff]%d[/color] sectors cleared\n"
+			% int(summary.get("ops_cleared", 0))
+			+ "Legacy Biomass: [color=#88ddaa]%d[/color]  |  Echoes: [color=#cc88ff]%d[/color]\n"
+			% [int(summary.get("legacy_biomass", 0)), int(summary.get("yesterdays_echoes", 0))]
+		)
+		var evo_lines: Array = summary.get("evolution_summary", [])
+		if not evo_lines.is_empty():
+			planet_block += "Build: [color=#cccccc]%s[/color]\n" % ", ".join(evo_lines)
+	elif summary.get("planet_run", false):
 		planet_block = (
 			"\nImperial Reclamation: [color=#ffd080]%s[/color] (score %d)\n"
 			% [str(summary.get("imperial_rank", "Initiate")), int(summary.get("imperial_score", 0))]
@@ -54,7 +64,9 @@ func _populate() -> void:
 		+ daily_block
 	)
 	tokens_label.text = "Command Tokens earned: +%d (balance: %d)" % [tokens, SaveManager.command_tokens]
-	if summary.get("planet_run", false):
+	if summary.get("campaign_run", false):
+		new_run_button.text = "New Campaign Run"
+	elif summary.get("planet_run", false):
 		new_run_button.text = "New Planet Run"
 
 

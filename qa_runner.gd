@@ -39,6 +39,9 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://PortraitPool.gd",
 	"res://ProceduralMapGenerator.gd",
 	"res://Room.gd",
+	"res://CampaignGraphData.gd",
+	"res://CampaignGraphGenerator.gd",
+	"res://CampaignNavigation.gd",
 	"res://RunState.gd",
 	"res://RunLog.gd",
 	"res://RunSummary.gd",
@@ -61,6 +64,7 @@ const SCRIPT_PATHS: Array[String] = [
 
 const SCENE_PATHS: Array[String] = [
 	"res://BetweenMissionHub.tscn",
+	"res://CampaignNavigation.tscn",
 	"res://Codex.tscn",
 	"res://ControlsOverlay.tscn",
 	"res://Door.tscn",
@@ -108,6 +112,7 @@ func _ready() -> void:
 	_validate_objective_templates()
 	_validate_multi_squad_and_hives()
 	_validate_planet_run()
+	_validate_campaign_mode()
 	_validate_v2_features()
 	_print_summary()
 	_write_report()
@@ -483,8 +488,8 @@ func _validate_planet_run() -> void:
 	if not planet_map is PlanetMapDataScript:
 		_fail("generate_planet should return PlanetMapData")
 	var room_count: int = planet_map.get_room_dicts().size()
-	if room_count < 18 or room_count > 24:
-		_fail("planet map room count out of range: %d" % room_count)
+	if room_count < 12 or room_count > 16:
+		_fail("planet map room count out of range: %d (expected 12-16)" % room_count)
 	elif planet_map.map_size.x < 1400.0 or planet_map.map_size.y < 1400.0:
 		_fail("planet map size too small: %s" % str(planet_map.map_size))
 	elif planet_map.overmind_room_id.is_empty():
@@ -545,6 +550,69 @@ func _validate_planet_run() -> void:
 		_log("OK  PlanetPhase enum (%s)" % ", ".join(phases))
 	RunState.end_run()
 	_log("OK  planet run smoke tests")
+
+
+func _validate_campaign_mode() -> void:
+	_log("-- Campaign navigation smoke tests --")
+	var graph: CampaignGraphData = CampaignGraphGenerator.generate(424242)
+	if graph == null:
+		_fail("CampaignGraphGenerator.generate returned null")
+		return
+	if graph.nodes.size() < 8:
+		_fail("campaign graph too small: %d nodes" % graph.nodes.size())
+	var boss: Dictionary = graph.get_node("boss")
+	if boss.is_empty() or str(boss.get("type", "")) != "boss":
+		_fail("campaign graph missing boss node")
+	var available: Array[Dictionary] = graph.get_available_next()
+	if available.is_empty():
+		_fail("campaign graph should offer choices after start")
+	else:
+		_log("OK  campaign graph nodes=%d first_choices=%d" % [graph.nodes.size(), available.size()])
+	var boss_cfg: Dictionary = graph.get_node_config("boss")
+	if str(boss_cfg.get("map_tier", "")) != "large" or not bool(boss_cfg.get("campaign_boss", false)):
+		_fail("boss node config invalid: %s" % str(boss_cfg))
+	else:
+		_log("OK  boss node config (large + campaign_boss)")
+	var boss_map = ProceduralMapGenerator.generate(99991, {
+		"op_index": 4,
+		"objective_template": "hive_purge",
+		"map_tier": "large",
+		"campaign_boss": true,
+	})
+	var has_overmind := false
+	for room in boss_map.get_room_dicts():
+		if room.get("overmind_room", false):
+			has_overmind = true
+			break
+	if not has_overmind:
+		_fail("campaign boss map missing overmind room")
+	else:
+		_log("OK  campaign boss procedural map has overmind")
+	var squad: Array[SoldierResource] = RunState.generate_full_roster()
+	RunState.start_campaign_run(squad, 77777, false)
+	if not RunState.campaign_mode or RunState.campaign_graph == null:
+		_fail("start_campaign_run did not enable campaign_mode/graph")
+	elif not RunState.campaign_graph.is_completed("start"):
+		_fail("start node should be auto-completed")
+	else:
+		_log("OK  start_campaign_run")
+	var first_choice: Array[Dictionary] = RunState.campaign_graph.get_available_next()
+	if first_choice.is_empty():
+		_fail("campaign run should have available nodes after start")
+		return
+	RunState.begin_campaign_mission(str(first_choice[0].get("id", "")))
+	var mission_cfg: Dictionary = RunState.get_active_mission_config()
+	if mission_cfg.is_empty():
+		_fail("get_active_mission_config returned empty")
+	else:
+		_log("OK  mission config for node %s" % str(mission_cfg.get("map_tier", "?")))
+	RunState.complete_current_mission_node()
+	if RunState.missions_cleared < 1:
+		_fail("complete_current_mission_node did not increment missions_cleared")
+	else:
+		_log("OK  complete_current_mission_node")
+	RunState.end_run()
+	_log("OK  campaign navigation smoke tests")
 
 
 func _validate_v2_features() -> void:

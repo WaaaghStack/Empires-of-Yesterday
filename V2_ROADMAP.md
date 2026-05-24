@@ -2,6 +2,13 @@
 
 *May 23, 2026 — V2 master plan implementation complete.*
 
+## Campaign navigation (post-V2)
+
+- Default run: **Carrier → Navigation (branching graph) → tactical mission × N → boss → Run Summary**
+- `CampaignGraphData.gd` / `CampaignGraphGenerator.gd` — seeded DAG (battle / elite / boss)
+- `CampaignNavigation.tscn` — path pick + squad sidebar
+- Legacy **planet run** still available: Main Menu → More… → Legacy planet run
+
 ## V2 pillars (delivered)
 
 ### Commander comfort

@@ -14,6 +14,7 @@ func _ready() -> void:
 	$MainPanel.add_theme_stylebox_override("panel", GameTheme.make_panel_style())
 	_classic_ops_menu = PopupMenu.new()
 	_classic_ops_menu.add_item("Legacy 4-op run", 0)
+	_classic_ops_menu.add_item("Legacy planet run", 1)
 	add_child(_classic_ops_menu)
 	$MainPanel/VBox/NewRunButton.pressed.connect(_on_new_run_pressed)
 	more_button.pressed.connect(_on_more_pressed)
@@ -44,6 +45,9 @@ func _on_classic_ops_selected(id: int) -> void:
 	if id == 0:
 		get_tree().set_meta("legacy_ops_mode", true)
 		get_tree().change_scene_to_file("res://SquadSelection.tscn")
+	elif id == 1:
+		get_tree().set_meta("legacy_planet_run", true)
+		get_tree().change_scene_to_file("res://OrbitalCarrier.tscn")
 
 
 func _on_new_run_pressed() -> void:
@@ -52,7 +56,9 @@ func _on_new_run_pressed() -> void:
 
 func _on_continue_pressed() -> void:
 	if RunState.run_active:
-		if RunState.planet_mode:
+		if RunState.campaign_mode:
+			get_tree().change_scene_to_file("res://CampaignNavigation.tscn")
+		elif RunState.planet_mode:
 			get_tree().change_scene_to_file("res://PlanetMission.tscn")
 		else:
 			get_tree().change_scene_to_file("res://BetweenMissionHub.tscn")

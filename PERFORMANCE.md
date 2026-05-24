@@ -1,6 +1,8 @@
 # Performance tuning — Empires of Yesterday
 
-This document summarizes runtime optimizations for planet maps (**18–24 rooms**, 12+ units) and the knobs you can adjust.
+This document summarizes runtime optimizations for tactical maps (**campaign sectors: 8–18 rooms each; legacy planet: 12–16 rooms in one hull**) with 12+ units, and the knobs you can adjust.
+
+**Campaign mode** loads a fresh smaller map per navigation node (lower peak room/enemy count per session than one full planet run, but multiple missions per run).
 
 ## Root causes addressed (pass 1)
 
@@ -80,7 +82,7 @@ This document summarizes runtime optimizations for planet maps (**18–24 rooms*
 | Process tiers | Off-screen units/hives `set_process(false)` every 0.2 s | Lower AI/movement cost off-camera |
 | Orbital bar | Evolution bonus recalc every 0.5 s | Less per-frame board polling |
 | SwarmDirector | Adapt log cooldown 12 s; `tick()` 1 Hz | No deploy comms flood |
-| Planet size | Default generation **18–24 rooms**; 1–2 nest hives | Fewer rooms/enemies/fog cells |
+| Planet size | Default generation **12–16 rooms**; 1–2 nest hives | Fewer rooms/enemies/fog cells |
 | Map enemy cap | **22** living enemies map-wide (`TacticalMap.MAP_ENEMY_CAP`) | Prevents hive swarm FPS collapse |
 | LineOfSight | Cache room-at-endpoints in segment tests | Faster LOS on corridor checks |
 | Path graph | Max 3 A* rebuilds per frame; invalidate on door open/close | Smoother movement spikes |
@@ -167,7 +169,7 @@ Session logs batch-flush to disk every **0.25 s** (immediate flush on window clo
 godot --headless --path . res://qa_runner.tscn
 ```
 
-Planet map smoke test expects **18–24** rooms and **1–2** regular hive rooms.
+Planet map smoke test expects **12–16** rooms and **1–2** regular hive rooms.
 
 ## Further ideas (not implemented)
 

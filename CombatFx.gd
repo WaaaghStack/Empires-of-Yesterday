@@ -61,7 +61,7 @@ static func spawn_damage_number(at_node: Node2D, amount: int, color: Color = Col
 	label.add_theme_font_size_override("font_size", 16)
 	label.add_theme_color_override("font_color", color)
 	label.z_index = 30
-	label.position = Vector2(-12, -28)
+	label.position = Vector2(-12 + randf_range(-10.0, 10.0), -28 + randf_range(-6.0, 6.0))
 	at_node.add_child(label)
 	var tween := at_node.create_tween()
 	tween.set_parallel(true)

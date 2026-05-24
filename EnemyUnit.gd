@@ -4,6 +4,7 @@ extends Node2D
 const CombatFxLib := preload("res://CombatFx.gd")
 const LineOfSightLib := preload("res://LineOfSight.gd")
 const MissionStateLib := preload("res://MissionState.gd")
+const EnemySpriteFactoryLib := preload("res://EnemySpriteFactory.gd")
 
 signal died(enemy: EnemyUnit)
 signal combat_hit(attacker_name: String, target_name: String, damage: int, killed: bool)
@@ -46,17 +47,71 @@ const SNIPER_CHASE_RANGE_MULT := 0.55
 const HEAVY_DOOR_AGGRO_MULT := 1.65
 const HEAVY_DOOR_PROXIMITY := 52.0
 
+@onready var body_sprite: Sprite2D = $BodySprite
 @onready var body_poly: Polygon2D = $BodyPoly
 @onready var health_bar: ProgressBar = $HealthBar
 
+var _facing_dir: String = "south"
+var _sprite_archetype: String = "grunt"
+var _base_tint: Color = Color.WHITE
+var _aggro_active := false
+
 func _ready() -> void:
 	add_to_group("enemies")
+	_load_enemy_sprites()
 	current_health = max_health
 	_update_visuals()
 	_apply_visibility()
+	if body_poly:
+		body_poly.visible = false
 
 func _mission_paused() -> bool:
 	return MissionStateLib.is_unit_actions_frozen(self)
+
+func _load_enemy_sprites() -> void:
+	_sprite_archetype = _archetype_sprite_id()
+	if body_sprite:
+		_set_facing_from_direction(Vector2(0, 1))
+		body_sprite.visible = is_visible_to_player
+
+
+func _archetype_sprite_id() -> String:
+	match enemy_archetype:
+		Enemy.Kind.SNIPER:
+			return "sniper"
+		Enemy.Kind.HEAVY:
+			return "heavy"
+		_:
+			return "grunt"
+
+
+func _set_facing_from_direction(direction: Vector2) -> void:
+	if direction.length_squared() < 0.0001:
+		return
+	var facing := "east" if direction.x >= 0.0 else "west"
+	if absf(direction.y) > absf(direction.x):
+		facing = "south" if direction.y >= 0.0 else "north"
+	if facing == _facing_dir:
+		return
+	_facing_dir = facing
+	if body_sprite:
+		var tex: Texture2D = EnemySpriteFactoryLib.get_texture(_sprite_archetype, facing)
+		if tex:
+			body_sprite.texture = tex
+			body_sprite.scale = EnemySpriteFactoryLib.get_scale_for_texture(tex)
+
+
+func _body_canvas() -> CanvasItem:
+	if body_sprite and body_sprite.visible:
+		return body_sprite
+	return body_poly
+
+
+func _set_body_modulate(tint: Color) -> void:
+	var node := _body_canvas()
+	if node:
+		node.modulate = tint
+
 
 func setup_from_resource(resource: Enemy, room: Room = null) -> void:
 	if resource:
@@ -74,9 +129,11 @@ func setup_from_resource(resource: Enemy, room: Room = null) -> void:
 		if resource.leash_range > 0.0:
 			leash_range = resource.leash_range
 		enemy_archetype = resource.archetype
+	_sprite_archetype = _archetype_sprite_id()
 	home_room = room
 	if home_room:
 		_overwatch_anchor = home_room.position
+	_load_enemy_sprites()
 	_update_visuals()
 
 
@@ -283,25 +340,12 @@ func _move_toward_waypoint(delta: float, waypoint: Vector2, move_speed: float) -
 	if to_waypoint.length() <= 0.001:
 		return
 	var before: Vector2 = position
-	if _is_in_corridor_at(position) or _is_in_corridor_at(waypoint):
-		var step: float = move_speed * delta
-		if absf(to_waypoint.x) >= absf(to_waypoint.y):
-			position.x += signf(to_waypoint.x) * minf(absf(to_waypoint.x), step)
-		else:
-			position.y += signf(to_waypoint.y) * minf(absf(to_waypoint.y), step)
-	elif _room_containing(position):
-		position += to_waypoint.normalized() * minf(to_waypoint.length(), move_speed * delta)
-	else:
-		var step: float = move_speed * delta
-		if absf(to_waypoint.x) >= absf(to_waypoint.y):
-			position.x += signf(to_waypoint.x) * minf(absf(to_waypoint.x), step)
-		else:
-			position.y += signf(to_waypoint.y) * minf(absf(to_waypoint.y), step)
+	var step: float = move_speed * delta
+	position += to_waypoint.normalized() * minf(to_waypoint.length(), step)
 	if not _is_walkable(position):
 		position = before
 		return
-	if body_poly:
-		body_poly.rotation = to_waypoint.angle()
+	_set_facing_from_direction(to_waypoint)
 
 func _move_direct(delta: float, target_pos: Vector2, move_speed: float) -> void:
 	var before: Vector2 = position
@@ -312,8 +356,7 @@ func _move_direct(delta: float, target_pos: Vector2, move_speed: float) -> void:
 	if not _is_walkable(position):
 		position = before
 		return
-	if body_poly:
-		body_poly.rotation = to_target.angle()
+	_set_facing_from_direction(to_target)
 
 func _room_containing(pos: Vector2) -> Room:
 	for node in _rooms_source():
@@ -363,11 +406,11 @@ func _find_blocking_door_ahead(waypoint: Vector2) -> Node2D:
 	return null
 
 func _face_target(target: Node2D) -> void:
-	if not target or not body_poly:
+	if not target:
 		return
 	var direction := target.position - position
 	if direction.length() > 0.01:
-		body_poly.rotation = direction.angle()
+		_set_facing_from_direction(direction)
 
 func _get_effective_aggro_range() -> float:
 	var range_val := aggro_range
@@ -428,12 +471,10 @@ func set_focus_marked(marked: bool, duration: float = 10.0) -> void:
 	_apply_mark_visual()
 
 func _apply_mark_visual() -> void:
-	if not body_poly:
-		return
 	if is_focus_marked and is_visible_to_player:
-		body_poly.modulate = Color(1.35, 0.95, 0.35)
+		_set_body_modulate(Color(1.35, 0.95, 0.35))
 	else:
-		body_poly.modulate = Color.WHITE
+		_apply_aggro_tint(_aggro_active)
 
 func set_visible_to_player(now_visible: bool) -> void:
 	if is_visible_to_player == now_visible:
@@ -445,6 +486,8 @@ func set_visible_to_player(now_visible: bool) -> void:
 
 func _apply_visibility() -> void:
 	visible = is_visible_to_player
+	if body_sprite:
+		body_sprite.visible = is_visible_to_player
 	if health_bar:
 		health_bar.visible = is_visible_to_player
 
@@ -476,41 +519,54 @@ func take_damage(amount: int, _from: Node2D = null) -> void:
 	CombatFxLib.spawn_damage_number(self, amount, Color(1.0, 0.45, 0.35, 1.0))
 	if health_bar:
 		health_bar.value = current_health
-	if body_poly:
-		body_poly.modulate = Color(1.2, 0.5, 0.5)
+	var flash_target := _body_canvas()
+	if flash_target:
+		_set_body_modulate(Color(1.2, 0.5, 0.5))
 		var tween := create_tween()
-		tween.tween_property(body_poly, "modulate", Color.WHITE, 0.12)
+		tween.tween_property(flash_target, "modulate", _base_tint, 0.12)
 	if current_health <= 0:
 		_die()
 
 func _die() -> void:
 	is_alive = false
 	CombatFxLib.spawn_death(self, Color(0.9, 0.15, 0.45, 0.9))
-	if body_poly:
-		body_poly.modulate = Color(0.25, 0.25, 0.25, 0.5)
+	_set_body_modulate(Color(0.35, 0.35, 0.35, 0.55))
 	if home_room:
 		home_room.unregister_enemy(self)
 	died.emit(self)
 
 func _flash_attack() -> void:
-	if body_poly:
+	var flash_target := _body_canvas()
+	if flash_target:
 		var tween := create_tween()
-		tween.tween_property(body_poly, "modulate", Color(1.4, 0.4, 0.6), 0.05)
-		tween.tween_property(body_poly, "modulate", Color.WHITE, 0.08)
+		tween.tween_property(flash_target, "modulate", Color(1.4, 0.4, 0.6), 0.05)
+		tween.tween_property(flash_target, "modulate", _base_tint, 0.08)
 
 func _apply_aggro_tint(aggro: bool) -> void:
-	if not body_poly:
+	_aggro_active = aggro
+	if is_focus_marked and is_visible_to_player:
 		return
 	if aggro:
-		body_poly.modulate = Color(1.15, 0.55, 0.55)
+		_set_body_modulate(Color(1.15, 0.55, 0.55))
 	else:
-		body_poly.modulate = Color.WHITE
+		_set_body_modulate(_base_tint)
 
 func _update_visuals() -> void:
+	_sprite_archetype = _archetype_sprite_id()
 	if health_bar:
 		health_bar.max_value = max_health
 		health_bar.value = current_health
-	if body_poly:
+	match enemy_archetype:
+		Enemy.Kind.SNIPER:
+			_base_tint = Color(0.85, 0.75, 1.0)
+		Enemy.Kind.HEAVY:
+			_base_tint = Color(1.0, 0.82, 0.72)
+		_:
+			_base_tint = Color.WHITE
+	if body_sprite:
+		_set_facing_from_direction(Vector2(0, 1))
+		_apply_aggro_tint(_aggro_active)
+	elif body_poly:
 		match enemy_archetype:
 			Enemy.Kind.SNIPER:
 				body_poly.color = Color(0.55, 0.22, 0.82, 1.0)

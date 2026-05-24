@@ -223,12 +223,22 @@ func _ready() -> void:
 	_setup_commander_ui()
 	var map_seed := -1
 	if RunState.run_active:
-		map_seed = RunState.run_seed if _is_planet_mission() else RunState.next_op_seed()
+		if _is_campaign_mission():
+			var node_id := ""
+			if RunState.campaign_graph:
+				node_id = str(RunState.campaign_graph.pending_mission_node_id)
+			map_seed = RunState.get_mission_seed_for_node(node_id) if not node_id.is_empty() else RunState.next_op_seed()
+		elif _is_planet_mission():
+			map_seed = RunState.run_seed
+		else:
+			map_seed = RunState.next_op_seed()
 	else:
 		var env_seed := OS.get_environment("EOY_MAP_SEED")
 		if env_seed.is_valid_int():
 			map_seed = env_seed.to_int()
-	if _is_planet_mission() and RunState.run_active:
+	if _is_campaign_mission() and RunState.run_active:
+		map_data = ProceduralMapGeneratorLib.generate(map_seed, RunState.get_active_mission_config())
+	elif _is_planet_mission() and RunState.run_active:
 		if RunState.planet_map_data:
 			map_data = RunState.planet_map_data
 		else:
@@ -263,7 +273,20 @@ func _ready() -> void:
 	elif map_data and map_data.facility_theme:
 		log_message("Facility theme: %s." % map_data.facility_theme.capitalize(), GameTheme.TEXT_MUTED.to_html())
 	if RunState.run_active:
-		if _is_planet_mission():
+		if _is_campaign_mission():
+			var node_cfg: Dictionary = {}
+			if RunState.campaign_graph:
+				node_cfg = RunState.campaign_graph.get_node_config(
+					str(RunState.campaign_graph.pending_mission_node_id)
+				)
+			log_message(
+				"Campaign sector — %s | seed %d"
+				% [str(node_cfg.get("display_name", "Mission")), map_data.map_seed if map_data else map_seed],
+				GameTheme.ACCENT.to_html(),
+			)
+			if $Title:
+				$Title.text = "CAMPAIGN SECTOR — %s" % str(node_cfg.get("display_name", "MISSION")).to_upper()
+		elif _is_planet_mission():
 			log_message(
 				"Planet reclamation — phase %s | seed %d"
 				% [RunState.get_planet_phase_name(), map_data.map_seed if map_data else RunState.run_seed],
@@ -557,7 +580,11 @@ func _begin_spawn_selection() -> void:
 	deploy_assignments.clear()
 	_deploy_squad_index = 0
 	_selected_squad_id = SquadsManagerLib.SQUAD_IDS[0]
-	if _is_planet_mission() and not RunState.deploy_assignments.is_empty():
+	if _is_campaign_boss_mission():
+		_apply_campaign_boss_deploy()
+	elif _is_campaign_mission():
+		_apply_campaign_simple_deploy()
+	elif _is_planet_mission() and not RunState.deploy_assignments.is_empty():
 		_apply_carrier_sector_deployments()
 	start_button.disabled = deploy_assignments.size() < SquadsManagerLib.SQUAD_IDS.size()
 	if deploy_assignments.size() >= SquadsManagerLib.SQUAD_IDS.size():
@@ -667,7 +694,18 @@ func _on_start_pressed() -> void:
 	_kill_count = 0
 	_searched_room_count = 0
 	log_message("=== MISSION STARTED ===", "yellow")
-	if _is_planet_mission():
+	if _is_campaign_boss_mission():
+		RunState.regular_hives_total = _regular_hives_total
+		RunState.regular_hives_destroyed = 0
+		RunState.overmind_destroyed = false
+		RunState.extract_window_open = false
+		log_message(
+			"Overmind Sanctum: destroy %d nest hives, then the Overmind, then extract all operators."
+			% _regular_hives_total,
+			GameTheme.ACCENT.to_html(),
+			"objective",
+		)
+	elif _is_planet_mission():
 		RunState.begin_planet_purge()
 		log_message(
 			"Planet purge: destroy %d nest hives, then the Overmind, then extract all operators."
@@ -879,16 +917,17 @@ func _spawn_hives() -> void:
 		if not is_overmind:
 			hive.hive_activated.connect(_on_hive_activated)
 			hive.wave_spawned.connect(_on_hive_wave_spawned)
+			hive.wave_telegraph.connect(_on_hive_wave_telegraph)
 		world.add_child(hive)
 		active_hives.append(hive)
 		entity_index.register_hive(hive, room)
 		_hives_total += 1
-	if _is_planet_mission():
+	if _is_planet_mission() or _is_campaign_boss_mission():
 		RunState.regular_hives_total = _regular_hives_total
 		RunState.regular_hives_destroyed = 0
 	if _hives_total > 0:
 		var hive_msg := "BIO SCAN: %d hive signature(s) on deck. Destroy or endure escalating waves." % _hives_total
-		if _is_planet_mission() and _overmind_hive:
+		if (_is_planet_mission() or _is_campaign_boss_mission()) and _overmind_hive:
 			hive_msg = (
 				"BIO SCAN: %d nest hive(s) + dormant Overmind node. Purge nests to awaken the queen."
 				% _regular_hives_total
@@ -932,14 +971,22 @@ func mark_minimap_dirty() -> void:
 func _on_hive_destroyed(hive) -> void:
 	active_hives.erase(hive)
 	var is_overmind: bool = hive is OvermindHive
-	if _is_planet_mission() and not is_overmind:
+	if (_is_planet_mission() or _is_campaign_boss_mission()) and not is_overmind:
 		_regular_hives_destroyed += 1
-		RunState.on_regular_hive_destroyed()
+		if _is_planet_mission():
+			RunState.on_regular_hive_destroyed()
 		_fire_objective_beats()
-		if RunState.planet_phase == RunState.PlanetPhase.QUEEN and _overmind_hive and _overmind_hive.has_method("activate_overmind"):
+		if _is_campaign_boss_mission() and _regular_hives_total > 0 and _regular_hives_destroyed >= _regular_hives_total:
+			if _overmind_hive and _overmind_hive.has_method("activate_overmind"):
+				_overmind_hive.activate_overmind()
+				log_message(CommsTemplatesLib.overmind_awakens(), GameTheme.ACCENT_DANGER.to_html(), "alert")
+		elif _is_planet_mission() and RunState.planet_phase == RunState.PlanetPhase.QUEEN and _overmind_hive and _overmind_hive.has_method("activate_overmind"):
 			_overmind_hive.activate_overmind()
 			log_message(CommsTemplatesLib.overmind_awakens(), GameTheme.ACCENT_DANGER.to_html(), "alert")
 	elif is_overmind:
+		if _is_campaign_boss_mission():
+			RunState.overmind_destroyed = true
+			RunState.extract_window_open = true
 		call_deferred("_announce_extract_window")
 	_hives_destroyed += 1
 	if hive and hive.home_room:
@@ -1300,7 +1347,7 @@ func _on_soldier_entered_room(room: Room, soldier: SoldierUnit) -> void:
 		entity_index.register_soldier(soldier, room)
 		_mark_fog_dirty()
 	_try_destroy_room_terminals(room)
-	if _is_planet_mission() and room.get_meta("evolution_node", false):
+	if (_is_planet_mission() or _is_campaign_boss_mission()) and room.get_meta("evolution_node", false):
 		for node in evolution_nodes:
 			if node.get_script() == EvolutionNodeLib and node.home_room == room and not node.consumed:
 				node.try_activate(soldier.squad_id)
@@ -1326,12 +1373,12 @@ func _on_room_order_requested(room: Room) -> void:
 
 func _objectives_cleared() -> bool:
 	var required := _get_required_rooms()
-	if _is_planet_mission():
+	if _is_planet_mission() or _is_campaign_boss_mission():
 		if not required.all(func(r): return r.is_cleared):
 			return false
 		if _regular_hives_total > 0 and _regular_hives_destroyed < _regular_hives_total:
 			return false
-		if not RunState.overmind_destroyed:
+		if _overmind_hive and not RunState.overmind_destroyed:
 			return false
 		return true
 	if not required.all(func(r): return r.is_cleared):
@@ -1605,6 +1652,60 @@ func _end_mission(victory: bool) -> void:
 	)
 	_update_hud()
 	await get_tree().create_timer(1.8).timeout
+	if _is_campaign_mission() and RunState.run_active:
+		if victory:
+			RunState.complete_current_mission_node()
+			if RunState.is_campaign_complete():
+				var max_evo_tier := 0
+				for squad_id in RunState.SQUAD_IDS:
+					max_evo_tier = maxi(max_evo_tier, RunState.get_evolution_board(squad_id).get_tier_reached())
+				var rank_data := SaveManager.compute_imperial_reclamation_rank({
+					"purge_pct": 1.0,
+					"legacy_biomass": RunState.legacy_biomass,
+					"yesterdays_echoes": RunState.yesterdays_echoes,
+					"evolution_tier": max_evo_tier,
+				})
+				var rewards: Dictionary = SaveManager.record_run_end(RunState.missions_cleared, true, {
+					"legacy_biomass": RunState.legacy_biomass,
+					"token_bonus": int(float(rank_data.get("score", 0)) / 100.0),
+				})
+				var summary_meta := {
+					"ops_cleared": RunState.missions_cleared,
+					"run_won": true,
+					"tokens_earned": rewards.get("tokens_earned", 0),
+					"campaign_run": true,
+					"legacy_biomass": RunState.legacy_biomass,
+					"yesterdays_echoes": RunState.yesterdays_echoes,
+					"imperial_rank": rank_data.get("rank", "Initiate"),
+					"imperial_score": rank_data.get("score", 0),
+					"evolution_tier": max_evo_tier,
+					"evolution_summary": _collect_evolution_summary(),
+				}
+				if RunState.daily_seed_mode:
+					var daily_stats: Dictionary = SaveManager.record_daily_run_end(
+						RunState.missions_cleared,
+						RunState.run_total_casualties,
+						RunState.run_total_elapsed,
+					)
+					summary_meta["daily_run"] = true
+					summary_meta["daily_stats"] = daily_stats
+				RunState.end_run()
+				get_tree().set_meta("run_summary", summary_meta)
+				get_tree().change_scene_to_file("res://RunSummary.tscn")
+			else:
+				get_tree().change_scene_to_file("res://CampaignNavigation.tscn")
+		else:
+			var fail_meta := {
+				"ops_cleared": RunState.missions_cleared,
+				"run_won": false,
+				"tokens_earned": 0,
+				"campaign_run": true,
+				"legacy_biomass": RunState.run_credits,
+			}
+			RunState.end_run()
+			get_tree().set_meta("run_summary", fail_meta)
+			get_tree().change_scene_to_file("res://RunSummary.tscn")
+		return
 	if _is_planet_mission() and RunState.run_active:
 		var ops_cleared := 1 if victory else 0
 		var run_won := victory
@@ -1733,9 +1834,7 @@ func _on_search_destroy_pressed() -> void:
 	_set_pending_order(OrderTypeLib.Type.SEARCH_DESTROY)
 	if not game_active or mission_complete:
 		return
-	var units := _get_selected_units()
-	if units.is_empty():
-		units = squads_manager.get_squad_units(_selected_squad_id)
+	var units := _units_for_order()
 	if units.is_empty():
 		log_message("Select a squad (F1-F3), then press S for coordinated Search & Destroy.", GameTheme.ACCENT_WARN.to_html(), "alert")
 		return
@@ -1753,47 +1852,127 @@ func _on_explore_pressed() -> void:
 	if unexplored.is_empty():
 		log_message("All sectors explored.", GameTheme.TEXT_MUTED.to_html())
 		return
-	var units := _get_selected_units()
+	var units := _units_for_order()
 	if units.is_empty():
-		log_message("Select operators, then press Explore [X] to sweep uncharted sectors.", GameTheme.ACCENT_WARN.to_html())
+		log_message("Select a squad (F1-F3), then press X to sweep uncharted sectors.", GameTheme.ACCENT_WARN.to_html())
 		return
-	for unit in units:
-		if unit.is_extracted:
-			continue
-		_activate_explore(unit)
-	_update_hud()
-
-func _activate_explore(unit: SoldierUnit) -> void:
-	var remaining := _get_unexplored_rooms().size()
-	unit.issue_order(OrderTypeLib.Type.EXPLORE, unit.position, null)
-	log_message(
-		"%s → Explore: checking %d uncharted sector(s)." % [unit.soldier_name, remaining],
-		"white"
-	)
-
-func _issue_squad_search_destroy(units: Array, start_room: Room = null) -> void:
-	if not _any_living_enemies():
-		log_message("No hostile contacts remain on deck.", GameTheme.TEXT_MUTED.to_html(), "objective")
-		return
-	var queue: Array = task_board.build_snd_queue(units, rooms, start_room, _selected_squad_id)
-	var partitions: Dictionary = task_board.partition_rooms(queue, units)
+	_release_squad_task_claims(units)
+	var assignments: Dictionary = task_board.assign_explore_rooms(units, rooms)
+	var assigned_count: int = 0
 	for unit in units:
 		if not unit is SoldierUnit or unit.is_extracted:
 			continue
-		var assigned: Array = partitions.get(unit, [])
-		if assigned.is_empty():
-			_activate_search_destroy(unit, start_room)
-			continue
-		unit.issue_order(OrderTypeLib.Type.SEARCH_DESTROY, unit.position, assigned[0])
+		var target_room: Room = assignments.get(unit, null) as Room
+		_activate_explore(unit, target_room)
+		if target_room:
+			assigned_count += 1
+	var remaining := _get_unexplored_rooms().size()
+	log_message(
+		"%s → Explore: %d marine(s) assigned, %d uncharted sector(s) remain."
+		% [GameTheme.squad_label(_selected_squad_id), assigned_count, remaining],
+		GameTheme.ACCENT.to_html(),
+	)
+
+func _activate_explore(unit: SoldierUnit, target_room: Room = null) -> void:
+	var dest: Vector2 = target_room.position if target_room else unit.position
+	unit.issue_order(OrderTypeLib.Type.EXPLORE, dest, target_room)
+	if target_room:
 		log_message(
-			"%s → S&D: %s" % [unit.soldier_name, assigned[0].room_name if assigned[0] is Room else "purge"],
+			"%s → Explore: %s" % [unit.soldier_name, target_room.room_name],
+			"white",
+		)
+
+func _release_squad_task_claims(units: Array) -> void:
+	for unit in units:
+		if unit is SoldierUnit and is_instance_valid(unit) and unit.task_board:
+			unit.task_board.release_all_for_unit(unit)
+
+
+func _units_for_order() -> Array:
+	var units := _get_selected_units()
+	if units.is_empty():
+		units = squads_manager.get_squad_units(_selected_squad_id)
+	return units
+
+
+func _purge_target_rooms(origin: Vector2 = Vector2.ZERO) -> Array[Room]:
+	var targets: Array[Room] = []
+	for room in rooms:
+		if room.is_spawn_room:
+			continue
+		var needs_purge := room.requires_clear and not room.is_cleared
+		if needs_purge or room.has_living_enemies() or room.last_hostile_contact:
+			targets.append(room)
+	if origin != Vector2.ZERO:
+		targets.sort_custom(func(a, b): return origin.distance_to(a.position) < origin.distance_to(b.position))
+	return targets
+
+
+func _nearest_room_from_list(candidates: Array, from_pos: Vector2) -> Room:
+	var nearest: Room = null
+	var nearest_dist: float = INF
+	for node in candidates:
+		if not node is Room:
+			continue
+		var room: Room = node as Room
+		var dist: float = from_pos.distance_to(room.position)
+		if dist < nearest_dist:
+			nearest_dist = dist
+			nearest = room
+	return nearest
+
+
+func _room_for_living_enemy() -> Room:
+	for enemy in active_enemies:
+		if not enemy.is_alive:
+			continue
+		for room in rooms:
+			if room.contains_local_point(enemy.position, 12.0):
+				return room
+	return null
+
+
+func _issue_squad_search_destroy(units: Array, start_room: Room = null) -> void:
+	_release_squad_task_claims(units)
+	var origin: Vector2 = units[0].position if not units.is_empty() and units[0] is SoldierUnit else Vector2.ZERO
+	var queue: Array = task_board.build_snd_queue(units, rooms, start_room, _selected_squad_id)
+	if queue.is_empty():
+		queue = _purge_target_rooms(origin)
+	if queue.is_empty() and _any_living_enemies():
+		var enemy_room := _room_for_living_enemy()
+		if enemy_room:
+			queue = [enemy_room]
+	if queue.is_empty():
+		log_message("No hostile zones remain — deck is secure.", GameTheme.TEXT_MUTED.to_html(), "objective")
+		for unit in units:
+			if unit is SoldierUnit and is_instance_valid(unit):
+				unit.cancel_order()
+		return
+	for unit in units:
+		if not unit is SoldierUnit or unit.is_extracted:
+			continue
+		var target_room: Room = start_room
+		if target_room == null:
+			target_room = _nearest_room_from_list(queue, unit.position)
+		if not target_room:
+			continue
+		unit.issue_order(OrderTypeLib.Type.SEARCH_DESTROY, target_room.position, target_room)
+		log_message(
+			"%s → S&D: %s" % [unit.soldier_name, target_room.room_name],
 			"white",
 			"combat",
 		)
 	squads_manager.set_doctrine(_selected_squad_id, OrderTypeLib.Type.SEARCH_DESTROY)
+	log_message(
+		"%s assigned Search & Destroy — %d target zone(s)."
+		% [GameTheme.squad_label(_selected_squad_id), queue.size()],
+		GameTheme.ACCENT.to_html(),
+		"objective",
+	)
 
 
 func _issue_squad_objective(units: Array, start_room: Room = null) -> void:
+	_release_squad_task_claims(units)
 	var doctrine := SquadsManagerLib.doctrine_for_objective(get_objective_template())
 	squads_manager.set_doctrine(_selected_squad_id, OrderTypeLib.Type.OBJECTIVE)
 	for unit in units:
@@ -1815,9 +1994,7 @@ func _on_objective_pressed() -> void:
 	_set_pending_order(OrderTypeLib.Type.OBJECTIVE)
 	if not game_active or mission_complete:
 		return
-	var units := squads_manager.get_squad_units(_selected_squad_id)
-	if units.is_empty():
-		units = _get_selected_units()
+	var units := _units_for_order()
 	if units.is_empty():
 		log_message("Select a squad (F1-F3), then press O for Objective doctrine.", GameTheme.ACCENT_WARN.to_html(), "alert")
 		return
@@ -1826,15 +2003,28 @@ func _on_objective_pressed() -> void:
 
 
 func _activate_search_destroy(unit: SoldierUnit, start_room: Room = null) -> void:
-	if not _any_living_enemies():
-		log_message("No hostile contacts remain on deck.", GameTheme.TEXT_MUTED.to_html(), "objective")
+	var target_room: Room = start_room
+	if not target_room:
+		var purge := _purge_target_rooms(unit.position)
+		target_room = _nearest_room_from_list(purge, unit.position)
+	if not target_room and _any_living_enemies():
+		target_room = _room_for_living_enemy()
+	if not target_room:
+		var purge_left := _purge_target_rooms(unit.position)
+		if purge_left.is_empty() and not _any_living_enemies():
+			log_message("No hostile contacts remain on deck.", GameTheme.TEXT_MUTED.to_html(), "objective")
+			unit.cancel_order()
+			return
+		target_room = _nearest_room_from_list(purge_left, unit.position)
+	if not target_room:
+		unit.cancel_order()
 		return
-	var start_pos: Vector2 = start_room.position if start_room else unit.position
-	unit.issue_order(OrderTypeLib.Type.SEARCH_DESTROY, start_pos, start_room)
-	if start_room:
-		log_message("%s → Search & Destroy: autonomous purge from %s." % [unit.soldier_name, start_room.room_name], "white", "combat")
-	else:
-		log_message("%s → Search & Destroy: purging deck until all hostiles eliminated." % unit.soldier_name, "white", "combat")
+	unit.issue_order(OrderTypeLib.Type.SEARCH_DESTROY, target_room.position, target_room)
+	log_message(
+		"%s → Search & Destroy: %s" % [unit.soldier_name, target_room.room_name],
+		"white",
+		"combat",
+	)
 
 
 func _any_living_enemies() -> bool:
@@ -1986,9 +2176,7 @@ func _issue_order_to_selected(room: Room) -> void:
 		return
 	_last_order_frame = frame
 	_last_order_room = room
-	var units := _get_selected_units()
-	if units.is_empty():
-		units = squads_manager.get_squad_units(_selected_squad_id)
+	var units := _units_for_order()
 	if units.is_empty():
 		log_message("Select a squad (F1-F3) or operator first.", GameTheme.ACCENT_WARN.to_html(), "alert")
 		return
@@ -2027,10 +2215,13 @@ func _issue_order_to_selected(room: Room) -> void:
 		_update_hud()
 		return
 	if order == OrderTypeLib.Type.EXPLORE:
+		_release_squad_task_claims(units)
+		var explore_assignments: Dictionary = task_board.assign_explore_rooms(units, rooms, room)
 		for unit in units:
 			if unit.is_extracted:
 				continue
-			_activate_explore(unit)
+			var explore_target: Room = explore_assignments.get(unit, room) as Room
+			_activate_explore(unit, explore_target)
 		_update_hud()
 		return
 	if order == OrderTypeLib.Type.CLEAR:
@@ -2133,6 +2324,19 @@ func _update_objectives() -> void:
 			primary_text += "  |  OVERMIND ACTIVE"
 		elif RunState.extract_window_open:
 			primary_text += "  |  EVAC OPEN"
+	elif _is_campaign_boss_mission():
+		var overmind_note := "dormant"
+		if RunState.overmind_destroyed:
+			overmind_note = "destroyed"
+		elif _overmind_hive and _overmind_hive.state == Hive.State.ACTIVE:
+			overmind_note = "ACTIVE"
+		primary_text = "Overmind Sanctum: nests %d / %d  |  Overmind %s  |  zones %d / %d" % [
+			_regular_hives_destroyed,
+			maxi(_regular_hives_total, 1),
+			overmind_note,
+			cleared_count,
+			required.size(),
+		]
 	else:
 		primary_text = "Primary: Clear hostile zones — %d / %d" % [cleared_count, required.size()]
 	var extraction_text := _get_extraction_status_text()
@@ -2291,7 +2495,37 @@ func _update_hud() -> void:
 		ability_button.disabled = true
 	_apply_command_mode_ui()
 	_update_navigation_path_preview(unit, units)
+	_refresh_unit_label_lod()
 	squad_roster.refresh(_selected_indices())
+
+
+func _refresh_unit_label_lod() -> void:
+	if not game_active:
+		return
+	var primary := _selected_unit()
+	var selected := _get_selected_units()
+	var multi := selected.size() > 1
+	for unit in active_units:
+		if not is_instance_valid(unit) or not unit.is_alive or unit.is_extracted:
+			unit.set_labels_visible(false)
+			continue
+		var status := unit.get_trust_status()
+		var show := false
+		if not multi and unit == primary:
+			show = true
+		elif status in ["ENGAGED", "BLOCKED", "NO PATH", "EXTRACTING"]:
+			show = true
+		elif unit.squad_id == _selected_squad_id and unit.is_selected:
+			show = true
+		elif unit.squad_id == _selected_squad_id and _is_unit_near_camera(unit) and status != "IDLE":
+			show = true
+		unit.set_labels_visible(show)
+
+
+func _is_unit_near_camera(unit: SoldierUnit) -> bool:
+	if not map_camera:
+		return true
+	return map_camera.position.distance_to(unit.position) <= UNIT_SLEEP_RADIUS * 0.55
 
 
 func _update_navigation_path_preview(primary_unit: SoldierUnit, selected_units: Array) -> void:
@@ -2324,7 +2558,9 @@ func _apply_command_mode_ui() -> void:
 func _on_back_pressed() -> void:
 	CombatAudioLib.play_ui_click(self)
 	if RunState.run_active:
-		if _is_planet_mission():
+		if _is_campaign_mission():
+			get_tree().change_scene_to_file("res://CampaignNavigation.tscn")
+		elif _is_planet_mission():
 			get_tree().change_scene_to_file("res://MainMenu.tscn")
 		else:
 			get_tree().change_scene_to_file("res://BetweenMissionHub.tscn")
@@ -2333,7 +2569,46 @@ func _on_back_pressed() -> void:
 
 
 func _is_planet_mission() -> bool:
-	return planet_mode or (RunState.run_active and RunState.planet_mode)
+	return planet_mode or (RunState.run_active and RunState.planet_mode and not RunState.campaign_mode)
+
+
+func _is_campaign_mission() -> bool:
+	return RunState.run_active and RunState.campaign_mode
+
+
+func _is_campaign_boss_mission() -> bool:
+	if not _is_campaign_mission() or RunState.campaign_graph == null:
+		return false
+	var node_id := str(RunState.campaign_graph.pending_mission_node_id)
+	return RunState.campaign_graph.get_node(node_id).get("type", "") == "boss"
+
+
+func _apply_campaign_simple_deploy() -> void:
+	_apply_all_squads_to_spawn_room("Campaign deploy")
+
+
+func _apply_campaign_boss_deploy() -> void:
+	_apply_all_squads_to_spawn_room("Overmind Sanctum deploy")
+
+
+func _apply_all_squads_to_spawn_room(log_prefix: String) -> void:
+	var spawn_room: Room = null
+	for room in rooms:
+		if room.is_spawn_eligible:
+			spawn_room = room
+			break
+	if spawn_room == null:
+		spawn_room = _get_spawn_room()
+	if spawn_room == null:
+		log_message("No secure deploy zone on this deck.", GameTheme.ACCENT_WARN.to_html(), "alert")
+		return
+	for squad_id in SquadsManagerLib.SQUAD_IDS:
+		deploy_assignments[squad_id] = spawn_room
+	selected_spawn_room = spawn_room
+	_deploy_squad_index = SquadsManagerLib.SQUAD_IDS.size()
+	start_button.disabled = false
+	start_button.text = "BEGIN MISSION"
+	log_message("%s: all squads at %s." % [log_prefix, spawn_room.room_name], GameTheme.ACCENT.to_html(), "objective")
 
 func _on_quit_pressed() -> void:
 	get_tree().quit()
@@ -3092,14 +3367,15 @@ func trigger_cinematic(_reason: String, duration: float = 2.0) -> void:
 		tween.tween_property(map_camera, "position", _overmind_hive.position, duration * 0.5)
 
 
-func _on_hive_wave_spawned(hive, _count: int) -> void:
+func _on_hive_wave_telegraph(hive) -> void:
 	if hive and hive.home_room:
 		_hive_telegraph_rooms[hive.home_room] = HIVE_TELEGRAPH_SECONDS
-		log_message(
-			CommsTemplatesLib.hive_wave_inbound(hive.home_room.room_name),
-			GameTheme.ACCENT_DANGER.to_html(),
-			"alert",
-		)
+		_minimap_dirty = true
+
+
+func _on_hive_wave_spawned(hive, _count: int) -> void:
+	if hive and hive.home_room and hive.home_room in _hive_telegraph_rooms:
+		_hive_telegraph_rooms.erase(hive.home_room)
 		_minimap_dirty = true
 
 
@@ -3431,16 +3707,26 @@ func _draw_minimap() -> void:
 			col = Color(0.62, 0.18, 0.82, 0.98)
 		minimap_panel.draw_rect(Rect2(pos, rs), col)
 		var icon_center := pos + rs * 0.5
-		if room.is_extraction_room:
-			minimap_panel.draw_circle(icon_center, 4.0, GameTheme.ACCENT_SUCCESS)
+		if room.is_spawn_room or room.map_room_id == "planet_deploy":
+			minimap_panel.draw_rect(Rect2(icon_center - Vector2(5, 5), Vector2(10, 10)), Color(0.25, 0.9, 0.5, 0.98))
+			minimap_panel.draw_rect(Rect2(icon_center - Vector2(5, 5), Vector2(10, 10)), Color(0.9, 1.0, 0.95, 0.9), false, 1.5)
+		elif room.is_extraction_room:
+			minimap_panel.draw_rect(Rect2(icon_center - Vector2(5, 5), Vector2(10, 10)), GameTheme.ACCENT_SUCCESS)
+			minimap_panel.draw_rect(Rect2(icon_center - Vector2(5, 5), Vector2(10, 10)), Color(0.9, 1.0, 0.95, 0.9), false, 1.5)
+		elif room.get_meta("overmind_room", false):
+			minimap_panel.draw_circle(icon_center, 6.0, Color(0.62, 0.22, 0.88, 0.98))
+			minimap_panel.draw_arc(icon_center, 7.5, 0.0, TAU, 16, Color(0.95, 0.55, 1.0, 0.95), 2.0)
 		elif room.get_meta("evolution_node", false):
-			minimap_panel.draw_circle(icon_center, 3.5, Color(0.35, 0.85, 1.0, 0.95))
-		elif room.get_meta("hive_room", false) and not room.get_meta("overmind_room", false):
-			minimap_panel.draw_circle(icon_center, 4.0, Color(0.95, 0.25, 0.55, 0.95))
+			minimap_panel.draw_circle(icon_center, 5.0, Color(0.28, 0.72, 1.0, 0.98))
+			minimap_panel.draw_line(icon_center + Vector2(-4, 0), icon_center + Vector2(4, 0), Color.WHITE, 2.0)
+			minimap_panel.draw_line(icon_center + Vector2(0, -4), icon_center + Vector2(0, 4), Color.WHITE, 2.0)
+		elif room.get_meta("hive_room", false):
+			minimap_panel.draw_circle(icon_center, 5.5, Color(0.95, 0.22, 0.48, 0.98))
+			minimap_panel.draw_arc(icon_center, 7.0, 0.0, TAU, 10, Color(1.0, 0.45, 0.65, 0.95), 2.0)
 		elif room.get_meta("elite_slot", false):
-			minimap_panel.draw_circle(icon_center, 3.0, Color(1.0, 0.75, 0.25, 0.95))
+			minimap_panel.draw_circle(icon_center, 4.0, Color(1.0, 0.75, 0.25, 0.95))
 		if _hive_telegraph_rooms.has(room):
-			minimap_panel.draw_arc(icon_center, 7.0, 0.0, TAU, 12, Color(1.0, 0.35, 0.25, 0.9), 2.0)
+			minimap_panel.draw_arc(icon_center, 9.0, 0.0, TAU, 14, Color(1.0, 0.35, 0.25, 0.95), 2.5)
 	for unit in active_units:
 		if not unit.is_alive:
 			continue

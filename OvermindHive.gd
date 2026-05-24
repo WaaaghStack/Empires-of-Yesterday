@@ -35,8 +35,15 @@ func activate_overmind() -> void:
 		return
 	state = State.ACTIVE
 	current_phase = 1
+	_sync_process_mode()
 	hive_activated.emit(self)
 	_spawn_phase_wave(2)
+	if _body:
+		_body.color = Color(0.55, 0.15, 0.72, 0.95)
+	if _ring:
+		_ring.default_color = Color(1.0, 0.55, 1.0, 1.0)
+		_ring.width = 3.5
+	scale = Vector2(1.15, 1.15)
 	if _tactical_map and _tactical_map.has_method("log_message"):
 		_tactical_map.log_message(
 			"OVERMIND AWAKENED — destroy the queen node to open extraction.",
@@ -70,6 +77,16 @@ func take_damage(amount: int, from: Node2D = null) -> void:
 				"alert",
 			)
 		RunState.award_echoes(1)
+
+
+func tick_active(delta: float) -> void:
+	super.tick_active(delta)
+	if is_destroyed or state != State.ACTIVE or _telegraph_active:
+		return
+	var pulse := 1.08 + 0.07 * sin(Time.get_ticks_msec() / 160.0)
+	scale = Vector2(pulse, pulse)
+	if _ring:
+		_ring.width = 3.0 + sin(Time.get_ticks_msec() / 220.0) * 0.8
 
 
 func _spawn_phase_wave(count: int) -> void:

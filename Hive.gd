@@ -142,11 +142,23 @@ func tick_active(delta: float) -> void:
 	_prune_spawned()
 	if _telegraph_active:
 		_telegraph_timer -= delta
+		var t := 1.0 - (_telegraph_timer / TELEGRAPH_SECONDS)
+		var pulse := 1.0 + 0.18 * sin(t * TAU * 3.0)
+		scale = Vector2(pulse, pulse)
+		if _ring:
+			_ring.width = 2.0 + 3.5 * t
+			_ring.default_color = Color(1.0, 0.45 + 0.25 * t, 0.2, 1.0)
+		if _body:
+			_body.modulate = Color(1.0, 0.7 + 0.3 * t, 0.45 + 0.35 * t, 1.0)
 		if _telegraph_timer <= 0.0:
 			_telegraph_active = false
+			scale = Vector2.ONE
+			if _body:
+				_body.modulate = Color.WHITE
 			_spawn_wave()
 			spawn_timer = current_interval
 		return
+	scale = Vector2.ONE
 	spawn_timer -= delta
 	escalation_timer += delta
 	if escalation_timer >= 60.0:

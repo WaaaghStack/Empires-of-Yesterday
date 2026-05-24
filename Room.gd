@@ -132,10 +132,81 @@ func _draw() -> void:
 			draw_string(ThemeDB.fallback_font, status_pos, "UNKNOWN", HORIZONTAL_ALIGNMENT_LEFT, int(room_size.x - 16.0), 11, Color(0.35, 0.38, 0.45, 0.9))
 		return
 	draw_string(ThemeDB.fallback_font, title_pos, room_name, HORIZONTAL_ALIGNMENT_LEFT, int(room_size.x - 16.0), 14, Color(0.95, 0.97, 1.0, 1.0))
+	_draw_role_strip(half)
 	var status_color := _status_color()
 	draw_string(ThemeDB.fallback_font, status_pos, _status_text, HORIZONTAL_ALIGNMENT_LEFT, int(room_size.x - 16.0), 11, status_color)
 	if last_hostile_contact and not _has_spotted_enemies():
 		_draw_last_contact_marker(half)
+
+func _draw_role_strip(half: Vector2) -> void:
+	var role := _room_role_id()
+	if role.is_empty():
+		return
+	var strip_w := 8.0
+	var strip_h := minf(room_size.y * 0.55, 48.0)
+	var x0 := half.x - strip_w - 6.0
+	var y0 := -half.y + 8.0
+	var col := _role_color(role)
+	draw_rect(Rect2(x0, y0, strip_w, strip_h), col)
+	draw_rect(Rect2(x0, y0, strip_w, strip_h), col.lightened(0.25), false, 1.0)
+	var glyph := _role_glyph_letter(role)
+	if not glyph.is_empty():
+		draw_string(
+			ThemeDB.fallback_font,
+			Vector2(x0 - 2.0, y0 + strip_h * 0.5 - 8.0),
+			glyph,
+			HORIZONTAL_ALIGNMENT_CENTER,
+			int(strip_w + 20),
+			14,
+			Color(1, 1, 1, 0.95),
+		)
+
+
+func _room_role_id() -> String:
+	if is_spawn_room or map_room_id == "planet_deploy":
+		return "deploy"
+	if is_extraction_room:
+		return "extract"
+	if get_meta("overmind_room", false):
+		return "overmind"
+	if get_meta("hive_room", false):
+		return "hive"
+	if get_meta("evolution_node", false):
+		return "evo"
+	return ""
+
+
+func _role_color(role: String) -> Color:
+	match role:
+		"deploy":
+			return Color(0.25, 0.85, 0.45, 0.95)
+		"extract":
+			return Color(0.2, 0.9, 0.55, 0.95)
+		"overmind":
+			return Color(0.62, 0.22, 0.88, 0.95)
+		"hive":
+			return Color(0.9, 0.22, 0.48, 0.95)
+		"evo":
+			return Color(0.28, 0.72, 1.0, 0.95)
+		_:
+			return Color(0.4, 0.45, 0.55, 0.8)
+
+
+func _role_glyph_letter(role: String) -> String:
+	match role:
+		"deploy":
+			return "D"
+		"extract":
+			return "X"
+		"overmind":
+			return "Q"
+		"hive":
+			return "H"
+		"evo":
+			return "E"
+		_:
+			return ""
+
 
 func _draw_last_contact_marker(half: Vector2) -> void:
 	var marker_pos := Vector2(half.x - 18.0, -half.y + 18.0)

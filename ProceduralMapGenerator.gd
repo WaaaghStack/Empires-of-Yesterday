@@ -28,10 +28,12 @@ const ROOM_COLOR_POOL: Array[Color] = [
 const CORRIDOR_LENGTH := 56.0
 const CORRIDOR_WIDTH := 48.0
 const PIECE_MARGIN := 8.0
+const PLANET_SPINE_MAX_WORLD_SPAN := 3600.0
 
 static func generate(custom_seed: int = -1, config: Dictionary = {}):
 	var op_index: int = int(config.get("op_index", 1))
-	if op_index >= 4 and config.get("handcrafted_finale", true):
+	# Handcrafted 5-room finale is legacy op-run only; campaign nodes always use tier-based maps.
+	if op_index >= 4 and config.get("handcrafted_finale", true) and str(config.get("node_type", "")).is_empty():
 		return _generate_finale_map(custom_seed, config)
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	var seed_value: int = custom_seed if custom_seed >= 0 else rng.randi()
@@ -66,6 +68,8 @@ static func generate(custom_seed: int = -1, config: Dictionary = {}):
 		room_count += 1
 	var names: Array[String] = _pick_room_names(room_count, rng)
 	var roles: Array[Dictionary] = _assign_roles(room_count, rng, op_index, objective_template, add_loot_branch, map_tier)
+	if config.get("campaign_boss", false) and objective_template == "hive_purge":
+		_apply_campaign_boss_roles(roles, room_count, rng, config)
 	var layout := _build_lego_layout(room_count, rng, add_loot_branch, data.map_scale)
 	_center_layout(layout)
 	var theme_palette: Dictionary = MapVisualsLib.get_facility_palette(data.facility_theme)
@@ -91,9 +95,16 @@ static func generate(custom_seed: int = -1, config: Dictionary = {}):
 			"vip_room": role.get("vip_room", false),
 			"loot_branch": role.get("loot_branch", false),
 			"hive_room": role.get("hive_room", false),
+			"overmind_room": role.get("overmind_room", false),
+			"evolution_node": role.get("evolution_node", false),
 			"sector": data.sector_tags.get(role.get("id_override", "room_%d" % i), "central"),
 			"stat_scale": data.enemy_stat_scale,
 		})
+		if role.get("hive_room", false) and not role.get("overmind_room", false):
+			if not data.hive_room_ids.has(role.get("id_override", "room_%d" % i)):
+				data.hive_room_ids.append(role.get("id_override", "room_%d" % i))
+		if role.get("overmind_room", false):
+			data.overmind_room_id = role.get("id_override", "room_%d" % i)
 		if role.get("hold_room", false):
 			data.hold_room_id = role.get("id_override", "room_%d" % i)
 		if role.get("intel_terminal", false):
@@ -130,7 +141,12 @@ static func generate_planet(custom_seed: int = -1, config: Dictionary = {}):
 	var room_count: int = rng.randi_range(room_min, room_max)
 	var names: Array[String] = _pick_room_names(room_count, rng)
 	var roles: Array[Dictionary] = _assign_planet_roles(room_count, rng, op_index, config)
-	var layout := _build_lego_layout(room_count, rng, false, data.map_scale)
+	var layout := _build_spine_layout(room_count, rng, data.map_scale)
+	var shrink_attempts := 0
+	while _layout_world_span(layout) > PLANET_SPINE_MAX_WORLD_SPAN and shrink_attempts < 4:
+		shrink_attempts += 1
+		data.map_scale *= 0.92
+		layout = _build_spine_layout(room_count, rng, data.map_scale)
 	_center_layout(layout)
 	var theme_palette: Dictionary = MapVisualsLib.get_facility_palette(data.facility_theme)
 	var theme_room_colors: Array = theme_palette.get("room_colors", ROOM_COLOR_POOL)
@@ -382,6 +398,90 @@ static func _size_for_shape(shape: String, rng: RandomNumberGenerator) -> Vector
 			return ROOM_SHAPE_LOOT
 		_:
 			return ROOM_SIZE_POOL[rng.randi() % ROOM_SIZE_POOL.size()]
+
+
+static func _build_spine_layout(count: int, rng: RandomNumberGenerator, map_scale: float = 1.0) -> Dictionary:
+	var corridor_len: float = CORRIDOR_LENGTH * map_scale
+	var rooms: Array[Dictionary] = []
+	var link_specs: Array[Dictionary] = []
+	var corridors: Array[Rect2] = []
+	var branch_budget := mini(maxi(0, count - 5), maxi(0, int(round(float(count) * 0.35))))
+	var spine_len := count - branch_budget
+	var first_shape := _pick_room_shape(rng)
+	rooms.append({
+		"index": 0,
+		"pos": Vector2.ZERO,
+		"size": _size_for_shape(first_shape, rng),
+		"shape": first_shape,
+	})
+	for i in range(1, spine_len):
+		var shape := _pick_room_shape(rng)
+		var child_size: Vector2 = _size_for_shape(shape, rng)
+		var parent_idx: int = i - 1
+		var parent: Dictionary = rooms[parent_idx]
+		var dir := "E"
+		var child_pos: Vector2 = _child_pos_from_attachment_scaled(parent.pos, parent.size, child_size, dir, corridor_len)
+		var parent_port: Vector2 = _port_on_edge(parent.pos, parent.size, dir)
+		var child_port: Vector2 = _port_on_edge(child_pos, child_size, _opposite_dir(dir))
+		var corridor: Rect2 = _corridor_rect_between(parent_port, child_port)
+		rooms.append({"index": i, "pos": child_pos, "size": child_size, "shape": shape})
+		link_specs.append({"a": parent_idx, "b": i, "parent_dir": dir})
+		corridors.append(corridor)
+	var parent_candidates: Array[int] = []
+	for i in range(1, spine_len - 1):
+		parent_candidates.append(i)
+	if parent_candidates.is_empty() and spine_len > 2:
+		parent_candidates.append(int(spine_len / 2))
+	for b in range(branch_budget):
+		var room_idx: int = spine_len + b
+		var shape := _pick_room_shape(rng)
+		var child_size: Vector2 = _size_for_shape(shape, rng)
+		var placed := false
+		var attempts: Array = []
+		for parent_idx in parent_candidates:
+			for dir in ["N", "S"]:
+				attempts.append([parent_idx, dir])
+		attempts.shuffle()
+		for attempt in attempts:
+			var parent_idx: int = attempt[0]
+			var dir: String = attempt[1]
+			var parent: Dictionary = rooms[parent_idx]
+			var child_pos: Vector2 = _child_pos_from_attachment_scaled(parent.pos, parent.size, child_size, dir, corridor_len)
+			var parent_port: Vector2 = _port_on_edge(parent.pos, parent.size, dir)
+			var child_port: Vector2 = _port_on_edge(child_pos, child_size, _opposite_dir(dir))
+			var corridor: Rect2 = _corridor_rect_between(parent_port, child_port)
+			if _layout_overlaps(child_pos, child_size, rooms, corridors, corridor, parent_idx):
+				continue
+			rooms.append({"index": room_idx, "pos": child_pos, "size": child_size, "shape": shape})
+			link_specs.append({"a": parent_idx, "b": room_idx, "parent_dir": dir})
+			corridors.append(corridor)
+			placed = true
+			break
+		if not placed and not parent_candidates.is_empty():
+			var parent_idx: int = parent_candidates[b % parent_candidates.size()]
+			var dir := "N" if b % 2 == 0 else "S"
+			var parent: Dictionary = rooms[parent_idx]
+			var child_pos: Vector2 = _child_pos_from_attachment_scaled(parent.pos, parent.size, child_size, dir, corridor_len)
+			var parent_port: Vector2 = _port_on_edge(parent.pos, parent.size, dir)
+			var child_port: Vector2 = _port_on_edge(child_pos, child_size, _opposite_dir(dir))
+			var corridor: Rect2 = _corridor_rect_between(parent_port, child_port)
+			rooms.append({"index": room_idx, "pos": child_pos, "size": child_size, "shape": shape})
+			link_specs.append({"a": parent_idx, "b": room_idx, "parent_dir": dir})
+			corridors.append(corridor)
+	return {"rooms": rooms, "link_specs": link_specs, "corridors": corridors}
+
+
+static func _layout_world_span(layout: Dictionary) -> float:
+	var room_list: Array = layout.get("rooms", [])
+	if room_list.is_empty():
+		return 0.0
+	var min_pos: Vector2 = _room_aabb(room_list[0].pos, room_list[0].size, 0.0).position
+	var max_pos: Vector2 = _room_aabb(room_list[0].pos, room_list[0].size, 0.0).end
+	for room in room_list:
+		var rect: Rect2 = _room_aabb(room.pos, room.size, 0.0)
+		min_pos = min_pos.min(rect.position)
+		max_pos = max_pos.max(rect.end)
+	return maxf(max_pos.x - min_pos.x, max_pos.y - min_pos.y)
 
 
 static func _build_lego_layout(count: int, rng: RandomNumberGenerator, add_loot_branch: bool = false, map_scale: float = 1.0) -> Dictionary:
@@ -658,6 +758,51 @@ static func _assign_planet_roles(count: int, rng: RandomNumberGenerator, op_inde
 		if not roles[evo_idx].has("id_override"):
 			roles[evo_idx]["id_override"] = "evo_%d" % e
 	return roles
+
+
+static func _apply_campaign_boss_roles(
+	roles: Array[Dictionary],
+	count: int,
+	rng: RandomNumberGenerator,
+	config: Dictionary,
+) -> void:
+	var hostile_indices: Array[int] = []
+	for i in range(count - 1):
+		if roles[i].get("clear", false) and not roles[i].get("loot_branch", false):
+			hostile_indices.append(i)
+	hostile_indices.shuffle()
+	var hive_count := rng.randi_range(1, 2)
+	if _mutators_include(config, "dense_spores"):
+		hive_count += 1
+	var hive_pool: Array[int] = []
+	for idx in hostile_indices:
+		if not roles[idx].get("overmind_room", false):
+			hive_pool.append(idx)
+	hive_pool.shuffle()
+	for h in range(mini(hive_count, hive_pool.size())):
+		var hive_idx: int = hive_pool[h]
+		roles[hive_idx]["hive_room"] = true
+		roles[hive_idx]["enemies"] = maxi(int(roles[hive_idx]["enemies"]), 1)
+		roles[hive_idx]["id_override"] = "hive_%d" % h
+	var overmind_idx := _pick_overmind_room_index(count, hostile_indices)
+	if overmind_idx >= 0:
+		roles[overmind_idx]["hive_room"] = true
+		roles[overmind_idx]["overmind_room"] = true
+		roles[overmind_idx]["clear"] = true
+		roles[overmind_idx]["enemies"] = maxi(int(roles[overmind_idx]["enemies"]), 2)
+		roles[overmind_idx]["elite_slot"] = true
+		roles[overmind_idx]["id_override"] = "overmind_core"
+	var evo_pool: Array[int] = []
+	for idx in hostile_indices:
+		if idx != overmind_idx and not roles[idx].get("hive_room", false):
+			evo_pool.append(idx)
+	evo_pool.shuffle()
+	var evo_count := mini(rng.randi_range(1, 2), evo_pool.size())
+	for e in range(evo_count):
+		var evo_idx: int = evo_pool[e]
+		roles[evo_idx]["evolution_node"] = true
+		if not roles[evo_idx].has("id_override"):
+			roles[evo_idx]["id_override"] = "evo_%d" % e
 
 
 static func _pick_overmind_room_index(count: int, hostile_indices: Array[int]) -> int:
