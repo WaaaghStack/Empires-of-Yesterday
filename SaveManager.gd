@@ -24,6 +24,8 @@ var daily_best_date: String = ""
 var daily_best_ops: int = 0
 var daily_best_kia: int = 999
 var daily_best_time: float = 999999.0
+var ascension_level: int = 0
+var codex_achievements: Array[String] = []
 
 
 func _ready() -> void:
@@ -65,6 +67,8 @@ func load_profile() -> void:
 	daily_best_ops = int(data.get("daily_best_ops", 0))
 	daily_best_kia = int(data.get("daily_best_kia", 999))
 	daily_best_time = float(data.get("daily_best_time", 999999.0))
+	ascension_level = int(data.get("ascension_level", 0))
+	codex_achievements = _to_string_array(data.get("codex_achievements", []))
 	if unlocked_portraits.is_empty():
 		_seed_default_portraits()
 	_reset_daily_if_stale()
@@ -86,6 +90,8 @@ func save_profile() -> void:
 		"daily_best_ops": daily_best_ops,
 		"daily_best_kia": daily_best_kia,
 		"daily_best_time": daily_best_time,
+		"ascension_level": ascension_level,
+		"codex_achievements": codex_achievements,
 	}
 	var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if file:
@@ -290,3 +296,41 @@ func _to_string_array(raw: Variant) -> Array[String]:
 		for v in raw:
 			result.append(str(v))
 	return result
+
+
+func apply_ascension_mutators_to_run(run_state: Node) -> void:
+	if run_state == null or ascension_level <= 0:
+		return
+	for i in range(ascension_level):
+		var mid: String = RunState.MUTATOR_IDS[i % RunState.MUTATOR_IDS.size()]
+		run_state.set_mutator(mid, true)
+
+
+func record_ascension_progress(run_won: bool) -> void:
+	if not run_won:
+		return
+	ascension_level = mini(3, ascension_level + 1)
+	try_grant_achievement("campaign_victory")
+	save_profile()
+
+
+func try_grant_achievement(achievement_id: String) -> bool:
+	if achievement_id.is_empty() or achievement_id in codex_achievements:
+		return false
+	codex_achievements.append(achievement_id)
+	var token_bonus := 1
+	command_tokens += token_bonus
+	save_profile()
+	return true
+
+
+func format_ascension_line() -> String:
+	if ascension_level <= 0:
+		return "Ascension: 0 (win a campaign to raise threat)"
+	return "Ascension: %d — +%d run mutator(s) on new campaigns" % [ascension_level, ascension_level]
+
+
+func format_achievements_line() -> String:
+	if codex_achievements.is_empty():
+		return "Codex goals: none completed yet."
+	return "Codex goals: %s" % ", ".join(codex_achievements)

@@ -13,10 +13,7 @@ var _squad_presets: Array[String] = ["assault_std", "support_std", "marksman_std
 var _squad_stances: Array[String] = ["Balanced", "Balanced", "Balanced"]
 var _squad_drop_sectors: Array[String] = ["north", "south", "east"]
 var _operator_traits: Array = [[], [], [], [], [], [], [], [], [], [], [], []]
-var _mutators_enabled: Dictionary = {
-	"quiet_deck": false,
-	"accelerated_swarm": false,
-}
+var _mutators_enabled: Dictionary = {}
 var _use_daily_seed := false
 var _legacy_planet_run := false
 
@@ -30,6 +27,8 @@ var _legacy_planet_run := false
 
 
 func _ready() -> void:
+	for mutator_id in RunState.MUTATOR_IDS:
+		_mutators_enabled[mutator_id] = false
 	GameTheme.apply_to_control(self)
 	GameTheme.ignore_mouse($Background)
 	GameTheme.configure_scroll(squad_scroll, 380.0)

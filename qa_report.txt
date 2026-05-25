@@ -1,5 +1,6 @@
 === QA VALIDATION START ===
 -- Scripts --
+OK  res://BackgroundMusic.gd
 OK  res://BetweenMissionHub.gd
 OK  res://Codex.gd
 OK  res://CombatAudio.gd
@@ -24,6 +25,13 @@ OK  res://OvermindHive.gd
 OK  res://MissionState.gd
 OK  res://MissionTaskBoard.gd
 OK  res://MissionEntityIndex.gd
+OK  res://UnitSimulationStore.gd
+OK  res://UnitSimulationManager.gd
+OK  res://UnitPresentationLayer.gd
+OK  res://PathRequestQueue.gd
+OK  res://RoomCombatResolver.gd
+OK  res://MassUnitAdapter.gd
+OK  res://MassBattleSpawner.gd
 OK  res://CombatCoordinator.gd
 OK  res://OrbitalCarrier.gd
 OK  res://OpModifier.gd
@@ -32,6 +40,9 @@ OK  res://OrderType.gd
 OK  res://PortraitPool.gd
 OK  res://ProceduralMapGenerator.gd
 OK  res://Room.gd
+OK  res://CampaignGraphData.gd
+OK  res://CampaignGraphGenerator.gd
+OK  res://CampaignNavigation.gd
 OK  res://RunState.gd
 OK  res://RunLog.gd
 OK  res://RunSummary.gd
@@ -42,12 +53,39 @@ OK  res://SoldierUnit.gd
 OK  res://SquadsManager.gd
 OK  res://SwarmDirector.gd
 OK  res://Hive.gd
+OK  res://HivePressure.gd
+OK  res://CommsTemplates.gd
+OK  res://HivePressure.gd
+OK  res://CommsTemplates.gd
 OK  res://SquadRosterPanel.gd
 OK  res://SquadSelection.gd
 OK  res://TacticalMap.gd
 OK  res://TutorialState.gd
+OK  res://CommanderProfile.gd
+OK  res://ArmyPool.gd
+OK  res://GalaxyMapState.gd
+OK  res://GalaxyMapGenerator.gd
+OK  res://CommanderResources.gd
+OK  res://BuildingDefinition.gd
+OK  res://TurnResolver.gd
+OK  res://BattleMapData.gd
+OK  res://BattleMapGenerator.gd
+OK  res://SectorCombatResolver.gd
+OK  res://BattleDirectives.gd
+OK  res://CommanderSelect.gd
+OK  res://GalaxyMapScreen.gd
+OK  res://BattleViewer.gd
+OK  res://BattleDebriefCommander.gd
+OK  res://CommandHQ.gd
+OK  res://GalaxyThreatAnalyzer.gd
+OK  res://BattlePhaseController.gd
+OK  res://BattleHeatOverlay.gd
+OK  res://BattleMassPresentation.gd
+OK  res://BattleCinematicCamera.gd
+OK  res://BattleAtmosphere.gd
 -- Scenes --
 OK  res://BetweenMissionHub.tscn
+OK  res://CampaignNavigation.tscn
 OK  res://Codex.tscn
 OK  res://ControlsOverlay.tscn
 OK  res://Door.tscn
@@ -68,6 +106,11 @@ OK  res://SoldierUnit.tscn
 OK  res://SquadSelection.tscn
 OK  res://TacticalMap.tscn
 OK  res://PlanetMission.tscn
+OK  res://CommanderSelect.tscn
+OK  res://GalaxyMapScreen.tscn
+OK  res://BattleViewer.tscn
+OK  res://BattleDebriefCommander.tscn
+OK  res://CommandHQ.tscn
 -- Soldier resources --
 OK  res://Soldier_Marine1.tres (Vega)
 OK  res://Soldier_Marine2.tres (Hayes)
@@ -88,11 +131,11 @@ OK  RunState transitions
 OK  RunLog session=C:/Users/Komba/OneDrive/Documents/GitHub/Empires-of-Yesterday/logs/latest_run.txt
 -- Phase A-E / F smoke tests --
 OK  objective templates (7)
-OK  hold_purge hold_room_id=room_1
+OK  hold_purge hold_room_id=room_5
 OK  run augments script
 OK  facility theme jungle
 OK  handcrafted finale (5 rooms)
-OK  daily share code EOY-2026-05-23-12345
+OK  daily share code EOY-2026-05-24-12345
 -- Objective template smoke tests --
 OK  standard rooms=18 deploy_rooms=13
 OK  silent_extract rooms=16 deploy_rooms=12
@@ -107,16 +150,69 @@ OK  generate_full_roster (12 operators)
 OK  MissionTaskBoard
 OK  SquadsManager defaults
 OK  medium map 17 rooms
-OK  hive_purge large map hives=3 rooms=28
+OK  hive_purge large map hives=2 rooms=28
 OK  hive_purge objective template
 OK  Hive combat destruction
 OK  squad_status hive engagement
 OK  objective doctrine mapping
 -- Planet run smoke tests --
-OK  planet map rooms=26 size=(2230.6, 2484.8) hives=6 overmind=overmind_core
+FAIL: planet map size too small: (2926.4, 792.2)
+FAIL: quiet_deck mutator should remove regular hives
+-- Mission unpaused start --
+FAIL: deploy selection should freeze unit actions
+OK  MissionState deploy-only freeze
 OK  start_planet_run defaults
 OK  planet phase enum transitions
 OK  PlanetPhase enum (DEPLOY, PURGE, ESCALATION, QUEEN, EXTRACT)
 OK  planet run smoke tests
+-- Campaign navigation smoke tests --
+OK  campaign graph nodes=10 first_choices=3
+OK  boss node config (large + campaign_boss)
+FAIL: campaign boss map missing overmind room
+OK  start_campaign_run
+OK  mission config for node small
+OK  complete_current_mission_node
+FAIL: get_mission_config should merge carrier mutators
+OK  sector reward choices=1
+OK  campaign graph includes event nodes
+OK  codex achievements
+OK  Flanker enemy archetype
+OK  campaign navigation smoke tests
+-- V2 feature smoke tests --
+OK  HivePressure colony baseline
+OK  accelerated_swarm mutator pressure
+OK  CommsTemplates military tone
+OK  evolution node count 2-3
+OK  colony placeholder tiles
+OK  predator instinct synergy chain
+OK  V2 feature smoke tests
+-- Mass unit simulation --
+OK  spawned 10000 unit rows
+FAIL: 10k movement stub took 15.04 ms (gate 8ms)
+OK  horde spawn layered on store
+OK  battle map mass_unit_mode flag
+OK  campaign map keeps mass mode off
+-- Commander mode --
+OK  army allocation
+OK  permanent army losses
+OK  galaxy generated (9 nodes)
+OK  turn resolver stub (Turn 1 resolved — 1/1 battles won.)
+OK  battle terrain map (48 regions)
+OK  building placement on HQ
+OK  threat strip (1 underdefended · 3 frontier)
+OK  battle phase -> deployment
+OK  battle phase -> approach
+OK  battle contact column 32
+OK  battle objectives (4 sectors)
+OK  build block reason when slots full
+OK  lane spawn grid (600 positions)
+OK  battle scale spawn rows=400 (target 400)
+OK  BattleHeatOverlay heat radius 80.0
+OK  battle visual tuning knobs
+-- Battle scale spawn --
+OK  max_visual_units 2500
+OK  lane spawn 1200 positions (alloc 1200)
+OK  store rows 600 for scale probe
+OK  heat overlay radius 80.0
 === QA VALIDATION END ===
-RESULT: PASS
+RESULT: FAIL (6 issue(s))

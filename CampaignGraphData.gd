@@ -72,7 +72,19 @@ func get_node_config(node_id: String) -> Dictionary:
 		"campaign_boss": bool(node.get("campaign_boss", false)),
 		"display_name": str(node.get("display_name", "Mission")),
 		"description": str(node.get("description", "")),
+		"node_mutators": node.get("node_mutators", []),
+		"sector_reward": str(node.get("sector_reward", "")),
+		"heal_percent": float(node.get("heal_percent", 0.0)),
+		"biomass_bonus": int(node.get("biomass_bonus", 0)),
 	}
+
+
+func is_combat_node_type(node_type: String) -> bool:
+	return node_type in ["battle", "elite", "boss"]
+
+
+func is_event_node_type(node_type: String) -> bool:
+	return node_type in ["rest", "armory", "intel_broker"]
 
 
 func missions_cleared_count() -> int:

@@ -1,0 +1,101 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://CommandHQ.gd" id="1"]
+
+[node name="CommandHQ" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.05, 0.06, 0.09, 1)
+
+[node name="TopBar" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 16.0
+offset_top = 12.0
+offset_right = -16.0
+offset_bottom = 48.0
+grow_horizontal = 2
+
+[node name="BackButton" type="Button" parent="TopBar"]
+layout_mode = 2
+text = "Galaxy"
+
+[node name="Title" type="Label" parent="TopBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 22
+text = "Colony Management"
+vertical_alignment = 1
+
+[node name="MainHBox" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = 56.0
+offset_right = -16.0
+offset_bottom = -56.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+
+[node name="NodePanel" type="PanelContainer" parent="MainHBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
+
+[node name="NodeVBox" type="VBoxContainer" parent="MainHBox/NodePanel"]
+layout_mode = 2
+
+[node name="NodeList" type="ItemList" parent="MainHBox/NodePanel/NodeVBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BuildPanel" type="PanelContainer" parent="MainHBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.5
+
+[node name="BuildVBox" type="VBoxContainer" parent="MainHBox/BuildPanel"]
+layout_mode = 2
+
+[node name="BuildScroll" type="ScrollContainer" parent="MainHBox/BuildPanel/BuildVBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BuildList" type="VBoxContainer" parent="MainHBox/BuildPanel/BuildVBox/BuildScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="FooterPanel" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = -48.0
+offset_right = -16.0
+offset_bottom = -12.0
+grow_horizontal = 2
+
+[node name="StatusLabel" type="Label" parent="FooterPanel"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Resources"

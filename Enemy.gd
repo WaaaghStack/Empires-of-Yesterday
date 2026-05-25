@@ -2,7 +2,7 @@
 class_name Enemy
 extends Resource
 
-enum Kind { RIFLEMAN, HEAVY, SNIPER }
+enum Kind { RIFLEMAN, HEAVY, SNIPER, FLANKER }
 
 @export var enemy_name: String = "Enemy"
 @export var health: int = 50
@@ -40,6 +40,14 @@ static func create_archetype(type: Kind, scale: float, enemy_id: int) -> Enemy:
 			res.fire_rate = 0.55
 			res.aggro_range = 500.0
 			res.leash_range = 180.0
+		Kind.FLANKER:
+			res.health = int(28 * scale) + enemy_id
+			res.damage = int(11 * scale) + 1
+			res.speed = 118.0
+			res.attack_range = 75.0
+			res.fire_rate = 0.85
+			res.aggro_range = 380.0
+			res.leash_range = 320.0
 	return res
 
 static func make_archetype(type: Kind, enemy_id: int, scale: float = 1.0) -> Enemy:
@@ -51,6 +59,8 @@ static func archetype_label(type: Kind) -> String:
 			return "Heavy"
 		Kind.SNIPER:
 			return "Sniper"
+		Kind.FLANKER:
+			return "Flanker"
 		_:
 			return "Rifleman"
 
@@ -64,15 +74,19 @@ static func pick_archetype_for_op(op_index: int, rng: RandomNumberGenerator, is_
 			return Kind.RIFLEMAN if rng.randf() > 0.35 else Kind.HEAVY
 		3:
 			var roll := rng.randf()
-			if roll < 0.4:
+			if roll < 0.3:
 				return Kind.HEAVY
-			if roll < 0.7:
+			if roll < 0.5:
 				return Kind.SNIPER
+			if roll < 0.72:
+				return Kind.FLANKER
 			return Kind.RIFLEMAN
 		_:
 			var roll2 := rng.randf()
-			if roll2 < 0.35:
+			if roll2 < 0.28:
 				return Kind.HEAVY
-			if roll2 < 0.65:
+			if roll2 < 0.5:
 				return Kind.SNIPER
+			if roll2 < 0.72:
+				return Kind.FLANKER
 			return Kind.RIFLEMAN

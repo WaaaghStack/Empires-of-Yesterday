@@ -21,32 +21,45 @@ grow_vertical = 2
 mouse_filter = 2
 color = Color(0.05, 0.06, 0.09, 1)
 
-[node name="Header" type="HBoxContainer" parent="."]
+[node name="TopBar" type="HBoxContainer" parent="."]
 layout_mode = 1
 anchors_preset = 10
 anchor_right = 1.0
-offset_left = 24.0
-offset_top = 16.0
-offset_right = -24.0
-offset_bottom = 56.0
+offset_left = 16.0
+offset_top = 12.0
+offset_right = -16.0
+offset_bottom = 52.0
 grow_horizontal = 2
-theme_override_constants/separation = 24
+theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="Header"]
+[node name="BackButton" type="Button" parent="TopBar"]
+custom_minimum_size = Vector2(88, 36)
 layout_mode = 2
-theme_override_font_sizes/font_size = 32
-text = "NAVIGATION — SELECT SECTOR"
+text = "Menu"
 
-[node name="CreditsLabel" type="Label" parent="Header"]
+[node name="Title" type="Label" parent="TopBar"]
 layout_mode = 2
-size_flags_horizontal = 10
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 22
+text = "Navigation — Select Sector"
+vertical_alignment = 1
+
+[node name="StatsVBox" type="VBoxContainer" parent="TopBar"]
+layout_mode = 2
+size_flags_horizontal = 8
+theme_override_constants/separation = 2
+
+[node name="CreditsLabel" type="Label" parent="TopBar/StatsVBox"]
+layout_mode = 2
 theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
+theme_override_font_sizes/font_size = 13
 text = "Biomass: 0"
 horizontal_alignment = 2
 
-[node name="SeedLabel" type="Label" parent="Header"]
+[node name="SeedLabel" type="Label" parent="TopBar/StatsVBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 12
 text = "Seed: 0"
 horizontal_alignment = 2
 
@@ -55,29 +68,30 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 24.0
-offset_top = 64.0
-offset_right = -24.0
-offset_bottom = -88.0
+offset_left = 16.0
+offset_top = 56.0
+offset_right = -16.0
+offset_bottom = -132.0
 grow_horizontal = 2
 grow_vertical = 2
-theme_override_constants/separation = 16
+theme_override_constants/separation = 12
 
 [node name="GraphFrame" type="PanelContainer" parent="MainHBox"]
 layout_mode = 2
 size_flags_horizontal = 3
-size_flags_stretch_ratio = 3.0
+size_flags_stretch_ratio = 2.5
 
 [node name="GraphPanel" type="Control" parent="MainHBox/GraphFrame"]
-custom_minimum_size = Vector2(720, 480)
+custom_minimum_size = Vector2(640, 400)
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
 
 [node name="RosterPanel" type="PanelContainer" parent="MainHBox"]
-custom_minimum_size = Vector2(300, 0)
+custom_minimum_size = Vector2(280, 0)
 layout_mode = 2
 size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
 
 [node name="RosterVBox" type="VBoxContainer" parent="MainHBox/RosterPanel"]
 layout_mode = 2
@@ -86,7 +100,7 @@ theme_override_constants/separation = 8
 [node name="RosterTitle" type="Label" parent="MainHBox/RosterPanel/RosterVBox"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
-text = "TASK FORCE"
+text = "Task Force"
 
 [node name="RosterScroll" type="ScrollContainer" parent="MainHBox/RosterPanel/RosterVBox"]
 layout_mode = 2
@@ -97,61 +111,60 @@ layout_mode = 2
 size_flags_horizontal = 3
 theme_override_constants/separation = 8
 
-[node name="BottomBar" type="HBoxContainer" parent="."]
+[node name="FooterPanel" type="VBoxContainer" parent="."]
 layout_mode = 1
 anchors_preset = 12
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 24.0
-offset_top = -72.0
-offset_right = -24.0
-offset_bottom = -16.0
+offset_left = 16.0
+offset_top = -124.0
+offset_right = -16.0
+offset_bottom = -12.0
 grow_horizontal = 2
 grow_vertical = 0
-theme_override_constants/separation = 12
+theme_override_constants/separation = 8
 
-[node name="InfoLabel" type="Label" parent="BottomBar"]
+[node name="InfoLabel" type="Label" parent="FooterPanel"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+text = "W/S: move  |  Enter: commit  |  Esc: abort"
+autowrap_mode = 3
+
+[node name="ActionRow" type="HBoxContainer" parent="FooterPanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ServicesBox" type="HBoxContainer" parent="FooterPanel/ActionRow"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="HealButton" type="Button" parent="FooterPanel/ActionRow/ServicesBox"]
+custom_minimum_size = Vector2(110, 32)
+layout_mode = 2
+text = "Heal"
+
+[node name="IntelButton" type="Button" parent="FooterPanel/ActionRow/ServicesBox"]
+custom_minimum_size = Vector2(110, 32)
+layout_mode = 2
+text = "Intel"
+
+[node name="RecruitButton" type="Button" parent="FooterPanel/ActionRow/ServicesBox"]
+custom_minimum_size = Vector2(110, 32)
+layout_mode = 2
+text = "Recruit"
+
+[node name="ActionSpacer" type="Control" parent="FooterPanel/ActionRow"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_font_sizes/font_size = 14
-text = "W/S: move cursor  |  Enter: commit mission  |  Esc: abort run"
-autowrap_mode = 2
 
-[node name="CommitButton" type="Button" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -200.0
-offset_top = -48.0
-offset_right = -24.0
-offset_bottom = -16.0
-grow_horizontal = 0
-grow_vertical = 0
-text = "COMMIT"
+[node name="CommitButton" type="Button" parent="FooterPanel/ActionRow"]
+custom_minimum_size = Vector2(200, 36)
+layout_mode = 2
+size_flags_horizontal = 8
+text = "Commit Mission"
 
-[node name="AbortButton" type="Button" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -392.0
-offset_top = -48.0
-offset_right = -216.0
-offset_bottom = -16.0
-grow_horizontal = 0
-grow_vertical = 0
-text = "Abort Run"
-
-[node name="BackButton" type="Button" parent="."]
-layout_mode = 1
-offset_left = 24.0
-offset_top = 16.0
-offset_right = 120.0
-offset_bottom = 48.0
-text = "Menu"
+[node name="AbortButton" type="Button" parent="FooterPanel/ActionRow"]
+custom_minimum_size = Vector2(100, 36)
+layout_mode = 2
+text = "Abort"

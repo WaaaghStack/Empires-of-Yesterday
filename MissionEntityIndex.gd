@@ -10,6 +10,7 @@ var soldier_room: Dictionary = {}
 var revealed_rooms: Array[Room] = []
 var frontier_rooms: Array[Room] = []
 var living_enemy_count_cached: int = 0
+var soldier_store_indices_by_room: Dictionary = {}
 
 
 func _valid_enemy(enemy) -> EnemyUnit:
@@ -68,6 +69,27 @@ func reset() -> void:
 	revealed_rooms.clear()
 	frontier_rooms.clear()
 	living_enemy_count_cached = 0
+	soldier_store_indices_by_room.clear()
+
+
+func register_store_soldier(store_index: int, room: Room) -> void:
+	if room == null or store_index < 0:
+		return
+	var list: Array = soldier_store_indices_by_room.get(room, [])
+	if store_index not in list:
+		list.append(store_index)
+	soldier_store_indices_by_room[room] = list
+
+
+func unregister_store_soldier(store_index: int, room: Room) -> void:
+	if room == null or not soldier_store_indices_by_room.has(room):
+		return
+	var list: Array = soldier_store_indices_by_room[room]
+	list.erase(store_index)
+	if list.is_empty():
+		soldier_store_indices_by_room.erase(room)
+	else:
+		soldier_store_indices_by_room[room] = list
 
 
 func register_soldier(unit: SoldierUnit, room: Room) -> void:

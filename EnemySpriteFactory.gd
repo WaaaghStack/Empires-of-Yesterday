@@ -43,6 +43,8 @@ static func _make_silhouette(archetype: String, facing: String) -> Image:
 			base = Color(0.48, 0.18, 0.78, 1.0)
 		"heavy":
 			base = Color(0.78, 0.28, 0.16, 1.0)
+		"flanker":
+			base = Color(0.22, 0.72, 0.48, 1.0)
 	var cx := SPRITE_PX * 0.5
 	var cy := SPRITE_PX * 0.5
 	# Body blob

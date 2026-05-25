@@ -3,7 +3,16 @@ extends Node
 
 const PlanetMapDataScript := preload("res://PlanetMapData.gd")
 const EvolutionBoardLib := preload("res://EvolutionBoard.gd")
+const EvolutionUpgradeLib := preload("res://EvolutionUpgrade.gd")
 const CampaignGraphGeneratorLib := preload("res://CampaignGraphGenerator.gd")
+const GalaxyMapGeneratorLib := preload("res://GalaxyMapGenerator.gd")
+const GalaxyMapStateLib := preload("res://GalaxyMapState.gd")
+const ArmyPoolLib := preload("res://ArmyPool.gd")
+const CommanderResourcesLib := preload("res://CommanderResources.gd")
+const CommanderProfileLib := preload("res://CommanderProfile.gd")
+const BuildingDefinitionLib := preload("res://BuildingDefinition.gd")
+
+const COMMANDER_RUN_SAVE_PATH := "user://commander_run.save"
 
 enum PlanetPhase { DEPLOY, PURGE, ESCALATION, QUEEN, EXTRACT }
 
@@ -55,6 +64,15 @@ var legacy_ops_mode: bool = false
 ## Branching mission-to-mission campaign (default New Run from carrier).
 var campaign_mode: bool = false
 var campaign_graph = null
+## Commander auto-battler galaxy mode.
+var commander_mode: bool = false
+var commander_id: String = "logistician"
+var galaxy_state = null
+var army_pool = null
+var commander_resources = null
+var pending_battle_node_id: String = ""
+var pending_live_battle: bool = false
+var last_turn_summary: String = ""
 var missions_cleared: int = 0
 var planet_phase: PlanetPhase = PlanetPhase.DEPLOY
 var planet_map_data = null
@@ -70,8 +88,14 @@ var orbital_charges: float = 100.0
 var orbital_charge_max: float = 100.0
 var evolution_boards: Dictionary = {}
 var active_mutators: Array[String] = []
+var intel_revealed_node_ids: Array[String] = []
+var pending_sector_reward_choices: Array[Dictionary] = []
+var last_completed_node_id: String = ""
 
 const MUTATOR_IDS: Array[String] = ["dense_spores", "quiet_deck", "reinforced"]
+const NAV_HEAL_COST := 35
+const NAV_INTEL_COST := 40
+const NAV_RECRUIT_COST := 65
 
 var _rng := RandomNumberGenerator.new()
 
@@ -156,12 +180,16 @@ func start_campaign_run(squad_resources: Array[SoldierResource], seed_override: 
 	orbital_charges = orbital_charge_max
 	evolution_boards.clear()
 	active_mutators.clear()
+	intel_revealed_node_ids.clear()
+	pending_sector_reward_choices.clear()
+	last_completed_node_id = ""
 	for squad_id in SQUAD_IDS:
 		squad_stances[squad_id] = "balanced"
 		var board: EvolutionBoardLib = EvolutionBoardLib.new()
 		board.reset(squad_id)
 		evolution_boards[squad_id] = board
 	campaign_graph = CampaignGraphGeneratorLib.generate(run_seed)
+	SaveManager.apply_ascension_mutators_to_run(self)
 
 
 func start_planet_run(squad_resources: Array[SoldierResource], seed_override: int = -1, use_daily_seed: bool = false) -> void:
@@ -264,6 +292,9 @@ func end_run() -> void:
 	last_mission_stats = {}
 	_reset_planet_state()
 	_reset_campaign_state()
+	_reset_commander_state()
+	if FileAccess.file_exists(COMMANDER_RUN_SAVE_PATH):
+		DirAccess.remove_absolute(COMMANDER_RUN_SAVE_PATH)
 
 
 func is_campaign_run_active() -> bool:
@@ -314,7 +345,14 @@ func get_mission_config_for_node(node_id: String) -> Dictionary:
 		"modifier": active_modifier,
 		"campaign_boss": bool(node_cfg.get("campaign_boss", false)),
 		"node_type": str(node_cfg.get("node_type", "battle")),
-		"mutators": active_mutators.duplicate(),
+		"mutators": get_effective_mutators_for_node(node_id),
+		"mass_unit_mode": bool(node_cfg.get("mass_unit_mode", false)),
+		"battle_map_preset": bool(node_cfg.get("battle_map_preset", false)),
+		"max_units": int(node_cfg.get("max_units", 10000)),
+		"full_tier_cap": int(node_cfg.get("full_tier_cap", 300)),
+		"initial_friendlies": int(node_cfg.get("initial_friendlies", 0)),
+		"initial_hostiles": int(node_cfg.get("initial_hostiles", 0)),
+		"active_lite_cap": int(node_cfg.get("active_lite_cap", 2000)),
 	}
 
 
@@ -626,6 +664,163 @@ func toggle_mutator(mutator_id: String) -> void:
 	set_mutator(mutator_id, not has_mutator(mutator_id))
 
 
+func get_effective_mutators_for_node(node_id: String) -> Array[String]:
+	var merged: Array[String] = []
+	for mid in active_mutators:
+		if mid not in merged:
+			merged.append(mid)
+	if campaign_graph == null or node_id.is_empty():
+		return merged
+	var node: Dictionary = campaign_graph.get_node(node_id)
+	for raw in node.get("node_mutators", []):
+		var mid: String = str(raw)
+		if mid in MUTATOR_IDS and mid not in merged:
+			merged.append(mid)
+	return merged
+
+
+func prepare_sector_rewards(completed_node_id: String) -> void:
+	pending_sector_reward_choices.clear()
+	last_completed_node_id = completed_node_id
+	if campaign_graph == null or completed_node_id.is_empty():
+		return
+	var node: Dictionary = campaign_graph.get_node(completed_node_id)
+	if node.is_empty():
+		return
+	var reward_kind: String = str(node.get("sector_reward", ""))
+	var biomass_bonus: int = int(node.get("biomass_bonus", 0))
+	match reward_kind:
+		"evolution":
+			var squad_id: String = active_squad_id
+			var board: EvolutionBoardLib = get_evolution_board(squad_id)
+			var rng := RandomNumberGenerator.new()
+			rng.seed = get_mission_seed_for_node(completed_node_id) + 17
+			var picks: Array = EvolutionUpgradeLib.roll_choices(board, 2, rng)
+			for upgrade in picks:
+				if upgrade == null:
+					continue
+				var tags_text: String = ", ".join(upgrade.tags) if not upgrade.tags.is_empty() else str(upgrade.pool)
+				pending_sector_reward_choices.append({
+					"type": "evolution",
+					"squad_id": squad_id,
+					"upgrade_id": upgrade.id,
+					"label": upgrade.display_name,
+					"detail": "%s — %s" % [tags_text, upgrade.description],
+				})
+			if pending_sector_reward_choices.is_empty():
+				pending_sector_reward_choices.append({
+					"type": "biomass",
+					"label": "Hive Salvage",
+					"detail": "+%d biomass (evolution cache empty)." % maxi(20, biomass_bonus),
+					"amount": maxi(20, biomass_bonus),
+				})
+		"heal":
+			pending_sector_reward_choices.append({
+				"type": "heal",
+				"label": "Field Medics",
+				"detail": "Restore 35% squad HP and reduce stress.",
+				"heal_percent": 0.35,
+			})
+		"biomass":
+			pending_sector_reward_choices.append({
+				"type": "biomass",
+				"label": "Salvage Cache",
+				"detail": "+%d biomass for navigation services." % maxi(15, biomass_bonus),
+				"amount": maxi(15, biomass_bonus),
+			})
+		_:
+			if biomass_bonus > 0:
+				pending_sector_reward_choices.append({
+					"type": "biomass",
+					"label": "Sector Salvage",
+					"detail": "+%d biomass." % biomass_bonus,
+					"amount": biomass_bonus,
+				})
+			pending_sector_reward_choices.append({
+				"type": "heal",
+				"label": "Quick Patch",
+				"detail": "Restore 20%% squad HP.",
+				"heal_percent": 0.2,
+			})
+
+
+func apply_sector_reward(choice: Dictionary) -> void:
+	if choice.is_empty():
+		return
+	match str(choice.get("type", "")):
+		"evolution":
+			apply_evolution_upgrade(
+				str(choice.get("squad_id", active_squad_id)),
+				str(choice.get("upgrade_id", "")),
+				[],
+			)
+		"heal":
+			heal_squad_percent(float(choice.get("heal_percent", 0.35)))
+		"biomass":
+			run_credits += int(choice.get("amount", 20))
+	pending_sector_reward_choices.clear()
+
+
+func heal_squad_percent(percent: float) -> void:
+	for member in squad:
+		if member.is_kia:
+			continue
+		var cap: int = member.health
+		member.current_hp = mini(cap, member.current_hp + int(cap * percent))
+		member.is_injured = member.current_hp < cap
+		member.stress = maxf(0.0, member.stress - 0.15)
+
+
+func spend_biomass(cost: int) -> bool:
+	if cost <= 0 or run_credits < cost:
+		return false
+	run_credits -= cost
+	return true
+
+
+func reveal_intel_for_nodes(node_ids: Array) -> void:
+	for node_id in node_ids:
+		var nid: String = str(node_id)
+		if not nid.is_empty() and nid not in intel_revealed_node_ids:
+			intel_revealed_node_ids.append(nid)
+
+
+func is_node_intel_revealed(node_id: String) -> bool:
+	return node_id in intel_revealed_node_ids
+
+
+func apply_rest_node(node_id: String) -> void:
+	var node: Dictionary = campaign_graph.get_node(node_id) if campaign_graph else {}
+	var pct: float = float(node.get("heal_percent", 0.4))
+	heal_squad_percent(pct)
+
+
+func complete_event_node(node_id: String) -> void:
+	if not campaign_mode or campaign_graph == null:
+		return
+	if node_id not in campaign_graph.completed_ids:
+		campaign_graph.completed_ids.append(node_id)
+	campaign_graph.current_node_id = node_id
+	campaign_graph.pending_mission_node_id = ""
+	missions_cleared = campaign_graph.missions_cleared_count()
+	cleared_ops = missions_cleared
+	op_index = missions_cleared + 1
+
+
+func draft_recruit() -> SoldierResource:
+	var used: Dictionary = {}
+	for member in squad:
+		used[member.soldier_name] = true
+	var squad_id: String = SQUAD_IDS[_rng.randi() % SQUAD_IDS.size()]
+	var recruits: Array = generate_squad(squad_id, used)
+	if recruits.is_empty():
+		return null
+	var rookie: SoldierResource = recruits[0]
+	squad.append(rookie)
+	squad_assignments[squad.size() - 1] = squad_id
+	return rookie
+
+
 func get_squad_id_for_index(index: int) -> String:
 	if squad_assignments.has(index):
 		return str(squad_assignments[index])
@@ -744,10 +939,180 @@ func _daily_seed_value() -> int:
 	return hash("%04d-%02d-%02d" % [today.year, today.month, today.day]) & 0x7FFFFFFF
 
 
+func start_commander_run(commander: String, seed_override: int = -1, use_daily_seed: bool = false) -> void:
+	_reset_planet_state()
+	_reset_campaign_state()
+	_reset_commander_state()
+	commander_mode = true
+	planet_mode = false
+	legacy_ops_mode = false
+	campaign_mode = false
+	run_active = true
+	commander_id = commander if not commander.is_empty() else "logistician"
+	var profile: Dictionary = CommanderProfileLib.get_by_id(commander_id)
+	daily_seed_mode = use_daily_seed
+	if seed_override >= 0:
+		run_seed = seed_override
+	elif use_daily_seed:
+		run_seed = _daily_seed_value()
+	else:
+		_rng.randomize()
+		run_seed = _rng.randi()
+	galaxy_state = GalaxyMapGeneratorLib.generate(run_seed)
+	army_pool = ArmyPoolLib.new()
+	army_pool.reset(int(profile.get("starting_soldiers", 1000)))
+	commander_resources = CommanderResourcesLib.new()
+	commander_resources.reset_from_profile(profile)
+	run_credits = commander_resources.biomass
+	squad.clear()
+	pending_battle_node_id = ""
+	pending_live_battle = false
+	last_turn_summary = ""
+	run_total_elapsed = 0.0
+	run_total_casualties = 0
+	save_commander_run()
+	RunLog.info("Commander run started — %s seed %d soldiers %d" % [
+		commander_id, run_seed, army_pool.total_soldiers,
+	])
+
+
+func is_commander_run_active() -> bool:
+	return run_active and commander_mode
+
+
+func get_commander_profile() -> Dictionary:
+	return CommanderProfileLib.get_by_id(commander_id)
+
+
+func get_build_block_reason(node_id: String, building_id: String) -> String:
+	if not commander_mode or galaxy_state == null or commander_resources == null:
+		return "No active commander run"
+	var node: Dictionary = galaxy_state.get_node(node_id)
+	if node.is_empty():
+		return "Unknown planet"
+	if str(node.get("owner", "")) != GalaxyMapStateLib.OWNER_PLAYER:
+		return "Capture this world first"
+	var def: Dictionary = BuildingDefinitionLib.lookup(building_id)
+	if def.is_empty():
+		return "Unknown building"
+	var slots: int = int(node.get("building_slots", 0))
+	var buildings: Array = node.get("buildings", [])
+	if buildings.size() >= slots:
+		return "No free building slots"
+	var cost_bio: int = int(def.get("cost_biomass", 0))
+	var cost_alloy: int = int(def.get("cost_alloys", 0))
+	if commander_resources.biomass < cost_bio:
+		return "Need %d biomass (have %d)" % [cost_bio, commander_resources.biomass]
+	if commander_resources.alloys < cost_alloy:
+		return "Need %d alloys (have %d)" % [cost_alloy, commander_resources.alloys]
+	return ""
+
+
+func try_commander_build(node_id: String, building_id: String) -> bool:
+	if not get_build_block_reason(node_id, building_id).is_empty():
+		return false
+	var def: Dictionary = BuildingDefinitionLib.lookup(building_id)
+	if def.is_empty():
+		return false
+	var cost_bio: int = int(def.get("cost_biomass", 0))
+	var cost_alloy: int = int(def.get("cost_alloys", 0))
+	if not galaxy_state.try_add_building(node_id, building_id):
+		return false
+	commander_resources.biomass -= cost_bio
+	commander_resources.alloys -= cost_alloy
+	run_credits = commander_resources.biomass
+	save_commander_run()
+	return true
+
+
+func end_commander_run() -> void:
+	commander_mode = false
+	run_active = false
+	if FileAccess.file_exists(COMMANDER_RUN_SAVE_PATH):
+		DirAccess.remove_absolute(COMMANDER_RUN_SAVE_PATH)
+	_reset_commander_state()
+
+
+func apply_commander_building_recruit() -> void:
+	if not commander_mode or army_pool == null or galaxy_state == null:
+		return
+	for node in galaxy_state.nodes:
+		if str(node.get("owner", "")) != GalaxyMapStateLib.OWNER_PLAYER:
+			continue
+		for building_id in node.get("buildings", []):
+			var def: Dictionary = BuildingDefinitionLib.lookup(str(building_id))
+			var recruit: int = int(def.get("recruit_per_turn", 0))
+			if recruit > 0 and commander_resources.manpower >= 10:
+				commander_resources.manpower -= 10
+				army_pool.recruit(recruit)
+
+
+func save_commander_run() -> void:
+	if not commander_mode or galaxy_state == null or army_pool == null:
+		return
+	var data := {
+		"commander_id": commander_id,
+		"run_seed": run_seed,
+		"run_credits": run_credits,
+		"galaxy": galaxy_state.to_dict(),
+		"army": army_pool.to_dict(),
+		"resources": commander_resources.to_dict() if commander_resources else {},
+		"pending_battle_node_id": pending_battle_node_id,
+	}
+	var file := FileAccess.open(COMMANDER_RUN_SAVE_PATH, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(data, "\t"))
+		file.close()
+
+
+func load_commander_run() -> bool:
+	if not FileAccess.file_exists(COMMANDER_RUN_SAVE_PATH):
+		return false
+	var file := FileAccess.open(COMMANDER_RUN_SAVE_PATH, FileAccess.READ)
+	if not file:
+		return false
+	var parsed = JSON.parse_string(file.get_as_text())
+	file.close()
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return false
+	var data: Dictionary = parsed
+	_reset_commander_state()
+	commander_mode = true
+	run_active = true
+	planet_mode = false
+	campaign_mode = false
+	legacy_ops_mode = false
+	commander_id = str(data.get("commander_id", "logistician"))
+	run_seed = int(data.get("run_seed", 0))
+	run_credits = int(data.get("run_credits", 0))
+	galaxy_state = GalaxyMapStateLib.new()
+	galaxy_state.from_dict(data.get("galaxy", {}))
+	army_pool = ArmyPoolLib.new()
+	army_pool.from_dict(data.get("army", {}))
+	commander_resources = CommanderResourcesLib.new()
+	commander_resources.from_dict(data.get("resources", {}))
+	pending_battle_node_id = str(data.get("pending_battle_node_id", ""))
+	return true
+
+
 func _reset_campaign_state() -> void:
 	campaign_mode = false
 	campaign_graph = null
 	missions_cleared = 0
+	intel_revealed_node_ids.clear()
+	pending_sector_reward_choices.clear()
+	last_completed_node_id = ""
+
+
+func _reset_commander_state() -> void:
+	commander_mode = false
+	commander_id = "logistician"
+	galaxy_state = null
+	army_pool = null
+	commander_resources = null
+	pending_battle_node_id = ""
+	pending_live_battle = false
+	last_turn_summary = ""
 
 
 func _reset_planet_state() -> void:

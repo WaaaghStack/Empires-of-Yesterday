@@ -42,13 +42,13 @@ func pick_counter_archetype() -> Enemy.Kind:
 		"energy":
 			return Enemy.Kind.HEAVY
 		"kinetic":
-			return Enemy.Kind.RIFLEMAN
+			return Enemy.Kind.FLANKER
 		"fire":
 			return Enemy.Kind.RIFLEMAN
 		"bio":
 			return Enemy.Kind.HEAVY
 		_:
-			return Enemy.Kind.RIFLEMAN
+			return Enemy.Kind.FLANKER
 
 
 func on_disturbance(sector: String) -> void:

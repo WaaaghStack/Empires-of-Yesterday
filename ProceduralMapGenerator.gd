@@ -113,13 +113,32 @@ static func generate(custom_seed: int = -1, config: Dictionary = {}):
 			data.vip_room_id = role.get("id_override", "room_%d" % i)
 		if role.get("loot_branch", false):
 			data.loot_branch_room_id = role.get("id_override", "room_%d" % i)
-		if role.get("hive_room", false):
-			data.hive_room_ids.append(role.get("id_override", "room_%d" % i))
 		data.sector_tags[role.get("id_override", "room_%d" % i)] = _sector_tag_for_pos(piece.pos)
 	_finalize_links(data, layout.link_specs)
 	data.hull_outline = _build_hull(data)
 	data.map_size = _compute_map_size(data)
+	_apply_mass_unit_config(data, config)
 	return data
+
+
+static func _apply_mass_unit_config(data: RefCounted, config: Dictionary) -> void:
+	if data == null:
+		return
+	var enable := bool(config.get("mass_unit_mode", false))
+	if OS.get_environment("EOY_BATTLE_MAP") == "1":
+		enable = true
+	if not enable:
+		return
+	data.mass_unit_mode = true
+	data.battle_map_preset = bool(config.get("battle_map_preset", true))
+	data.max_units = int(config.get("max_units", 10000))
+	data.full_tier_cap = int(config.get("full_tier_cap", 300))
+	data.active_lite_cap = int(config.get("active_lite_cap", 2000))
+	data.initial_friendlies = int(config.get("initial_friendlies", 4000))
+	data.initial_hostiles = int(config.get("initial_hostiles", 6000))
+	if str(config.get("map_tier", "")).is_empty():
+		data.map_tier = "large"
+		data.map_scale = _map_scale_for_tier("large")
 
 
 static func generate_planet(custom_seed: int = -1, config: Dictionary = {}):
@@ -566,7 +585,7 @@ static func _finalize_links(data: RefCounted, link_specs: Array[Dictionary]) -> 
 		var parent_dir: String = spec["parent_dir"]
 		var a_port: Vector2 = _port_on_edge(room_a.pos, room_a.size, parent_dir)
 		var b_port: Vector2 = _port_on_edge(room_b.pos, room_b.size, _opposite_dir(parent_dir))
-		var corridor: Rect2 = _corridor_rect_between(a_port, b_port)
+		var corridor: Rect2 = _corridor_rect_between(a_port, b_port).grow(4.0)
 		data.corridors.append(corridor)
 		resolved_links.append({
 			"a": spec["a"],

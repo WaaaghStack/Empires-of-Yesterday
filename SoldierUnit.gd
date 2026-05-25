@@ -92,6 +92,8 @@ var path_failed := false
 var _path_fail_reported := false
 var _nav_path_preview_enabled := false
 var _snd_assign_pass: int = 0
+var mass_store_index: int = -1
+var sim_driven: bool = false
 
 const NAV_PATH_MAX_SEGMENT := 220.0
 const MAX_SND_ASSIGN_PASSES := 48
@@ -441,6 +443,8 @@ func _mission_paused() -> bool:
 	return MissionStateLib.is_unit_actions_frozen(self)
 
 func _process(delta: float) -> void:
+	if sim_driven:
+		return
 	if not is_alive or is_extracted or _mission_paused():
 		return
 	fire_cooldown = max(0.0, fire_cooldown - delta)
@@ -613,8 +617,12 @@ func _near_path_node(pos: Vector2, radius: float) -> bool:
 	var graph: RefCounted = _get_path_graph()
 	if not graph or not graph.nodes:
 		return false
-	for node_pos in graph.nodes.values():
-		if pos.distance_to(node_pos) <= radius:
+	if graph.has_method("is_in_corridor") and graph.is_in_corridor(pos):
+		return true
+	for node_id in graph.nodes.keys():
+		if not str(node_id).contains("_door_"):
+			continue
+		if pos.distance_to(graph.nodes[node_id]) <= radius:
 			return true
 	return false
 
@@ -657,10 +665,8 @@ func _get_stop_distance() -> float:
 
 func _apply_objective_doctrine(start_room: Room = null) -> void:
 	var template := "standard"
-	for node in get_tree().get_nodes_in_group("tactical_map"):
-		if node.has_method("get_objective_template"):
-			template = node.get_objective_template()
-			break
+	if _tactical_map and _tactical_map.has_method("get_objective_template"):
+		template = _tactical_map.get_objective_template()
 	match template:
 		"silent_extract", "scavenge":
 			current_order = OrderTypeLib.Type.EXPLORE
@@ -732,10 +738,6 @@ func _apply_unit_separation() -> void:
 	var mates: Array = []
 	if _tactical_map and _tactical_map.has_method("get_squad_mates"):
 		mates = _tactical_map.get_squad_mates(squad_id, self)
-	else:
-		for node in get_tree().get_nodes_in_group("soldiers"):
-			if node is SoldierUnit and (node as SoldierUnit).squad_id == squad_id and node != self:
-				mates.append(node)
 	var sep_sq := MIN_UNIT_SEPARATION * MIN_UNIT_SEPARATION
 	for other in mates:
 		if not other is SoldierUnit or not other.is_alive or other.is_extracted:
@@ -754,9 +756,8 @@ func _build_search_destroy_queue(start_room: Room = null) -> void:
 	snd_rooms.clear()
 	if task_board:
 		var squad_units: Array = []
-		for node in get_tree().get_nodes_in_group("soldiers"):
-			if node is SoldierUnit and (node as SoldierUnit).squad_id == squad_id and node.is_alive:
-				squad_units.append(node)
+		if _tactical_map and _tactical_map.has_method("get_squad_mates"):
+			squad_units = _tactical_map.get_squad_mates(squad_id, null)
 		var shared: Array = task_board.build_snd_queue(squad_units, _rooms_source(), start_room, squad_id)
 		for room in shared:
 			if room is Room and room not in snd_rooms:
@@ -806,7 +807,7 @@ func _append_snd_purge_fallback(start_room: Room = null) -> void:
 func _nearest_room_with_enemy() -> Room:
 	var nearest: Room = null
 	var nearest_dist: float = INF
-	for node in get_tree().get_nodes_in_group("enemies"):
+	for node in _living_enemies_source():
 		if not node is EnemyUnit or not node.is_alive:
 			continue
 		var enemy_room := _room_containing(node.position)
@@ -821,11 +822,7 @@ func _nearest_room_with_enemy() -> Room:
 func _count_living_enemies() -> int:
 	if _tactical_map and _tactical_map.get("entity_index"):
 		return _tactical_map.entity_index.living_enemy_count()
-	var count: int = 0
-	for node in get_tree().get_nodes_in_group("enemies"):
-		if node is EnemyUnit and node.is_alive:
-			count += 1
-	return count
+	return 0
 
 func _any_living_enemies() -> bool:
 	return _count_living_enemies() > 0
@@ -1195,7 +1192,16 @@ func _rebuild_corridor_path_now() -> void:
 		var from_room := _room_containing(position)
 		var target_room: Room = order_room if order_room else from_room
 		var blocked: Array[String] = _collect_blocked_path_nodes()
-		for point in graph.find_path(position, end_pos, blocked, from_room, target_room):
+		var path_points: PackedVector2Array = PackedVector2Array()
+		if _tactical_map and _tactical_map.get("unit_sim"):
+			var usim = _tactical_map.unit_sim
+			if usim and usim.path_queue:
+				path_points = usim.path_queue.request_corridor_path(
+					graph, position, end_pos, from_room, target_room, blocked
+				)
+		if path_points.is_empty():
+			path_points = graph.find_path(position, end_pos, blocked, from_room, target_room)
+		for point in path_points:
 			path_queue.append(point)
 	_pathing_to_room = order_room
 	while path_index < path_queue.size() - 1 and position.distance_to(path_queue[path_index]) < WAYPOINT_RADIUS:
@@ -1237,8 +1243,6 @@ func _room_containing(pos: Vector2) -> Room:
 func _get_path_graph() -> RefCounted:
 	if _tactical_map and _tactical_map.get("path_graph"):
 		return _tactical_map.path_graph as RefCounted
-	for node in get_tree().get_nodes_in_group("tactical_map"):
-		return node.path_graph as RefCounted
 	return null
 
 func _process_search(delta: float) -> void:
@@ -1820,10 +1824,6 @@ func _tick_repair_aura(delta: float) -> void:
 		var idx = _tactical_map.entity_index
 		if idx:
 			allies = idx.get_soldiers_in_room(repair_aura_room)
-	else:
-		for node in get_tree().get_nodes_in_group("soldiers"):
-			if node is SoldierUnit and node.is_alive:
-				allies.append(node)
 	for node in allies:
 		if node is SoldierUnit and node.is_alive:
 			if repair_aura_room.contains_local_point(node.position, 12.0):

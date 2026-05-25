@@ -26,6 +26,15 @@ var map_scale: float = 1.0
 var hive_room_ids: Array[String] = []
 var overmind_room_id: String = ""
 var sector_tags: Dictionary = {}
+## Mass-unit scale (500–10k). Off by default — campaign unchanged.
+var mass_unit_mode: bool = false
+var max_units: int = 10000
+var full_tier_cap: int = 300
+var initial_friendlies: int = 0
+var initial_hostiles: int = 0
+var active_lite_cap: int = 2000
+var dormant_reserve: int = 8000
+var battle_map_preset: bool = false
 
 func get_room_dicts() -> Array[Dictionary]:
 	return rooms

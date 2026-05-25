@@ -26,6 +26,13 @@ Xenopurge-style 2D real-time tactical command prototype with a **branching campa
 
 The boss sector uses a **large** map with nest hives + **Overmind** (same purge flow as legacy planet finale, but as one mission in the campaign).
 
+### Campaign depth
+
+- **Navigation map** shows sector type, mutators (or classified until intel), and reward hints.
+- **Rest / Armory / Intel Broker** nodes skip combat (heal, spend biomass, reveal intel).
+- After each combat sector, pick a **sector reward** (evolution upgrade, heal, or biomass).
+- **Ascension** stacks extra mutators on new runs after beating the campaign; **codex achievements** grant tokens.
+
 ## Legacy modes (Main Menu → More…)
 
 - **Legacy 4-op run** — linear ops with Between-Op Hub  

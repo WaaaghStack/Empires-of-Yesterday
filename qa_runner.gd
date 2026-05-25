@@ -7,6 +7,7 @@ const SquadsManagerLib := preload("res://SquadsManager.gd")
 const REPORT_PATH := "res://qa_report.txt"
 
 const SCRIPT_PATHS: Array[String] = [
+	"res://BackgroundMusic.gd",
 	"res://BetweenMissionHub.gd",
 	"res://Codex.gd",
 	"res://CombatAudio.gd",
@@ -31,6 +32,13 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://MissionState.gd",
 	"res://MissionTaskBoard.gd",
 	"res://MissionEntityIndex.gd",
+	"res://UnitSimulationStore.gd",
+	"res://UnitSimulationManager.gd",
+	"res://UnitPresentationLayer.gd",
+	"res://PathRequestQueue.gd",
+	"res://RoomCombatResolver.gd",
+	"res://MassUnitAdapter.gd",
+	"res://MassBattleSpawner.gd",
 	"res://CombatCoordinator.gd",
 	"res://OrbitalCarrier.gd",
 	"res://OpModifier.gd",
@@ -60,6 +68,28 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://SquadSelection.gd",
 	"res://TacticalMap.gd",
 	"res://TutorialState.gd",
+	"res://CommanderProfile.gd",
+	"res://ArmyPool.gd",
+	"res://GalaxyMapState.gd",
+	"res://GalaxyMapGenerator.gd",
+	"res://CommanderResources.gd",
+	"res://BuildingDefinition.gd",
+	"res://TurnResolver.gd",
+	"res://BattleMapData.gd",
+	"res://BattleMapGenerator.gd",
+	"res://SectorCombatResolver.gd",
+	"res://BattleDirectives.gd",
+	"res://CommanderSelect.gd",
+	"res://GalaxyMapScreen.gd",
+	"res://BattleViewer.gd",
+	"res://BattleDebriefCommander.gd",
+	"res://CommandHQ.gd",
+	"res://GalaxyThreatAnalyzer.gd",
+	"res://BattlePhaseController.gd",
+	"res://BattleHeatOverlay.gd",
+	"res://BattleMassPresentation.gd",
+	"res://BattleCinematicCamera.gd",
+	"res://BattleAtmosphere.gd",
 ]
 
 const SCENE_PATHS: Array[String] = [
@@ -85,6 +115,11 @@ const SCENE_PATHS: Array[String] = [
 	"res://SquadSelection.tscn",
 	"res://TacticalMap.tscn",
 	"res://PlanetMission.tscn",
+	"res://CommanderSelect.tscn",
+	"res://GalaxyMapScreen.tscn",
+	"res://BattleViewer.tscn",
+	"res://BattleDebriefCommander.tscn",
+	"res://CommandHQ.tscn",
 ]
 
 const RESOURCE_PATHS: Array[String] = [
@@ -114,6 +149,8 @@ func _ready() -> void:
 	_validate_planet_run()
 	_validate_campaign_mode()
 	_validate_v2_features()
+	_validate_mass_unit_simulation()
+	_validate_commander_mode()
 	_print_summary()
 	_write_report()
 	get_tree().quit(1 if not _failures.is_empty() else 0)
@@ -611,6 +648,37 @@ func _validate_campaign_mode() -> void:
 		_fail("complete_current_mission_node did not increment missions_cleared")
 	else:
 		_log("OK  complete_current_mission_node")
+	var node_mut_cfg: Dictionary = RunState.get_mission_config_for_node(str(first_choice[0].get("id", "")))
+	RunState.set_mutator("dense_spores", true)
+	var merged: Array = node_mut_cfg.get("mutators", [])
+	if "dense_spores" not in merged:
+		_fail("get_mission_config should merge carrier mutators")
+	else:
+		_log("OK  mission config merges carrier mutators")
+	RunState.prepare_sector_rewards(str(first_choice[0].get("id", "")))
+	if RunState.pending_sector_reward_choices.is_empty():
+		_fail("prepare_sector_rewards should offer choices")
+	else:
+		_log("OK  sector reward choices=%d" % RunState.pending_sector_reward_choices.size())
+	var has_event := false
+	for n in RunState.campaign_graph.nodes:
+		if str(n.get("type", "")) in ["rest", "armory", "intel_broker"]:
+			has_event = true
+			break
+	if not has_event:
+		_log("WARN campaign graph has no event nodes (RNG)")
+	else:
+		_log("OK  campaign graph includes event nodes")
+	SaveManager.try_grant_achievement("qa_smoke_test")
+	if not SaveManager.codex_achievements.has("qa_smoke_test"):
+		_fail("try_grant_achievement failed")
+	else:
+		_log("OK  codex achievements")
+	var flanker := Enemy.make_archetype(Enemy.Kind.FLANKER, 1, 1.0)
+	if flanker.speed < 90.0:
+		_fail("Flanker archetype speed too low")
+	else:
+		_log("OK  Flanker enemy archetype")
 	RunState.end_run()
 	_log("OK  campaign navigation smoke tests")
 
@@ -654,6 +722,261 @@ func _validate_v2_features() -> void:
 	else:
 		_log("OK  predator instinct synergy chain")
 	_log("OK  V2 feature smoke tests")
+
+
+func _validate_mass_unit_simulation() -> void:
+	_log("-- Mass unit simulation --")
+	const UnitSimulationStoreLib := preload("res://UnitSimulationStore.gd")
+	const UnitSimulationManagerLib := preload("res://UnitSimulationManager.gd")
+	var store := UnitSimulationStoreLib.new()
+	var room_positions: PackedVector2Array = [
+		Vector2(0, 0), Vector2(200, 0), Vector2(400, 0), Vector2(200, 200),
+	]
+	store.room_ids = ["r0", "r1", "r2", "r3"]
+	store.room_positions = room_positions
+	store.friendly_count_by_room = PackedInt32Array([0, 0, 0, 0])
+	store.hostile_count_by_room = PackedInt32Array([0, 0, 0, 0])
+	store.pending_damage_by_room = PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	for i in range(10000):
+		var ri: int = rng.randi() % 4
+		store.spawn_unit(
+			UnitSimulationStoreLib.Side.FRIENDLY if i % 3 != 0 else UnitSimulationStoreLib.Side.HOSTILE,
+			room_positions[ri] + Vector2(rng.randf_range(-20, 20), rng.randf_range(-20, 20)),
+			100.0,
+			100.0,
+			ri,
+			rng.randi() % 4,
+		)
+	if store.count != 10000:
+		_fail("expected 10000 store rows, got %d" % store.count)
+	else:
+		_log("OK  spawned 10000 unit rows")
+	var t0 := Time.get_ticks_usec()
+	for bucket in range(UnitSimulationStoreLib.SIM_BUCKETS):
+		store.tick_movement_stub(bucket, 0.05)
+	var elapsed_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	if elapsed_ms > 8.0:
+		_fail("10k movement stub took %.2f ms (gate 8ms)" % elapsed_ms)
+	else:
+		_log("OK  10k movement stub %.2f ms" % elapsed_ms)
+	var manager := UnitSimulationManagerLib.new()
+	manager.store = store
+	var room_indices: Array[int] = [0, 1, 2, 3]
+	manager.spawn_horde(500, 500, room_indices, rng)
+	if manager.store.count != 11000:
+		_fail("horde spawn expected 11000 total, got %d" % manager.store.count)
+	else:
+		_log("OK  horde spawn layered on store")
+	var battle_map = ProceduralMapGenerator.generate(88888, {"mass_unit_mode": true, "map_tier": "large"})
+	if battle_map == null or not battle_map.mass_unit_mode:
+		_fail("mass_unit_mode map generation failed")
+	else:
+		_log("OK  battle map mass_unit_mode flag")
+	var default_map = ProceduralMapGenerator.generate(88889, {"op_index": 1, "map_tier": "medium"})
+	if default_map != null and default_map.mass_unit_mode:
+		_fail("default campaign map should not enable mass_unit_mode")
+	else:
+		_log("OK  campaign map keeps mass mode off")
+
+
+func _validate_commander_mode() -> void:
+	_log("-- Commander mode --")
+	const ArmyPoolLib := preload("res://ArmyPool.gd")
+	const GalaxyMapStateLib := preload("res://GalaxyMapState.gd")
+	const GalaxyMapGeneratorLib := preload("res://GalaxyMapGenerator.gd")
+	const TurnResolverLib := preload("res://TurnResolver.gd")
+	const BattleMapGeneratorLib := preload("res://BattleMapGenerator.gd")
+	const CommanderResourcesLib := preload("res://CommanderResources.gd")
+	const CommanderProfileLib := preload("res://CommanderProfile.gd")
+	var army := ArmyPoolLib.new()
+	army.reset(1000)
+	if army.set_allocation("L1_0", 200):
+		_log("OK  army allocation")
+	else:
+		_fail("army allocation should succeed")
+	army.apply_permanent_losses(50)
+	if army.total_soldiers != 950:
+		_fail("permanent loss expected 950 total, got %d" % army.total_soldiers)
+	else:
+		_log("OK  permanent army losses")
+	var galaxy = GalaxyMapGeneratorLib.generate(4242)
+	if galaxy.nodes.is_empty():
+		_fail("galaxy generator produced no nodes")
+	else:
+		_log("OK  galaxy generated (%d nodes)" % galaxy.nodes.size())
+	var resources := CommanderResourcesLib.new()
+	resources.reset_from_profile(CommanderProfileLib.get_by_id("hammer"))
+	var result: Dictionary = TurnResolverLib.resolve_turn(
+		galaxy, army, resources, CommanderProfileLib.get_by_id("hammer"), false
+	)
+	if not result.has("battles"):
+		_fail("turn resolver missing battles key")
+	else:
+		_log("OK  turn resolver stub (%s)" % str(result.get("message", "")))
+	var battle_map = BattleMapGeneratorLib.generate(99, "urban", 400, 500, "L2_0")
+	if battle_map.regions.is_empty():
+		_fail("battle map missing regions")
+	elif battle_map.terrain_tag != "urban":
+		_fail("battle map terrain mismatch")
+	else:
+		_log("OK  battle terrain map (%d regions)" % battle_map.regions.size())
+	if galaxy.try_add_building("hq", "barracks"):
+		_log("OK  building placement on HQ")
+	else:
+		_fail("building placement failed on player HQ")
+	const GalaxyThreatAnalyzerLib := preload("res://GalaxyThreatAnalyzer.gd")
+	var strip: String = GalaxyThreatAnalyzerLib.get_threat_strip_summary(galaxy, army)
+	if strip.is_empty():
+		_fail("threat strip should not be empty")
+	else:
+		_log("OK  threat strip (%s)" % strip)
+	const BattlePhaseControllerLib := preload("res://BattlePhaseController.gd")
+	var phase := BattlePhaseControllerLib.new()
+	var store := UnitSimulationStore.new()
+	phase.tick(3.0, battle_map, store)
+	if phase.current_phase == BattlePhaseControllerLib.Phase.DEPLOYMENT:
+		_log("OK  battle phase -> deployment")
+	else:
+		_fail("battle phase expected deployment after briefing, got %s" % phase.phase_name())
+	phase.tick(4.0, battle_map, store)
+	if phase.current_phase == BattlePhaseControllerLib.Phase.APPROACH:
+		_log("OK  battle phase -> approach")
+	else:
+		_fail("battle phase expected approach, got %s" % phase.phase_name())
+	if battle_map.contact_column <= 0:
+		_fail("battle map missing contact_column")
+	else:
+		_log("OK  battle contact column %d" % battle_map.contact_column)
+	if battle_map.total_objectives() < 1:
+		_fail("battle map should have objective sectors")
+	else:
+		_log("OK  battle objectives (%d sectors)" % battle_map.total_objectives())
+	if not RunState.has_method("get_build_block_reason"):
+		_fail("RunState missing get_build_block_reason")
+	elif RunState.get_build_block_reason("hq", "barracks") != "":
+		_log("OK  build block reason when slots full")
+	else:
+		_log("OK  build block reason allows HQ barracks")
+	const BattleHeatOverlayLib := preload("res://BattleHeatOverlay.gd")
+	var lane_rng := RandomNumberGenerator.new()
+	lane_rng.seed = 77
+	var lane_count := 600
+	var lane_positions: PackedVector2Array = BattleMapGeneratorLib.get_lane_spawn_positions(
+		battle_map.player_spawn_zone,
+		lane_count,
+		lane_rng,
+	)
+	var expected_spawn := mini(lane_count, battle_map.max_visual_units)
+	if lane_positions.size() < expected_spawn:
+		_fail("lane spawn returned %d positions, expected %d" % [lane_positions.size(), expected_spawn])
+	else:
+		_log("OK  lane spawn grid (%d positions)" % lane_positions.size())
+	var scale_store := UnitSimulationStore.new()
+	var scale_rooms: Array = []
+	for region in battle_map.regions:
+		var room := Room.new()
+		room.map_room_id = str(region.get("id", ""))
+		room.position = region.get("center", Vector2.ZERO)
+		room.room_size = battle_map.region_world_rect(region).size
+		scale_rooms.append(room)
+	scale_store.bind_rooms(scale_rooms)
+	var spawn_target := mini(500, battle_map.player_allocation)
+	if battle_map.player_allocation >= 500:
+		spawn_target = mini(500, battle_map.max_visual_units)
+	var spawn_region: Dictionary = battle_map.regions[0]
+	var spawn_room := scale_store.room_index_for_id(str(spawn_region.get("id", "")))
+	for i in range(spawn_target):
+		scale_store.spawn_unit(
+			UnitSimulationStore.Side.FRIENDLY,
+			spawn_region.get("center", Vector2.ZERO) + Vector2(i % 20, i / 20),
+			100.0,
+			100.0,
+			spawn_room,
+		)
+	if scale_store.count < spawn_target:
+		_fail("battle scale spawn expected >= %d rows, got %d" % [spawn_target, scale_store.count])
+	else:
+		_log("OK  battle scale spawn rows=%d (target %d)" % [scale_store.count, spawn_target])
+	var heat := BattleHeatOverlayLib.new()
+	heat.setup(battle_map, scale_store)
+	var heat_radius := heat.heat_radius_for_region(spawn_region)
+	if heat_radius <= 0.0:
+		_fail("BattleHeatOverlay heat radius should be > 0 for populated sector")
+	else:
+		_log("OK  BattleHeatOverlay heat radius %.1f" % heat_radius)
+	if battle_map.max_visual_units < 2000:
+		_fail("battle map max_visual_units too low: %d" % battle_map.max_visual_units)
+	elif battle_map.impostor_size < 18.0:
+		_fail("battle map impostor_size too small: %.1f" % battle_map.impostor_size)
+	else:
+		_log("OK  battle visual tuning knobs")
+	_validate_battle_scale_spawn(battle_map)
+
+
+func _validate_battle_scale_spawn(battle_map) -> void:
+	_log("-- Battle scale spawn --")
+	const BattleMapGeneratorLib := preload("res://BattleMapGenerator.gd")
+	const BattleHeatOverlayLib := preload("res://BattleHeatOverlay.gd")
+	const UnitSimulationManagerLib := preload("res://UnitSimulationManager.gd")
+	var scale_map = BattleMapGeneratorLib.generate(777, "open_field", 1200, 900, "L3_0")
+	if scale_map.max_visual_units < 500:
+		_fail("battle map max_visual_units too low: %d" % scale_map.max_visual_units)
+	else:
+		_log("OK  max_visual_units %d" % scale_map.max_visual_units)
+	var visual_p := mini(scale_map.player_allocation, scale_map.max_visual_units)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = scale_map.map_seed + 11
+	var positions := BattleMapGeneratorLib.get_lane_spawn_positions(
+		scale_map.player_spawn_zone,
+		visual_p,
+		rng,
+	)
+	if scale_map.player_allocation >= 500 and positions.size() < mini(500, visual_p):
+		_fail("lane spawn expected >= %d positions, got %d" % [mini(500, visual_p), positions.size()])
+	else:
+		_log("OK  lane spawn %d positions (alloc %d)" % [positions.size(), scale_map.player_allocation])
+	var manager := UnitSimulationManagerLib.new()
+	var rooms: Array = []
+	for region in scale_map.regions:
+		var r := Room.new()
+		r.map_room_id = str(region.get("id", ""))
+		r.position = region.get("center", Vector2.ZERO)
+		r.room_size = scale_map.region_world_rect(region).size
+		rooms.append(r)
+	manager.setup(rooms, scale_map.path_graph, 200)
+	var sample_count := mini(600, visual_p)
+	var sample_positions := BattleMapGeneratorLib.get_lane_spawn_positions(
+		scale_map.player_spawn_zone,
+		sample_count,
+		rng,
+	)
+	for pos in sample_positions:
+		manager.store.spawn_unit(
+			UnitSimulationStore.Side.FRIENDLY,
+			pos,
+			100.0,
+			100.0,
+			0,
+			0,
+			UnitSimulationStore.Tier.LITE,
+		)
+	if scale_map.player_allocation >= 500 and manager.store.count < mini(500, sample_count):
+		_fail("store spawn expected >= %d rows, got %d" % [mini(500, sample_count), manager.store.count])
+	else:
+		_log("OK  store rows %d for scale probe" % manager.store.count)
+	var heat := BattleHeatOverlayLib.new()
+	heat.setup(scale_map, manager.store)
+	var populated_radius := 0.0
+	for region in scale_map.regions:
+		var r := heat.heat_radius_for_region(region)
+		if r > populated_radius:
+			populated_radius = r
+	if manager.store.count > 0 and populated_radius <= 12.0:
+		_fail("heat overlay should report radius for populated sector (got %.1f)" % populated_radius)
+	else:
+		_log("OK  heat overlay radius %.1f" % populated_radius)
 
 
 func _validate_mission_unpaused_start() -> void:

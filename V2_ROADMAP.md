@@ -48,11 +48,21 @@
 - Colony biome tile placeholders + corridor tile rendering
 - QA extended for 1–2 hives, unpaused start, mutators
 
+## Strategic depth (shipped)
+
+- Per-node **mutators** on campaign graph + carrier mutators merged at mission start
+- **Sector reward** screen after combat (evolution / heal / biomass)
+- **Rest / Armory / Intel Broker** event nodes on navigation map
+- Navigation **biomass services**: heal, intel reveal, recruit draft
+- **Flanker** enemy archetype; **SwarmDirector** on campaign elite/boss
+- **Ascension** (+mutators per campaign win) and **codex achievements** with token rewards
+- Evolution upgrades apply on deploy; synergy tags in evolution pick UI
+
 ## Open questions (post-V2)
 
 1. **Pace target** — 15 vs 30 min full run?
 2. **Art** — replace colony placeholders with authored tiles?
-3. **Platform** — daily seed leaderboard?
+3. **Platform** — daily seed leaderboard UI polish?
 
 ## Archived pre-V2 docs
 

@@ -49,8 +49,15 @@ horizontal_alignment = 1
 [node name="Subtitle" type="Label" parent="MainPanel/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
-text = "Hybrid roguelite tactical ops"
+text = "Commander galaxy campaign"
 horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="CommanderRunButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 48)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Commander Campaign"
 
 [node name="TokensLabel" type="Label" parent="MainPanel/VBox"]
 layout_mode = 2
@@ -70,7 +77,7 @@ autowrap_mode = 2
 custom_minimum_size = Vector2(0, 48)
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
-text = "New Planet Run"
+text = "Classic Carrier Run"
 
 [node name="LegacyOpsButton" type="Button" parent="MainPanel/VBox"]
 visible = false

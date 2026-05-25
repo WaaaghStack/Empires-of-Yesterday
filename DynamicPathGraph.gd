@@ -61,8 +61,11 @@ func find_path(from_pos: Vector2, to_pos: Vector2, blocked_nodes: Array[String] 
 	return result
 
 func find_room_route(from_room_id: String, to_room_id: String, blocked_nodes: Array[String] = []) -> Array[String]:
-	if from_room_id.is_empty() or to_room_id.is_empty() or from_room_id == to_room_id:
-		return [from_room_id] if not from_room_id.is_empty() else []
+	if from_room_id.is_empty() or to_room_id.is_empty():
+		return []
+	if from_room_id == to_room_id:
+		var same_room: Array[String] = [from_room_id]
+		return same_room
 	var ids: Array[String] = _a_star(from_room_id, to_room_id, blocked_nodes)
 	if ids.is_empty() and not blocked_nodes.is_empty():
 		var retry_blocked: Array[String] = []
@@ -81,13 +84,29 @@ func get_door_positions() -> Array[Dictionary]:
 			continue
 		if not nodes.has(room_node) or not nodes.has(spine_node):
 			continue
+		var spine_pos: Vector2 = nodes[spine_node]
+		var outward: Vector2 = _corridor_dir_from_spine(spine_node)
+		if outward.length_squared() < 0.01:
+			outward = (spine_pos - nodes[room_node]).normalized()
 		door_list.append({
 			"id": "%s_%s" % [room_node, spine_node],
-			"position": (nodes[room_node] + nodes[spine_node]) * 0.5,
+			"position": spine_pos,
+			"rotation": outward.angle(),
 			"room_node": room_node,
 			"spine_node": spine_node,
 		})
 	return door_list
+
+
+func _corridor_dir_from_spine(spine_id: String) -> Vector2:
+	for segment in corridor_segments:
+		var door_a: String = segment.get("door_a", "")
+		var door_b: String = segment.get("door_b", "")
+		if door_a == spine_id and nodes.has(door_b):
+			return nodes[door_b] - nodes[door_a]
+		if door_b == spine_id and nodes.has(door_a):
+			return nodes[door_a] - nodes[door_b]
+	return Vector2.ZERO
 
 func room_to_node(room_name: String) -> String:
 	return room_name_to_node.get(room_name, "")
@@ -200,7 +219,8 @@ func _a_star(start_id: String, end_id: String, blocked: Array[String]) -> Array[
 				g_score[neighbor] = tentative
 				if neighbor not in open:
 					open.append(neighbor)
-	return []
+	var no_path: Array[String] = []
+	return no_path
 
 func _neighbors(node_id: String) -> Array[String]:
 	var result: Array[String] = []

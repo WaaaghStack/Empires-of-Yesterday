@@ -81,6 +81,8 @@ func _archetype_sprite_id() -> String:
 			return "sniper"
 		Enemy.Kind.HEAVY:
 			return "heavy"
+		Enemy.Kind.FLANKER:
+			return "flanker"
 		_:
 			return "grunt"
 
@@ -243,6 +245,8 @@ func _chase_soldier(delta: float, target: SoldierUnit) -> void:
 	var move_speed := speed
 	if enemy_archetype == Enemy.Kind.HEAVY:
 		move_speed *= 0.82
+	elif enemy_archetype == Enemy.Kind.FLANKER:
+		move_speed *= 1.12
 	var my_room := _room_containing(position)
 	var target_room := _room_containing(target.position)
 	if my_room and target_room and my_room == target_room:

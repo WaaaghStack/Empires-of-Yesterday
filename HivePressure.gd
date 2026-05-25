@@ -68,13 +68,16 @@ static func profile_for_run(facility_theme: String, mutators: Array = []) -> Dic
 			result = COLONY_BASELINE.duplicate(true)
 	for mutator_id in mutators:
 		match str(mutator_id):
-			"accelerated_swarm":
+			"accelerated_swarm", "dense_spores":
 				result["base_spawn_interval"] = float(result["base_spawn_interval"]) * 0.82
 				result["min_spawn_interval"] = float(result["min_spawn_interval"]) * 0.85
 				result["wave_size_base"] = int(result["wave_size_base"]) + 1
 			"quiet_deck":
 				result["spawn_cap"] = maxi(1, int(result["spawn_cap"]) - 1)
 				result["base_spawn_interval"] = float(result["base_spawn_interval"]) * 1.15
+			"reinforced":
+				result["wave_size_base"] = int(result["wave_size_base"]) + 1
+				result["spawn_cap"] = int(result["spawn_cap"]) + 1
 	return result
 
 

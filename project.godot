@@ -25,6 +25,7 @@ RunLog="*res://RunLog.gd"
 RunState="*res://RunState.gd"
 PortraitPool="*res://PortraitPool.gd"
 SaveManager="*res://SaveManager.gd"
+BackgroundMusic="*res://BackgroundMusic.gd"
 
 [display]
 

@@ -30,6 +30,11 @@ const EvolutionUpgradeLib := preload("res://EvolutionUpgrade.gd")
 const EvolutionNodeLib := preload("res://EvolutionNode.gd")
 const CommsTemplatesLib := preload("res://CommsTemplates.gd")
 const HivePressureLib := preload("res://HivePressure.gd")
+const UnitSimulationManagerLib := preload("res://UnitSimulationManager.gd")
+const UnitPresentationLayerLib := preload("res://UnitPresentationLayer.gd")
+const MassBattleSpawnerLib := preload("res://MassBattleSpawner.gd")
+const MassUnitAdapterLib := preload("res://MassUnitAdapter.gd")
+const UnitSimulationStoreLib := preload("res://UnitSimulationStore.gd")
 
 const MAX_COMMS_LINES := 40
 const CAMERA_PAN_SPEED := 420.0
@@ -88,6 +93,11 @@ var _last_fog_ms: float = 0.0
 var _cached_alive_units: Array[SoldierUnit] = []
 var _alive_units_cache_frame: int = -1
 var _show_threat_overlay: bool = false
+var unit_sim: UnitSimulationManagerLib
+var unit_render: UnitPresentationLayerLib
+var _mass_unit_mode: bool = false
+var _node_by_store_handle: Dictionary = {}
+var _store_handle_seq: int = 0
 
 var selected_soldiers: Array[SoldierResource] = []
 var active_units: Array[SoldierUnit] = []
@@ -197,6 +207,8 @@ func _ready() -> void:
 	entity_index = MissionEntityIndexLib.new()
 	combat_coordinator = CombatCoordinatorLib.new()
 	hive_pressure = HivePressureLib.new()
+	unit_sim = UnitSimulationManagerLib.new()
+	unit_render = UnitPresentationLayerLib.new()
 	GameTheme.apply_to_control(self)
 	GameTheme.ignore_mouse($Background)
 	GameTheme.ignore_mouse($Title)
@@ -258,6 +270,7 @@ func _ready() -> void:
 	_build_map_visuals()
 	_build_doors()
 	_build_rooms()
+	_setup_mass_unit_system()
 	_begin_spawn_selection()
 	_set_pending_order(OrderTypeLib.Type.CLEAR)
 	await _layout_play_area()
@@ -420,9 +433,10 @@ func _add_corridor_visual(parent: Node2D, rect: Rect2, palette: Dictionary = {})
 func _build_doors() -> void:
 	for data: Dictionary in path_graph.get_door_positions():
 		var door: Node2D = DOOR_SCENE.instantiate()
-		var room_pos: Vector2 = path_graph.nodes[data.room_node]
-		var spine_pos: Vector2 = path_graph.nodes[data.spine_node]
-		data["rotation"] = (room_pos - spine_pos).angle()
+		if not data.has("rotation"):
+			var room_pos: Vector2 = path_graph.nodes[data.room_node]
+			var spine_pos: Vector2 = path_graph.nodes[data.spine_node]
+			data["rotation"] = (spine_pos - room_pos).angle()
 		door.setup(data)
 		door.spine_node_id = data.get("spine_node", "")
 		door.add_to_group("doors")
@@ -573,6 +587,59 @@ func _build_rooms() -> void:
 		room.soldier_entered.connect(_on_soldier_entered_room)
 		world.add_child(room)
 		rooms.append(room)
+
+
+func _setup_mass_unit_system() -> void:
+	unit_sim.reset()
+	_node_by_store_handle.clear()
+	_store_handle_seq = 0
+	if map_data == null:
+		return
+	_mass_unit_mode = map_data.mass_unit_mode
+	var tier_cap: int = map_data.full_tier_cap if map_data.full_tier_cap > 0 else 300
+	unit_sim.setup(rooms, path_graph, tier_cap)
+	if unit_sim.path_queue:
+		unit_sim.path_queue.set_max_finds_per_frame(16)
+	if _mass_unit_mode:
+		unit_render.setup(unit_sim.store, world)
+		var rng := RandomNumberGenerator.new()
+		rng.seed = map_data.map_seed
+		MassBattleSpawnerLib.apply_mission_config(unit_sim, map_data, rooms, rng)
+		unit_render.refresh_instances()
+		log_message(
+			"Mass unit mode: %d units in simulation." % unit_sim.store.count,
+			GameTheme.ACCENT.to_html(),
+		)
+
+
+func _register_soldier_in_store(unit: SoldierUnit, spawn_room: Room, squad_id: String) -> void:
+	if unit_sim == null or spawn_room == null or unit == null:
+		return
+	var room_idx := unit_sim.store.room_index_for_id(spawn_room.map_room_id)
+	if room_idx < 0:
+		return
+	var squad_i: int = RunState.SQUAD_IDS.find(squad_id)
+	if squad_i < 0:
+		squad_i = 0
+	var store_idx := unit_sim.store.spawn_unit(
+		UnitSimulationStoreLib.Side.FRIENDLY,
+		unit.position,
+		float(unit.current_health),
+		float(unit.max_health),
+		room_idx,
+		squad_i,
+		UnitSimulationStoreLib.Tier.FULL,
+		unit.speed,
+	)
+	unit.mass_store_index = store_idx
+	_store_handle_seq += 1
+	var handle := _store_handle_seq
+	_node_by_store_handle[handle] = unit
+	unit_sim.register_node_handle(store_idx, handle)
+	unit.sim_driven = false
+	if entity_index:
+		entity_index.register_store_soldier(store_idx, spawn_room)
+
 
 func _begin_spawn_selection() -> void:
 	spawn_selection_active = true
@@ -753,6 +820,9 @@ func _on_start_pressed() -> void:
 	elif _is_planet_mission():
 		swarm_director = SwarmDirectorLib.new()
 		swarm_director.reset(self)
+	elif _is_campaign_mission() and _is_campaign_elite_or_boss():
+		swarm_director = SwarmDirectorLib.new()
+		swarm_director.reset(self)
 		for squad_id in SquadsManagerLib.SQUAD_IDS:
 			squads_manager.set_squad_stance(squad_id, RunState.get_squad_stance(squad_id))
 		log_message(
@@ -805,6 +875,11 @@ func _spawn_squad() -> void:
 		unit.task_board = task_board
 		unit.all_rooms = rooms
 		unit.bind_tactical_map(self)
+		var evo_board: EvolutionBoard = RunState.get_evolution_board(squad_id)
+		for upgrade_id in evo_board.applied_ids:
+			var evo_up := EvolutionUpgradeLib.get_by_id(upgrade_id)
+			if evo_up:
+				unit.apply_evolution_upgrade(evo_up)
 		if RunState.active_modifier:
 			if RunState.active_modifier.ability_cooldown_reduction > 0.0:
 				unit.ability_cooldown_max = maxf(
@@ -830,6 +905,7 @@ func _spawn_squad() -> void:
 		active_units.append(unit)
 		squads_manager.register_unit(unit, squad_id)
 		entity_index.register_soldier(unit, spawn_room)
+		_register_soldier_in_store(unit, spawn_room, squad_id)
 		log_message(
 			"Deployed: %s (%s / %s)" % [
 				resource.soldier_name,
@@ -1277,7 +1353,17 @@ func _process(delta: float) -> void:
 		_fog_dirty = false
 		_update_fog_of_war()
 	MissionStateLib.tick_squad_mark(step)
-	combat_coordinator.tick(delta, _alive_units(), entity_index, rooms, doors, active_hives)
+	if unit_sim and unit_sim.store.count > 0:
+		unit_sim.sync_nodes_from_handles(_node_by_store_handle)
+		unit_sim.tick(delta, map_camera.position, map_camera.zoom.x)
+		if unit_render:
+			unit_render.update_transforms()
+	var coord_soldiers := MassUnitAdapterLib.living_soldiers_for_coordinator(
+		unit_sim.store if unit_sim else null,
+		_alive_units(),
+		_mass_unit_mode,
+	)
+	combat_coordinator.tick(delta, coord_soldiers, entity_index, rooms, doors, active_hives)
 	_hive_tick_timer += step
 	if _hive_tick_timer >= HIVE_TICK_INTERVAL:
 		_hive_tick_timer = 0.0
@@ -1289,6 +1375,8 @@ func _process(delta: float) -> void:
 	if _unit_tier_timer >= UNIT_TIER_INTERVAL:
 		_unit_tier_timer = 0.0
 		_update_unit_process_tiers()
+		if _mass_unit_mode and unit_render:
+			unit_render.refresh_instances()
 	_hud_refresh_timer += delta
 	if _hud_refresh_timer >= HUD_REFRESH_INTERVAL:
 		_hud_refresh_timer = 0.0
@@ -1352,7 +1440,7 @@ func _on_soldier_entered_room(room: Room, soldier: SoldierUnit) -> void:
 			if node.get_script() == EvolutionNodeLib and node.home_room == room and not node.consumed:
 				node.try_activate(soldier.squad_id)
 				break
-	if _is_planet_mission() and swarm_director and room.sector_tag != "":
+	if swarm_director and room.sector_tag != "" and (_is_planet_mission() or _is_campaign_elite_or_boss()):
 		swarm_director.on_disturbance(room.sector_tag)
 
 
@@ -1502,12 +1590,22 @@ func _update_pathfind_budget() -> void:
 	if not path_graph:
 		return
 	var alive_count := _alive_units().size()
-	var max_finds := 4
-	if alive_count >= 8:
-		max_finds = 2
-	elif alive_count >= 4:
-		max_finds = 3
+	var max_finds := 6
+	if map_data:
+		var tier := str(map_data.map_tier)
+		if tier == "large" or _is_campaign_boss_mission():
+			max_finds = 16
+		elif tier == "planet":
+			max_finds = 14
+		elif tier == "medium":
+			max_finds = 10
+	if alive_count >= 10:
+		max_finds = maxi(4, max_finds - 4)
+	elif alive_count >= 6:
+		max_finds = maxi(4, max_finds - 2)
 	path_graph.set_max_finds_per_frame(max_finds)
+	if unit_sim and unit_sim.path_queue:
+		unit_sim.path_queue.set_max_finds_per_frame(max_finds)
 
 
 func _compute_orbital_bonus() -> float:
@@ -1654,7 +1752,12 @@ func _end_mission(victory: bool) -> void:
 	await get_tree().create_timer(1.8).timeout
 	if _is_campaign_mission() and RunState.run_active:
 		if victory:
+			var completed_id := str(RunState.campaign_graph.pending_mission_node_id)
 			RunState.complete_current_mission_node()
+			RunState.prepare_sector_rewards(completed_id)
+			SaveManager.try_grant_achievement("first_sector")
+			if RunState.missions_cleared >= 3:
+				SaveManager.try_grant_achievement("three_sectors")
 			if RunState.is_campaign_complete():
 				var max_evo_tier := 0
 				for squad_id in RunState.SQUAD_IDS:
@@ -1691,7 +1794,11 @@ func _end_mission(victory: bool) -> void:
 					summary_meta["daily_stats"] = daily_stats
 				RunState.end_run()
 				get_tree().set_meta("run_summary", summary_meta)
+				SaveManager.try_grant_achievement("boss_slayer")
+				SaveManager.record_ascension_progress(true)
 				get_tree().change_scene_to_file("res://RunSummary.tscn")
+			elif not RunState.pending_sector_reward_choices.is_empty():
+				get_tree().change_scene_to_file("res://CampaignSectorReward.tscn")
 			else:
 				get_tree().change_scene_to_file("res://CampaignNavigation.tscn")
 		else:
@@ -2176,6 +2283,10 @@ func _issue_order_to_selected(room: Room) -> void:
 		return
 	_last_order_frame = frame
 	_last_order_room = room
+	if _mass_unit_mode and unit_sim:
+		var target_ri := unit_sim.store.room_index_for_id(room.map_room_id)
+		if target_ri >= 0:
+			unit_sim.set_squad_target_room(_selected_squad_id, target_ri)
 	var units := _units_for_order()
 	if units.is_empty():
 		log_message("Select a squad (F1-F3) or operator first.", GameTheme.ACCENT_WARN.to_html(), "alert")
@@ -2583,6 +2694,14 @@ func _is_campaign_boss_mission() -> bool:
 	return RunState.campaign_graph.get_node(node_id).get("type", "") == "boss"
 
 
+func _is_campaign_elite_or_boss() -> bool:
+	if not _is_campaign_mission() or RunState.campaign_graph == null:
+		return false
+	var node_id := str(RunState.campaign_graph.pending_mission_node_id)
+	var node_type := str(RunState.campaign_graph.get_node(node_id).get("type", ""))
+	return node_type in ["elite", "boss"]
+
+
 func _apply_campaign_simple_deploy() -> void:
 	_apply_all_squads_to_spawn_room("Campaign deploy")
 
@@ -2720,6 +2839,33 @@ func despawn_enemy(enemy: EnemyUnit) -> void:
 		enemy.queue_free()
 
 
+func _fog_reveal_mass_unit(rooms_to_check: Array, door_nodes: Array, fog_scale: float) -> bool:
+	var frontier_dirty := false
+	if unit_sim == null:
+		return false
+	var store := unit_sim.store
+	for room_idx in range(store.friendly_count_by_room.size()):
+		if store.friendly_count_by_room[room_idx] <= 0:
+			continue
+		if room_idx >= rooms.size():
+			continue
+		var occ_room: Room = rooms[room_idx]
+		if _reveal_and_search(occ_room):
+			frontier_dirty = true
+	var anchors := MassUnitAdapterLib.fog_anchor_positions(store, _alive_units(), true)
+	for anchor in anchors:
+		for room in rooms_to_check:
+			if room is Room and (fog_scale >= 1.0 or room.is_revealed):
+				if LineOfSightLib.can_reveal_room(anchor, room, rooms, door_nodes):
+					if not room.is_revealed:
+						room.reveal()
+						entity_index.mark_revealed(room)
+						frontier_dirty = true
+						if room.is_extraction_room:
+							_on_extraction_room_discovered(room)
+	return frontier_dirty
+
+
 func _update_fog_of_war() -> void:
 	var fog_start := Time.get_ticks_usec()
 	if entity_index:
@@ -2733,7 +2879,11 @@ func _update_fog_of_war() -> void:
 	var rooms_to_check: Array = rooms
 	if entity_index and not entity_index.revealed_rooms.is_empty():
 		rooms_to_check = entity_index.rooms_for_fog_update(rooms)
-	var frontier_dirty := entity_index.fog_reveal_rooms(
+	var frontier_dirty := false
+	if _mass_unit_mode and unit_sim:
+		frontier_dirty = _fog_reveal_mass_unit(rooms_to_check, door_nodes, fog_scale)
+	else:
+		frontier_dirty = entity_index.fog_reveal_rooms(
 		soldiers,
 		rooms_to_check,
 		rooms,
@@ -2747,7 +2897,7 @@ func _update_fog_of_war() -> void:
 			return LineOfSightLib.can_reveal_room(soldier_pos, room, rooms, door_nodes),
 		func(room: Room) -> void:
 			_on_extraction_room_discovered(room)
-	)
+		)
 	if frontier_dirty:
 		entity_index.rebuild_frontier(rooms, _rooms_are_adjacent)
 		_minimap_dirty = true
@@ -3102,7 +3252,8 @@ func _rooms_are_adjacent(room_a: Room, room_b: Room) -> bool:
 		return false
 	if path_graph:
 		var route: Array[String] = path_graph.find_room_route(room_a.map_room_id, room_b.map_room_id)
-		return route.size() == 2
+		# Direct neighbors: room -> door_a -> door_b -> room (4 nodes).
+		return route.size() >= 2 and route.size() <= 5
 	return room_a.position.distance_to(room_b.position) <= 280.0
 
 
@@ -3495,7 +3646,8 @@ func _show_evolution_pick_popup(squad_id: String, choices: Array, node) -> void:
 	popup.add_child(vbox)
 	for upgrade in choices:
 		var btn := Button.new()
-		btn.text = "%s — %s" % [upgrade.display_name, upgrade.description]
+		var tag_line: String = ", ".join(upgrade.tags) if not upgrade.tags.is_empty() else str(upgrade.pool)
+		btn.text = "[%s] %s — %s" % [tag_line, upgrade.display_name, upgrade.description]
 		btn.pressed.connect(func():
 			var units := squads_manager.get_squad_units(squad_id)
 			RunState.apply_evolution_upgrade(squad_id, upgrade.id, units)
@@ -3727,12 +3879,30 @@ func _draw_minimap() -> void:
 			minimap_panel.draw_circle(icon_center, 4.0, Color(1.0, 0.75, 0.25, 0.95))
 		if _hive_telegraph_rooms.has(room):
 			minimap_panel.draw_arc(icon_center, 9.0, 0.0, TAU, 14, Color(1.0, 0.35, 0.25, 0.95), 2.5)
-	for unit in active_units:
-		if not unit.is_alive:
-			continue
-		var rel_u := (unit.position - min_pos) / span
-		var dot := Vector2(pad, pad) + rel_u * (panel_size - Vector2(pad * 2, pad * 2))
-		minimap_panel.draw_circle(dot, 3.0, GameTheme.squad_color(unit.squad_id))
+	if _mass_unit_mode and unit_sim:
+		for room_idx in range(unit_sim.store.friendly_count_by_room.size()):
+			if room_idx >= rooms.size():
+				continue
+			var fc: int = unit_sim.store.friendly_count_by_room[room_idx]
+			var hc: int = unit_sim.store.hostile_count_by_room[room_idx]
+			if fc <= 0 and hc <= 0:
+				continue
+			var stack_room: Room = rooms[room_idx]
+			var rel_s := (stack_room.position - min_pos) / span
+			var stack_dot := Vector2(pad, pad) + rel_s * (panel_size - Vector2(pad * 2, pad * 2))
+			if fc > 0:
+				var radius: float = clampf(3.0 + sqrt(float(fc)) * 0.35, 3.0, 10.0)
+				minimap_panel.draw_circle(stack_dot, radius, Color(0.35, 0.75, 1.0, 0.85))
+			if hc > 0:
+				var hr: float = clampf(3.0 + sqrt(float(hc)) * 0.35, 3.0, 10.0)
+				minimap_panel.draw_circle(stack_dot + Vector2(6, 0), hr, Color(0.95, 0.35, 0.3, 0.85))
+	else:
+		for unit in active_units:
+			if not unit.is_alive:
+				continue
+			var rel_u := (unit.position - min_pos) / span
+			var dot := Vector2(pad, pad) + rel_u * (panel_size - Vector2(pad * 2, pad * 2))
+			minimap_panel.draw_circle(dot, 3.0, GameTheme.squad_color(unit.squad_id))
 	if _show_threat_overlay:
 		for room in rooms:
 			if room.last_hostile_contact or room.has_living_enemies():
