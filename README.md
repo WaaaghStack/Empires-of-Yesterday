@@ -44,4 +44,4 @@ The boss sector uses a **large** map with nest hives + **Overmind** (same purge 
 godot --headless --path . res://qa_runner.tscn
 ```
 
-See [PERFORMANCE.md](PERFORMANCE.md) for tuning notes (multiple smaller maps per campaign vs one planet hull).
+See [DESIGN.md](DESIGN.md) for game mechanics, territory conquest rules, and terminology. See [PERFORMANCE.md](PERFORMANCE.md) for tuning notes.

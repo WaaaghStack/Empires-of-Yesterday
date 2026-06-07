@@ -10,6 +10,8 @@ const OVERFLOW_FRIENDLY_DPS := 0.9
 const OVERFLOW_HOSTILE_DPS := 1.45
 
 var _timer: float = 0.0
+## When true, sector resolver owns mass-battle damage; room ticks are skipped.
+var defer_to_sector_combat: bool = false
 
 
 func reset() -> void:
@@ -17,6 +19,8 @@ func reset() -> void:
 
 
 func tick_combat(store: UnitSimulationStoreLib, rooms: Array, delta: float) -> void:
+	if defer_to_sector_combat:
+		return
 	if store == null or store.count == 0:
 		return
 	_timer += delta

@@ -5,3 +5,11 @@ export_presets.cfg
 
 # Session logs (RunLog autoload)
 logs/
+
+# Rust build artifacts
+rust/**/target/
+
+# Local QA output captures
+qa_bench_out.txt
+qa_run_output.txt
+tools/smoke_out.txt

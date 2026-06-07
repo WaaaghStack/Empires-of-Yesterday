@@ -53,6 +53,24 @@ text = "Commander galaxy campaign"
 horizontal_alignment = 1
 autowrap_mode = 2
 
+[node name="RTSWorldButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 48)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "RTS World (2D — large map)"
+
+[node name="RTSWorld3DButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 48)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "RTS World 3D (compact — fast)"
+
+[node name="WorldConquestButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 48)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "World Conquest (Earth)"
+
 [node name="CommanderRunButton" type="Button" parent="MainPanel/VBox"]
 custom_minimum_size = Vector2(0, 48)
 layout_mode = 2

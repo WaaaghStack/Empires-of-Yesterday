@@ -71,7 +71,12 @@ var galaxy_state = null
 var army_pool = null
 var commander_resources = null
 var pending_battle_node_id: String = ""
+var pending_battle_id: int = 0
 var pending_live_battle: bool = false
+var pending_replay_tape = null
+var pending_queue_auto_watch: bool = false
+var return_to_battle_queue_after_view: bool = false
+var turn_battle_queue: Array = []
 var last_turn_summary: String = ""
 var missions_cleared: int = 0
 var planet_phase: PlanetPhase = PlanetPhase.DEPLOY
@@ -965,9 +970,7 @@ func start_commander_run(commander: String, seed_override: int = -1, use_daily_s
 	commander_resources.reset_from_profile(profile)
 	run_credits = commander_resources.biomass
 	squad.clear()
-	pending_battle_node_id = ""
-	pending_live_battle = false
-	last_turn_summary = ""
+	_clear_pending_battle_state()
 	run_total_elapsed = 0.0
 	run_total_casualties = 0
 	save_commander_run()
@@ -1054,11 +1057,18 @@ func save_commander_run() -> void:
 		"commander_id": commander_id,
 		"run_seed": run_seed,
 		"run_credits": run_credits,
+		"turn_index": galaxy_state.turn_index if galaxy_state else 0,
 		"galaxy": galaxy_state.to_dict(),
 		"army": army_pool.to_dict(),
 		"resources": commander_resources.to_dict() if commander_resources else {},
 		"pending_battle_node_id": pending_battle_node_id,
 	}
+	var gdb: Node = get_node_or_null("/root/GameDatabase")
+	if gdb != null:
+		var run_id: int = int(gdb.call("SaveCommanderRun", data))
+		if run_id > 0 and not turn_battle_queue.is_empty():
+			gdb.call("PersistBattleQueue", run_id, turn_battle_queue)
+		return
 	var file := FileAccess.open(COMMANDER_RUN_SAVE_PATH, FileAccess.WRITE)
 	if file:
 		file.store_string(JSON.stringify(data, "\t"))
@@ -1066,6 +1076,15 @@ func save_commander_run() -> void:
 
 
 func load_commander_run() -> bool:
+	var gdb: Node = get_node_or_null("/root/GameDatabase")
+	if gdb != null:
+		var data: Variant = gdb.call("LoadCommanderRun")
+		if typeof(data) == TYPE_DICTIONARY and not data.is_empty():
+			_apply_commander_run_dict(data)
+			var run_id: int = int(data.get("run_id", 0))
+			if run_id > 0:
+				turn_battle_queue = gdb.call("LoadBattleQueue", run_id)
+			return true
 	if not FileAccess.file_exists(COMMANDER_RUN_SAVE_PATH):
 		return false
 	var file := FileAccess.open(COMMANDER_RUN_SAVE_PATH, FileAccess.READ)
@@ -1075,7 +1094,11 @@ func load_commander_run() -> bool:
 	file.close()
 	if typeof(parsed) != TYPE_DICTIONARY:
 		return false
-	var data: Dictionary = parsed
+	_apply_commander_run_dict(parsed)
+	return true
+
+
+func _apply_commander_run_dict(data: Dictionary) -> void:
 	_reset_commander_state()
 	commander_mode = true
 	run_active = true
@@ -1092,7 +1115,6 @@ func load_commander_run() -> bool:
 	commander_resources = CommanderResourcesLib.new()
 	commander_resources.from_dict(data.get("resources", {}))
 	pending_battle_node_id = str(data.get("pending_battle_node_id", ""))
-	return true
 
 
 func _reset_campaign_state() -> void:
@@ -1110,9 +1132,69 @@ func _reset_commander_state() -> void:
 	galaxy_state = null
 	army_pool = null
 	commander_resources = null
+	_clear_pending_battle_state()
+
+
+func _clear_pending_battle_state() -> void:
 	pending_battle_node_id = ""
+	pending_battle_id = 0
 	pending_live_battle = false
+	pending_replay_tape = null
+	pending_queue_auto_watch = false
+	return_to_battle_queue_after_view = false
+	turn_battle_queue.clear()
 	last_turn_summary = ""
+
+
+func has_turn_battle_queue() -> bool:
+	for entry in turn_battle_queue:
+		if not bool(entry.get("resolved", false)):
+			return true
+	return false
+
+
+func count_unresolved_turn_battles() -> int:
+	var n := 0
+	for entry in turn_battle_queue:
+		if not bool(entry.get("resolved", false)):
+			n += 1
+	return n
+
+
+func find_turn_battle_entry(node_id: String) -> Dictionary:
+	for entry in turn_battle_queue:
+		if str(entry.get("node_id", "")) == node_id:
+			return entry
+	return {}
+
+
+func apply_turn_battle_entry(entry: Dictionary) -> void:
+	if entry.is_empty() or galaxy_state == null or army_pool == null:
+		return
+	const TurnResolverLib := preload("res://TurnResolver.gd")
+	TurnResolverLib.apply_queued_battle_outcome(galaxy_state, army_pool, entry)
+	var gdb: Node = get_node_or_null("/root/GameDatabase")
+	if gdb != null and entry.has("queue_id"):
+		gdb.call("MarkQueueResolved", int(entry.get("queue_id", 0)))
+	entry["resolved"] = true
+
+
+func complete_turn_battle_queue() -> Dictionary:
+	const TurnResolverLib := preload("res://TurnResolver.gd")
+	var total := turn_battle_queue.size()
+	var won := 0
+	for entry in turn_battle_queue:
+		if bool(entry.get("player_won", false)):
+			won += 1
+	var status: Dictionary = TurnResolverLib.finalize_commander_turn_status(
+		galaxy_state, army_pool, won, total
+	)
+	last_turn_summary = str(status.get("message", ""))
+	turn_battle_queue.clear()
+	pending_replay_tape = null
+	pending_queue_auto_watch = false
+	return_to_battle_queue_after_view = false
+	return status
 
 
 func _reset_planet_state() -> void:

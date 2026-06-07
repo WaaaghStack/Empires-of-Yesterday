@@ -10,6 +10,7 @@ Headless smoke tests catch load/parse errors, broken resource refs, and core run
 |---------|--------|
 | **Before every commit** (recommended) | Run headless `qa_runner.tscn`; fix failures before pushing. |
 | **After completing a feature phase** (A–F or equivalent) | Run QA + manual playtest checklist below; add new smoke checks to `qa_runner.gd` if the phase introduces invariants. |
+| **After territory perf program phases** | Headless QA; standard 96×72 fixture gate **`resolve_ms < 3000`** (was 12 s). Golden active-set + tape regression in `qa_runner.gd`. |
 | **Before a release / demo build** | Full headless QA + complete manual run loop (4 ops, hub between each). |
 | **After merging large refactors** | QA + spot-check scene transitions and autoload singletons. |
 | **When upgrading Godot** | QA first; watch for typing (`Array[T]`), `class_name`, and preload changes. |
@@ -213,4 +214,4 @@ func _validate_intel_terminal() -> void:
 | QA report output | `qa_report.txt` |
 | Session log (latest) | `logs/latest_run.txt` (workspace; absolute path printed at startup) |
 | Autoload config | `project.godot` → `[autoload]` |
-| Design decisions | `PHASE1_DECISIONS.md` |
+| Design decisions | `EMPIRE_VISION.md` |

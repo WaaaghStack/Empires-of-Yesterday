@@ -4,6 +4,9 @@ extends Control
 @onready var tokens_label: Label = $MainPanel/VBox/TokensLabel
 @onready var daily_label: Label = $MainPanel/VBox/DailyLabel
 @onready var more_button: Button = $MainPanel/VBox/MoreButton
+@onready var rts_world_button: Button = $MainPanel/VBox/RTSWorldButton
+@onready var rts_world_3d_button: Button = $MainPanel/VBox/RTSWorld3DButton
+@onready var world_conquest_button: Button = $MainPanel/VBox/WorldConquestButton
 @onready var commander_button: Button = $MainPanel/VBox/CommanderRunButton
 @onready var subtitle_label: Label = $MainPanel/VBox/Subtitle
 
@@ -19,6 +22,9 @@ func _ready() -> void:
 	_classic_ops_menu.add_item("Legacy planet run", 1)
 	_classic_ops_menu.add_item("Classic carrier campaign", 2)
 	add_child(_classic_ops_menu)
+	rts_world_button.pressed.connect(_on_rts_world_pressed)
+	rts_world_3d_button.pressed.connect(_on_rts_world_3d_pressed)
+	world_conquest_button.pressed.connect(_on_world_conquest_pressed)
 	commander_button.pressed.connect(_on_commander_run_pressed)
 	$MainPanel/VBox/NewRunButton.pressed.connect(_on_classic_carrier_pressed)
 	more_button.pressed.connect(_on_more_pressed)
@@ -64,6 +70,24 @@ func _on_classic_ops_selected(id: int) -> void:
 		get_tree().change_scene_to_file("res://OrbitalCarrier.tscn")
 	elif id == 2:
 		_on_classic_carrier_pressed()
+
+
+func _on_rts_world_pressed() -> void:
+	if RunState.run_seed == 0:
+		RunState.run_seed = randi() & 0x7FFFFFFF
+	get_tree().change_scene_to_file("res://WorldRTSScreen.tscn")
+
+
+func _on_rts_world_3d_pressed() -> void:
+	if RunState.run_seed == 0:
+		RunState.run_seed = randi() & 0x7FFFFFFF
+	get_tree().change_scene_to_file("res://WorldRTS3DScreen.tscn")
+
+
+func _on_world_conquest_pressed() -> void:
+	if RunState.run_seed == 0:
+		RunState.run_seed = randi() & 0x7FFFFFFF
+	get_tree().change_scene_to_file("res://WorldConquestScreen.tscn")
 
 
 func _on_commander_run_pressed() -> void:

@@ -4,6 +4,7 @@ const TurnResolverLib := preload("res://TurnResolver.gd")
 const GalaxyMapStateLib := preload("res://GalaxyMapState.gd")
 const GalaxyThreatAnalyzerLib := preload("res://GalaxyThreatAnalyzer.gd")
 const BuildingDefinitionLib := preload("res://BuildingDefinition.gd")
+const GalaxyNodeMapPreviewLib := preload("res://GalaxyNodeMapPreview.gd")
 
 @onready var graph_panel: Control = $MainHBox/GraphFrame/GraphPanel
 @onready var graph_frame: PanelContainer = $MainHBox/GraphFrame
@@ -34,6 +35,7 @@ var _graph_scale: float = 1.0
 var _end_overlay: Label = null
 var _pulse: float = 0.0
 var _urgent_cycle: int = 0
+var _preview_warm_queue: Array[Dictionary] = []
 
 
 func _ready() -> void:
@@ -62,13 +64,30 @@ func _ready() -> void:
 	_refresh_ui()
 	graph_panel.draw.connect(_draw_galaxy)
 	graph_panel.gui_input.connect(_on_graph_input)
+	GalaxyNodeMapPreviewLib.invalidate_cache(RunState.run_seed)
+	call_deferred("_prewarm_node_previews")
 	graph_panel.queue_redraw()
 	RunLog.info("Galaxy map — turn %d" % RunState.galaxy_state.turn_index)
 
 
+func _prewarm_node_previews() -> void:
+	_preview_warm_queue.clear()
+	if RunState.galaxy_state == null:
+		return
+	for node in RunState.galaxy_state.nodes:
+		if str(node.get("type", "")) != "hq":
+			_preview_warm_queue.append(node)
+
+
 func _process(delta: float) -> void:
 	_pulse += delta
-	if int(_pulse * 3.0) % 2 == 0:
+	if not _preview_warm_queue.is_empty():
+		var batch: int = mini(3, _preview_warm_queue.size())
+		for _i in range(batch):
+			var node: Dictionary = _preview_warm_queue.pop_front()
+			GalaxyNodeMapPreviewLib.preview_texture(node, RunState.run_seed)
+		graph_panel.queue_redraw()
+	elif int(_pulse * 3.0) % 2 == 0:
 		graph_panel.queue_redraw()
 
 
@@ -200,6 +219,8 @@ func _refresh_ui() -> void:
 	if _end_overlay:
 		_end_overlay.visible = false
 	_refresh_colony_panel(node)
+	if not node.is_empty() and str(node.get("type", "")) != "hq":
+		GalaxyNodeMapPreviewLib.preview_texture(node, RunState.run_seed)
 
 
 func _status_label(status: int) -> String:
@@ -325,21 +346,48 @@ func _on_plus_pressed() -> void:
 
 
 func _on_end_turn_pressed() -> void:
-	var result: Dictionary = TurnResolverLib.resolve_turn(
+	end_turn_button.disabled = true
+	var result: Dictionary = TurnResolverLib.resolve_turn_commander(
 		RunState.galaxy_state,
 		RunState.army_pool,
 		RunState.commander_resources,
 		RunState.get_commander_profile(),
-		false,
+		RunState.run_seed,
 	)
 	RunState.apply_commander_building_recruit()
-	RunState.last_turn_summary = str(result.get("message", ""))
 	RunState.run_credits = RunState.commander_resources.biomass
+	if bool(result.get("needs_battle_queue", false)):
+		RunState.turn_battle_queue = result.get("battle_queue", [])
+		RunState.last_turn_summary = str(result.get("message", ""))
+
+		# Explicitly persist battle replays right now (before scene change).
+		# This ensures battle_ids are assigned and data is in SQLite so
+		# "Watch Battle" is fast on the next screen (avoids expensive on-demand resolve).
+		var gdb: Node = get_node_or_null("/root/GameDatabase")
+		if gdb != null and not RunState.turn_battle_queue.is_empty():
+			# SaveCommanderRun will give us a run_id (or reuse existing)
+			var run_id: int = int(gdb.call("SaveCommanderRun", {
+				"commander_id": RunState.commander_id,
+				"run_seed": RunState.run_seed,
+				"run_credits": RunState.run_credits,
+				"turn_index": RunState.galaxy_state.turn_index if RunState.galaxy_state else 0,
+				"galaxy": RunState.galaxy_state.to_dict() if RunState.galaxy_state else {},
+				"army": RunState.army_pool.to_dict() if RunState.army_pool else {},
+				"resources": RunState.commander_resources.to_dict() if RunState.commander_resources else {},
+			}))
+			if run_id > 0:
+				gdb.call("PersistBattleQueue", run_id, RunState.turn_battle_queue)
+
+		RunState.save_commander_run()
+		get_tree().change_scene_to_file("res://BattleTurnQueueScreen.tscn")
+		return
+	RunState.last_turn_summary = str(result.get("message", ""))
 	RunState.save_commander_run()
 	_refresh_allocatable()
 	_recompute_graph_transform()
 	_refresh_ui()
 	graph_panel.queue_redraw()
+	end_turn_button.disabled = false
 	if bool(result.get("victory", false)) or bool(result.get("game_over", false)):
 		_show_run_end(bool(result.get("victory", false)), str(result.get("message", "")))
 
@@ -352,6 +400,8 @@ func _on_engage_pressed() -> void:
 	if RunState.army_pool.get_allocation(node_id) <= 0:
 		return
 	RunState.pending_battle_node_id = node_id
+	RunState.pending_battle_id = 0
+	RunState.pending_replay_tape = null
 	RunState.pending_live_battle = true
 	RunState.save_commander_run()
 	get_tree().change_scene_to_file("res://BattleViewer.tscn")
@@ -505,7 +555,19 @@ func _draw_galaxy() -> void:
 			graph_panel.draw_circle(pos + Vector2(radius * 0.55, -radius * 0.55), 4.0, Color(0.55, 0.85, 1.0, 0.95))
 		if node_id == focused_id:
 			graph_panel.draw_circle(pos, radius + 6.0, Color(1.0, 0.92, 0.25, 0.35))
-		graph_panel.draw_circle(pos, radius, fill)
+		var map_tex: Texture2D = GalaxyNodeMapPreviewLib.preview_texture(node, RunState.run_seed)
+		if map_tex != null:
+			var diam: float = radius * 2.0
+			graph_panel.draw_texture_rect(
+				map_tex,
+				Rect2(pos.x - radius, pos.y - radius, diam, diam),
+				false,
+			)
+			var tint := fill
+			tint.a = 0.22
+			graph_panel.draw_circle(pos, radius, tint)
+		else:
+			graph_panel.draw_circle(pos, radius, fill)
 		graph_panel.draw_arc(pos, radius, 0.0, TAU, 20, Color(0.9, 0.95, 1.0, 0.9), 2.0)
 		var enemy: int = int(node.get("enemy_strength", 0))
 		if enemy > 0 or owner != GalaxyMapStateLib.OWNER_PLAYER:

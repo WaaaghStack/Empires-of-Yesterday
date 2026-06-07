@@ -9,6 +9,7 @@ const DEFINITIONS: Dictionary = {
 		"cost_alloys": 10,
 		"manpower_per_turn": 5,
 		"recruit_per_turn": 40,
+		"pressure_bonus": 0.14,
 	},
 	"forge": {
 		"id": "forge",
@@ -17,6 +18,7 @@ const DEFINITIONS: Dictionary = {
 		"cost_alloys": 25,
 		"alloys_per_turn": 8,
 		"damage_bonus": 0.05,
+		"pressure_bonus": 0.10,
 	},
 	"sensor_array": {
 		"id": "sensor_array",
@@ -25,6 +27,7 @@ const DEFINITIONS: Dictionary = {
 		"cost_alloys": 15,
 		"biomass_per_turn": 10,
 		"intel_bonus": 1,
+		"pressure_bonus": 0.08,
 	},
 	"field_hospital": {
 		"id": "field_hospital",
@@ -32,6 +35,7 @@ const DEFINITIONS: Dictionary = {
 		"cost_biomass": 35,
 		"cost_alloys": 5,
 		"casualty_reduction": 0.08,
+		"pressure_bonus": 0.06,
 	},
 }
 

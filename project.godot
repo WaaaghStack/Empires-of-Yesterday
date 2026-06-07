@@ -21,6 +21,7 @@ config/icon="res://icon.svg"
 
 [autoload]
 
+GameDatabase="*res://GameDatabase.gd"
 RunLog="*res://RunLog.gd"
 RunState="*res://RunState.gd"
 PortraitPool="*res://PortraitPool.gd"
@@ -37,6 +38,10 @@ window/stretch/mode="canvas_items"
 [editor]
 
 version=4.3
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/godot-sqlite/plugin.cfg")
 
 [input]
 

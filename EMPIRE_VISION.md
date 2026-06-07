@@ -39,7 +39,8 @@ Order: `RunLog` → `RunState` → `PortraitPool` → `SaveManager` (see `projec
 ## Related docs
 
 - [README.md](README.md) — how to play
-- [V2_ROADMAP.md](V2_ROADMAP.md) — V2 shipped scope
+- [DESIGN.md](DESIGN.md) — current mechanics, territory conquest system, and terminology dictionary
+- [V2_ROADMAP.md](V2_ROADMAP.md) — V2 shipped scope (historical)
 - [PERFORMANCE.md](PERFORMANCE.md) — runtime tuning (`MAP_ENEMY_CAP`, fog, hives)
 - [QA_LIFECYCLE.md](QA_LIFECYCLE.md) — CI smoke tests
 - [DOCS_HOUSEKEEPING.md](DOCS_HOUSEKEEPING.md) — archived docs in `docs/archive/`

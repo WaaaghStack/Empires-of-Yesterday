@@ -18,9 +18,9 @@ These were useful during implementation but are **out of date** or duplicate inf
 
 | File | Why it's stale | Suggested action |
 |------|----------------|------------------|
-| [PHASE1_DECISIONS.md](PHASE1_DECISIONS.md) | Describes 8–10 room maps, static ship art, old mission flow — replaced by planet runs (24–32 rooms), Orbital Carrier, hives | **Delete** or move to `docs/archive/PHASE1_DECISIONS.md` |
-| [MULTI_SQUAD_DESIGN.md](MULTI_SQUAD_DESIGN.md) | Opens with "design discussion only — no implementation"; 3×4 squads, hives, task board are **already shipped** | **Delete** or archive; fold any still-useful tables into `EMPIRE_VISION.md` |
-| [UI_UX_REVIEW.md](UI_UX_REVIEW.md) | Fix log from pre-tab HUD (left comms/roster panel); mission UI is now **right-side tabs** | **Delete** or archive after skimming for any open follow-ups |
+| ~~PHASE1_DECISIONS.md~~ | Removed — superseded by planet runs, Orbital Carrier, hives | **Done** |
+| ~~MULTI_SQUAD_DESIGN.md~~ | Removed — features shipped | **Done** |
+| ~~UI_UX_REVIEW.md~~ | Removed — pre-tab HUD fix log | **Done** |
 
 ## Optional cleanup when deleting
 

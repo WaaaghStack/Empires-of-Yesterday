@@ -1,5 +1,43 @@
 # Performance tuning — Empires of Yesterday
 
+## Territory conquest resolve
+
+Canonical design: [DESIGN.md](DESIGN.md) §4.1.
+
+| Phase | Focus | Key files |
+|-------|--------|-----------|
+| 0 | Phase timers (`inject`, `gradient`, `cancel`, `sync`, `conquest`, `record_frame`); `BATTLE_PERF_LOG=1` | `BattlePerfProfiler.gd`, `BattleTerritorySim.gd`, `qa_runner.gd` |
+| 1 | `record_stride=4`, raw owners on tape, soften on playback, incremental tile counts, pressure keyframes | `BattlePacing.gd`, `BattleTerritorySim.gd`, `BattleTerritoryTape.gd`, `BattleViewer.gd` |
+| 2 | Ping-pong gradient, fixed 4-neighbor scratch, `claimable_mask`, incremental conquest counts, adaptive 2nd spread | `BattleTileControl.gd` |
+| 3 | Frontier `active_indices` sim (golden vs full grid in QA) | `BattleTileControl.gd`, `qa_runner.gd` |
+| 4 | Delta tape frames, `BattleReplayPack` v2, log pressure codec v2 (v1 load compat) | `BattleReplayPack.gd`, `BattleTilePressureCodec.gd` |
+| 5 | `end_reason`, dominance/stall early end, queue vs viewer round caps | `BattleTerritorySim.gd`, `BattlePacing.gd` |
+| 6 | `FLUID_ALPHA_PRESSURE_MAX=100_000`, strided replay lerp, skip re-resolve when SQL tape loaded | `BattleTileFluidField.gd`, `BattleViewer.gd` |
+| 7 | `resolve_ms < 3000` on 96×72 fixture; golden tape regression | `qa_runner.gd`, `QA_LIFECYCLE.md` |
+| 9 | **Option D:** pre-bake display frames after sim; playback = texture swap; wall-clock timer | `BattleTerritoryReplayBake.gd`, `BattleTerritoryTape.gd`, `BattleViewer.gd` |
+| 10 | **GPU live territory** — compute spread on GPU; display shader samples sim textures; CPU tape/resolve unchanged | `BattleTerritoryGpuField.gd`, `shaders/territory/*.glsl`, `BattleTerritorySim.gd`, `BattleViewer.gd`, `WorldRTSScreen.gd` |
+
+**Knobs:** `BattlePacing.RESOLVE_TAPE_RECORD_STRIDE` (default 4), `RESOLVE_MAX_ROUNDS_CAP` (960 queue), `VIEWER_MAX_ROUNDS_CAP` (3200), `BATTLE_PERF_LOG=1`, `BATTLE_REPLAY_LOG=1`, `TERRITORY_MAX_SEGMENT_SECONDS` (1.25), `OVERLAY_MAX_UPDATES_PER_SEC` (12 in viewer), `BATTLE_TERRITORY_BACKEND` (`gpu` default for live, `cpu` for legacy live), `BATTLE_GPU_COMPARE=1` (optional CPU vs GPU parity in qa_runner).
+
+**GPU live targets (Phase 10):** 96×72 Engage sim+display &lt; **2 ms** combined on mid hardware; 192×144 RTS World sim dispatch &lt; **4 ms** per frame budget. **Non-goals:** GPU tape encode, GPU headless resolve, multiplayer sync.
+
+### RTS World live play (CPU path)
+
+| Change | File | Effect |
+|--------|------|--------|
+| Terrain baked to one `ImageTexture` | `WorldRTSTerrainBake.gd`, `WorldRTSScreen.gd` | Removes thousands of `ColorRect` nodes |
+| Active-set rebuild every 3 rounds (or on frontier change) | `BattleTileControl.gd` | Avoids full-grid scan each sim round |
+| Cancel pressure on active tiles only | `BattleTileControl.gd` | Cheaper overlap pass as front grows |
+| Overlay: cached land mask + byte buffers | `BattleTileOwnershipOverlay.gd` | Faster `apply_live_state` |
+| Adaptive sim rounds when frontier &gt; 4500 tiles | `WorldRTSConfig.gd`, `WorldRTSScreen.gd` | Late-battle frame time cap |
+| Lower default sim/overlay rates for world | `WorldRTSConfig.gd` | 10 r/s, 8 max/frame, 5 Hz overlay |
+
+Env: `BATTLE_TERRITORY_BACKEND=gpu` to try GPU sim on world (experimental).
+
+**Replay vs resolve:** `resolve_ms` is headless sim + tape build; `total_duration()` is spectator watch time at 1× (normalized). Wall-clock lag was caused by full fluid rebuild every frame — replay clock now advances every tick, overlay throttled.
+
+---
+
 This document summarizes runtime optimizations for tactical maps (**campaign sectors: 8–18 rooms each; legacy planet: 12–16 rooms in one hull**) with 12+ units, and the knobs you can adjust.
 
 **Campaign mode** loads a fresh smaller map per navigation node (lower peak room/enemy count per session than one full planet run, but multiple missions per run).

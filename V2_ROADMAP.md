@@ -64,6 +64,10 @@
 2. **Art** — replace colony placeholders with authored tiles?
 3. **Platform** — daily seed leaderboard UI polish?
 
+## Design reference
+
+Current mechanics, territory conquest rules, and the full glossary live in [DESIGN.md](DESIGN.md). This file is the single source of truth for design and terminology.
+
 ## Archived pre-V2 docs
 
 Moved to `docs/archive/`: `PHASE1_DECISIONS.md`, `MULTI_SQUAD_DESIGN.md`, `UI_UX_REVIEW.md`

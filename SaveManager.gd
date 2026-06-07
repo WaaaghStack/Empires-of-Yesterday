@@ -32,7 +32,15 @@ func _ready() -> void:
 	load_profile()
 
 
+func _game_db() -> Node:
+	return get_node_or_null("/root/GameDatabase")
+
+
 func load_profile() -> void:
+	var gdb := _game_db()
+	if gdb != null:
+		gdb.call("SyncProfileToSaveManager")
+		return
 	unlocked_classes = DEFAULT_UNLOCKED_CLASSES.duplicate()
 	unlocked_portraits.clear()
 	discovered_modifiers.clear()
@@ -75,6 +83,10 @@ func load_profile() -> void:
 
 
 func save_profile() -> void:
+	var gdb := _game_db()
+	if gdb != null:
+		gdb.call("SaveProfileFromSaveManager")
+		return
 	var data := {
 		"command_tokens": command_tokens,
 		"carrier_biomass": carrier_biomass,

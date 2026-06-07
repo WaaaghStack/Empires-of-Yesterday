@@ -1,0 +1,18 @@
+[package]
+name = "empire_territory"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Use git master for latest Godot 4.x compatibility (including 4.6).
+# After `cargo build` you can pin to a specific commit or tag for reproducibility.
+godot = { git = "https://github.com/godot-rust/gdext", branch = "master" }
+rayon = "1.10"
+
+[features]
+default = []
+# Enable if you need experimental thread safety features later
+# experimental-threads = ["godot/experimental-threads"]

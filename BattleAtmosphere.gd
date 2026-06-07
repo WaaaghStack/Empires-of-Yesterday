@@ -42,11 +42,15 @@ func _setup_dust() -> void:
 	add_child(_dust)
 
 
-func notify_flip_burst() -> void:
-	_flip_burst_timer = 1.1
+func notify_flip_burst(strength: float = 1.0) -> void:
+	# strength 1.0 = normal flip, >1.0 = major breakthrough / big territory swing
+	var dur := clampf(0.9 + strength * 0.6, 1.0, 2.2)
+	_flip_burst_timer = dur
 	if _dust:
 		_dust.emitting = true
 		_dust.restart()
+		_dust.amount = int(lerpf(48, 110, clampf(strength - 1.0, 0.0, 1.0)))
+		_dust.explosiveness = lerpf(0.35, 0.75, clampf(strength - 1.0, 0.0, 1.0))
 
 
 func tick(step: float) -> void:
@@ -68,7 +72,6 @@ func tick(step: float) -> void:
 
 func _update_dust() -> void:
 	var active := _phase_ctrl.current_phase in [
-		BattlePhaseControllerLib.Phase.APPROACH,
 		BattlePhaseControllerLib.Phase.ENGAGEMENT,
 	]
 	_dust.emitting = active or _flip_burst_timer > 0.0
@@ -91,19 +94,23 @@ func _fire_tracer_salvo(salvo_cap: int = 16) -> void:
 	if _battle_data == null:
 		return
 	var hot: Array[Dictionary] = []
-	for region in _battle_data.regions:
-		var p: float = float(region.get("pressure", 0.0))
-		if p > 0.08 and p < 0.92:
-			hot.append(region)
-	hot.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return absf(float(a.get("pressure", 0.5)) - 0.5) > absf(float(b.get("pressure", 0.5)) - 0.5)
-	)
-	var salvo: int = mini(salvo_cap, maxi(8, hot.size()))
+	if _battle_data.capture_points.size() > 0:
+		for cp in _battle_data.capture_points:
+			var f: float = float(cp.get("friendly_power", 0.0))
+			var h: float = float(cp.get("hostile_power", 0.0))
+			if f > 0.0 and h > 0.0:
+				hot.append(cp)
+	else:
+		for region in _battle_data.regions:
+			var p: float = float(region.get("pressure", 0.0))
+			if p > 0.08 and p < 0.92:
+				hot.append(region)
+	var salvo: int = mini(salvo_cap, maxi(4, hot.size()))
 	for i in range(salvo):
 		if i >= hot.size():
 			break
 		var region: Dictionary = hot[i]
-		var center: Vector2 = region.get("center", Vector2.ZERO)
+		var center: Vector2 = region.get("world_pos", region.get("center", Vector2.ZERO))
 		var offset_y := randf_range(-40.0, 40.0)
 		var from_pos := center + Vector2(-28.0, offset_y)
 		var to_pos := center + Vector2(28.0, offset_y)

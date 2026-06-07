@@ -29,14 +29,17 @@ static func generate(run_seed: int):
 				owner = GalaxyMapStateLib.OWNER_PLAYER if col == 0 else GalaxyMapStateLib.OWNER_NEUTRAL
 			var terrain: String = TERRAIN_TAGS[rng.randi() % TERRAIN_TAGS.size()]
 			var enemy_strength: int = rng.randi_range(120, 280) + layer * 80
-			galaxy.nodes.append(_make_node(node_id, layer, col, "battle", owner, terrain, enemy_strength, rng))
+			var node := _make_node(node_id, layer, col, "battle", owner, terrain, enemy_strength, rng)
+			if terrain == "mixed":
+				node["terrain_mix"] = _random_terrain_mix(rng)
+			galaxy.nodes.append(node)
 			layer_ids.append(node_id)
 		_wire_layers(prev_ids, layer_ids, rng, galaxy)
 		prev_ids = layer_ids
 
-	galaxy.nodes.append(
-		_make_node("boss", LAYER_COUNT - 1, 0, "boss", GalaxyMapStateLib.OWNER_ENEMY, "mixed", 900, rng)
-	)
+	var boss := _make_node("boss", LAYER_COUNT - 1, 0, "boss", GalaxyMapStateLib.OWNER_ENEMY, "mixed", 900, rng)
+	boss["terrain_mix"] = _random_terrain_mix(rng)
+	galaxy.nodes.append(boss)
 	for parent_id in prev_ids:
 		galaxy.edges.append({"from_id": parent_id, "to_id": "boss"})
 	return galaxy
@@ -69,6 +72,20 @@ static func _make_node(
 		"building_slots": 2 if owner == GalaxyMapStateLib.OWNER_PLAYER else 0,
 		"buildings": [],
 	}
+
+
+static func _random_terrain_mix(rng: RandomNumberGenerator) -> Dictionary:
+	var keys: Array[String] = ["grass", "water", "mountain", "sand", "mud"]
+	var weights: Array[float] = []
+	var total := 0.0
+	for _k in keys:
+		var w: float = rng.randf_range(0.05, 1.0)
+		weights.append(w)
+		total += w
+	var mix: Dictionary = {}
+	for i in range(keys.size()):
+		mix[keys[i]] = weights[i] / total
+	return mix
 
 
 static func _wire_layers(

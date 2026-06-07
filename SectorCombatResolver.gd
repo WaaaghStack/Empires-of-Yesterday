@@ -75,7 +75,11 @@ func tick_combat(
 		region["pressure"] = pressure
 		var control := str(region.get("control", BattleMapDataLib.CONTROL_NEUTRAL))
 		var def_bonus: float = battle_data.defender_bonus
-		var dps: Vector2 = _row_exchange_dps(friendlies, hostiles, control, def_bonus, damage_mult, hostile_damage_mult)
+		var terrain_def: float = _avg_defense_for_indices(store, battle_data, counts.get("friendly_indices", []))
+		var terrain_def_h: float = _avg_defense_for_indices(store, battle_data, counts.get("hostile_indices", []))
+		var dps: Vector2 = _row_exchange_dps(
+			friendlies, hostiles, control, def_bonus, damage_mult, hostile_damage_mult, terrain_def, terrain_def_h
+		)
 		var friendly_dps: float = dps.x
 		var hostile_dps: float = dps.y
 		if friendlies > 0 and hostiles > 0:
@@ -104,6 +108,8 @@ func _row_exchange_dps(
 	def_bonus: float,
 	damage_mult: float,
 	hostile_damage_mult: float,
+	friendly_terrain_def: float = 1.0,
+	hostile_terrain_def: float = 1.0,
 ) -> Vector2:
 	if friendlies <= 0 or hostiles <= 0:
 		return Vector2.ZERO
@@ -118,7 +124,26 @@ func _row_exchange_dps(
 		hostile_dps *= def_bonus
 	elif control == BattleMapDataLib.CONTROL_ENEMY:
 		friendly_dps /= def_bonus
+	hostile_dps /= maxf(0.65, friendly_terrain_def)
+	friendly_dps /= maxf(0.65, hostile_terrain_def)
 	return Vector2(friendly_dps, hostile_dps)
+
+
+func _avg_defense_for_indices(store: UnitSimulationStore, battle_data, indices: Array) -> float:
+	if indices.is_empty() or battle_data == null:
+		return 1.0
+	var total := 0.0
+	for idx in indices:
+		if idx < 0 or idx >= store.count:
+			continue
+		var gx: int = store.grid_x[idx] if store.grid_x.size() > idx else 0
+		var gy: int = store.grid_y[idx] if store.grid_y.size() > idx else 0
+		var cell_def: float = battle_data.get_defense(gx, gy)
+		if battle_data.cover_cells.size() > battle_data.cell_index(gx, gy):
+			if battle_data.cover_cells[battle_data.cell_index(gx, gy)] > 0:
+				cell_def *= 1.12
+		total += cell_def
+	return total / float(indices.size())
 
 
 func _tick_contact_row_combat(
@@ -162,8 +187,10 @@ func _tick_contact_row_combat(
 		region["pressure"] = pressure
 		var control := str(region.get("control", BattleMapDataLib.CONTROL_NEUTRAL))
 		var def_bonus: float = battle_data.defender_bonus
+		var terrain_def_f: float = _avg_defense_for_indices(store, battle_data, friendly_indices)
+		var terrain_def_h: float = _avg_defense_for_indices(store, battle_data, hostile_indices)
 		var dps: Vector2 = _row_exchange_dps(
-			friendlies, hostiles, control, def_bonus, damage_mult, hostile_damage_mult
+			friendlies, hostiles, control, def_bonus, damage_mult, hostile_damage_mult, terrain_def_f, terrain_def_h
 		)
 		_apply_casualties_to_indices(
 			store, hostile_indices, dps.x, region_id, region, UnitSimulationStore.Side.HOSTILE

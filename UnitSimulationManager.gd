@@ -24,6 +24,7 @@ var _full_tier_cap: int = FULL_TIER_CAP_DEFAULT
 var _rooms: Array = []
 var _path_graph: DynamicPathGraph = null
 var _squad_target_rooms: Dictionary = {}
+var use_room_combat: bool = true
 
 
 func _init() -> void:
@@ -76,7 +77,8 @@ func tick(delta: float, camera_pos: Vector2, zoom: float) -> void:
 	if _order_accum >= 1.0 / ORDER_TICK_HZ:
 		_order_accum = 0.0
 		_tick_squad_orders()
-	room_combat.tick_combat(store, _rooms, delta)
+	if use_room_combat:
+		room_combat.tick_combat(store, _rooms, delta)
 	_tier_accum += delta
 	if _tier_accum >= 1.0 / TIER_TICK_HZ:
 		_tier_accum = 0.0

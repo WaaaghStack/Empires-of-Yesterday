@@ -1,0 +1,20 @@
+[configuration]
+
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.2"
+reloadable = true
+
+[libraries]
+
+windows.debug.x86_64 = "res://rust/empire_territory/bin/empire_territory.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "res://rust/empire_territory/bin/empire_territory.windows.template_release.x86_64.dll"
+
+linux.debug.x86_64 = "res://rust/empire_territory/bin/libempire_territory.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "res://rust/empire_territory/bin/libempire_territory.linux.template_release.x86_64.so"
+
+macos.debug = "res://rust/empire_territory/bin/libempire_territory.macos.template_debug.framework"
+macos.release = "res://rust/empire_territory/bin/libempire_territory.macos.template_release.framework"
+
+[icons]
+
+TerritorySim = "res://icon.svg"
