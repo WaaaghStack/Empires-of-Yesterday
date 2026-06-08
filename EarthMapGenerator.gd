@@ -30,6 +30,7 @@ static func generate(run_seed: int):
 	data.contact_column = w / 2
 	data.objective_sectors_required = 0
 	data.placed_structures = []
+	data.resource_deposits = []
 	var total: int = w * h
 	data.terrain_cells = PackedByteArray()
 	data.terrain_cells.resize(total)
@@ -59,6 +60,7 @@ static func generate(run_seed: int):
 	data.rebuild_terrain_arrays()
 	data.sync_blocked_from_terrain()
 	_place_spawns_and_capitals(data, land_bits, run_seed)
+	_scatter_resource_blobs(data, run_seed)
 	return data
 
 
@@ -217,3 +219,131 @@ static func _pick_cell(cells: Array[Vector2i], rng: RandomNumberGenerator) -> Ve
 	if cells.is_empty():
 		return Vector2i(-1, -1)
 	return cells[rng.randi_range(0, cells.size() - 1)]
+
+
+static func _scatter_resource_blobs(data, seed_val: int) -> void:
+	var w: int = data.grid_width
+	var h: int = data.grid_height
+	var rng := RandomNumberGenerator.new()
+	var placed_centers: Array[Vector2i] = []
+	var next_id: int = 1
+	for type_i in range(WorldConquestConfigLib.RESOURCE_TYPE_COUNT):
+		rng.seed = seed_val ^ (0xB10B0000 + type_i * 0x9E37)
+		var terrain_want: int = _terrain_for_resource_type(type_i)
+		var candidates: Array[Vector2i] = []
+		for gy in range(h):
+			for gx in range(w):
+				if not data.is_land_cell(gx, gy):
+					continue
+				if int(data.get_cell_terrain(gx, gy)) != terrain_want:
+					continue
+				if _too_close_to_spawn(data, gx, gy):
+					continue
+				candidates.append(Vector2i(gx, gy))
+		var tries: int = 0
+		var placed: int = 0
+		while placed < WorldConquestConfigLib.RESOURCE_BLOBS_PER_TYPE and tries < 8000:
+			tries += 1
+			if candidates.is_empty():
+				break
+			var center: Vector2i = candidates[rng.randi_range(0, candidates.size() - 1)]
+			if _too_close_to_blob(center, placed_centers):
+				continue
+			var size_tier: int = rng.randi_range(1, 3)
+			var blob: Dictionary = _grow_resource_blob(
+				data, center, size_tier, type_i, next_id, w, h, rng
+			)
+			if blob.is_empty():
+				continue
+			data.resource_deposits.append(blob)
+			placed_centers.append(center)
+			next_id += 1
+			placed += 1
+
+
+static func _terrain_for_resource_type(type_i: int) -> int:
+	match type_i:
+		1:
+			return BattleMapDataLib.Terrain.MOUNTAIN
+		2:
+			return BattleMapDataLib.Terrain.SAND
+		_:
+			return BattleMapDataLib.Terrain.GRASS
+
+
+static func _too_close_to_spawn(data, gx: int, gy: int) -> bool:
+	var spots: Array[Vector2i] = [data.player_home_grid, data.enemy_home_grid]
+	for spot in spots:
+		if spot.x < 0:
+			continue
+		var dx: int = absi(gx - spot.x)
+		dx = mini(dx, data.grid_width - dx)
+		var dy: int = absi(gy - spot.y)
+		if dx * dx + dy * dy < WorldConquestConfigLib.RESOURCE_SPAWN_EXCLUSION ** 2:
+			return true
+	return false
+
+
+static func _too_close_to_blob(center: Vector2i, placed: Array[Vector2i]) -> bool:
+	var min_d2: int = WorldConquestConfigLib.RESOURCE_BLOB_MIN_SPACING ** 2
+	for other in placed:
+		var dx: int = absi(center.x - other.x)
+		var dy: int = absi(center.y - other.y)
+		if dx * dx + dy * dy < min_d2:
+			return true
+	return false
+
+
+static func _grow_resource_blob(
+	data,
+	center: Vector2i,
+	size_tier: int,
+	type_i: int,
+	dep_id: int,
+	w: int,
+	h: int,
+	rng: RandomNumberGenerator,
+) -> Dictionary:
+	var want: int = int(data.get_cell_terrain(center.x, center.y))
+	var target_n: int = WorldConquestConfigLib.RESOURCE_BLOB_CELL_COUNT[size_tier]
+	var keys := PackedInt32Array()
+	var queue: Array[Vector2i] = [center]
+	var seen: Dictionary = {center: true}
+	while not queue.is_empty() and keys.size() < target_n:
+		var cur: Vector2i = queue.pop_front()
+		if not data.is_land_cell(cur.x, cur.y):
+			continue
+		if int(data.get_cell_terrain(cur.x, cur.y)) != want:
+			continue
+		keys.append(cur.y * w + cur.x)
+		var dirs: Array[Vector2i] = [
+			Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+		]
+		dirs.shuffle()
+		for d in dirs:
+			var nx: int = cur.x + d.x
+			var ny: int = cur.y + d.y
+			if ny < 0 or ny >= h:
+				continue
+			if nx < 0:
+				nx = w - 1
+			elif nx >= w:
+				nx = 0
+			var nxt := Vector2i(nx, ny)
+			if seen.has(nxt):
+				continue
+			if rng.randf() > 0.62:
+				continue
+			seen[nxt] = true
+			queue.append(nxt)
+	if keys.size() < 3:
+		return {}
+	return {
+		"id": dep_id,
+		"type": type_i,
+		"gx": center.x,
+		"gy": center.y,
+		"size": size_tier,
+		"yield_per_sec": WorldConquestConfigLib.RESOURCE_YIELD_BY_SIZE[size_tier],
+		"cell_keys": keys,
+	}

@@ -627,12 +627,108 @@ func _load_placed_spawners_from_map(map_data) -> void:
 	for st in map_data.placed_structures:
 		if str(st.get("kind", "")) != "spawner":
 			continue
+		var state: String = str(st.get("state", "active"))
+		if state != "" and state != "active":
+			continue
 		_placed_spawners.append({
 			"team": int(st.get("team", OWNER_FRIENDLY)),
 			"gx": int(st.get("gx", 0)),
 			"gy": int(st.get("gy", 0)),
 			"kind": "spawner",
 		})
+
+
+func sync_placed_spawners_from_map(map_data) -> void:
+	_load_placed_spawners_from_map(map_data)
+	_extend_reachability_from_spawners(map_data)
+
+
+## Active outposts on separate landmasses (bridge-linked islands) must become claimable.
+func _extend_reachability_from_spawners(map_data) -> void:
+	if map_data == null or _placed_spawners.is_empty():
+		return
+	var changed: bool = false
+	for sp: Dictionary in _placed_spawners:
+		var team: int = int(sp.get("team", OWNER_FRIENDLY))
+		var gx: int = int(sp.get("gx", -1))
+		var gy: int = int(sp.get("gy", -1))
+		if gx < 0 or gy < 0:
+			continue
+		var mask: PackedByteArray = (
+			_friendly_reachable if team == OWNER_FRIENDLY else _hostile_reachable
+		)
+		if _flood_passable_into_mask(map_data, gx, gy, mask):
+			changed = true
+	if changed:
+		_apply_reachability_to_claimable(map_data)
+
+
+func _flood_passable_into_mask(
+	map_data, start_gx: int, start_gy: int, mask: PackedByteArray
+) -> bool:
+	if not map_data.is_passable(start_gx, start_gy):
+		return false
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var start_idx: int = map_data.cell_index(start_gx, start_gy)
+	if start_idx < 0 or start_idx >= mask.size():
+		return false
+	var any_new: bool = false
+	if mask[start_idx] == 0:
+		mask[start_idx] = 1
+		any_new = true
+	var queue: Array[Vector2i] = [Vector2i(start_gx, start_gy)]
+	var head: int = 0
+	while head < queue.size():
+		var cur: Vector2i = queue[head]
+		head += 1
+		for d: Vector2i in _DIRS_CARDINAL:
+			var nx: int = cur.x + d.x
+			var ny: int = cur.y + d.y
+			if nx < 0 or ny < 0 or nx >= w or ny >= h:
+				continue
+			if not map_data.is_passable(nx, ny):
+				continue
+			var nidx: int = map_data.cell_index(nx, ny)
+			if mask[nidx] != 0:
+				continue
+			mask[nidx] = 1
+			any_new = true
+			queue.append(Vector2i(nx, ny))
+	return any_new
+
+
+func _apply_reachability_to_claimable(map_data) -> void:
+	if map_data == null:
+		return
+	var w: int = map_data.grid_width
+	for idx in range(_tile_count):
+		var gx: int = idx % w
+		var gy: int = idx / w
+		var was: int = claimable_mask[idx]
+		var now: bool = _is_claimable_index(idx)
+		claimable_mask[idx] = 1 if now else 0
+		if now and was == 0:
+			_elevation[idx] = tile_elevation(map_data, gx, gy)
+			_terrain_flow_mult[idx] = _flow_mult_for_tile(map_data, gx, gy, true)
+			_claim_ratio_mult[idx] = _claim_mult_for_tile(map_data, gx, gy, true)
+			if owners[idx] == OWNER_UNCLAIMABLE:
+				owners[idx] = OWNER_NEUTRAL
+		elif not now and was != 0:
+			owners[idx] = OWNER_UNCLAIMABLE
+			pressure_friendly[idx] = 0.0
+			pressure_hostile[idx] = 0.0
+	claimable_tile_count = 0
+	for idx2 in range(_tile_count):
+		if claimable_mask[idx2] != 0:
+			claimable_tile_count += 1
+	_recount_ownership()
+	_frontier_changed = true
+
+
+const _DIRS_CARDINAL: Array[Vector2i] = [
+	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+]
 
 
 func _inject_territory_spawn_pressure(map_data) -> void:

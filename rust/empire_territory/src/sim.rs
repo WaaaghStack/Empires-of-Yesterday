@@ -141,6 +141,53 @@ impl TerritoryKernel {
         }
     }
 
+    /// Sync claimable tiles after bridge outposts open new landmasses (GDScript reachability extend).
+    pub fn update_claimable(
+        &mut self,
+        claimable_mask: Vec<u8>,
+        elevation: Vec<f32>,
+        terrain_flow_mult: Vec<f32>,
+        claim_ratio_mult: Vec<f32>,
+        owners: Vec<u8>,
+    ) {
+        if claimable_mask.len() != self.tile_count {
+            return;
+        }
+        self.claimable_mask = claimable_mask;
+        if elevation.len() == self.tile_count {
+            self.elevation = elevation;
+        }
+        if terrain_flow_mult.len() == self.tile_count {
+            self.terrain_flow_mult = terrain_flow_mult;
+        }
+        if claim_ratio_mult.len() == self.tile_count {
+            self.claim_ratio_mult = claim_ratio_mult;
+        }
+        if owners.len() == self.tile_count {
+            self.owners = owners;
+        }
+        self.recount_ownership_tiles();
+        self.frontier_changed = true;
+        if self.use_active_set {
+            self.rebuild_active_indices();
+        }
+    }
+
+    fn recount_ownership_tiles(&mut self) {
+        self.friendly_tiles = 0;
+        self.hostile_tiles = 0;
+        for idx in 0..self.tile_count {
+            if self.claimable_mask[idx] == 0 {
+                continue;
+            }
+            match self.owners[idx] {
+                OWNER_FRIENDLY => self.friendly_tiles += 1,
+                OWNER_HOSTILE => self.hostile_tiles += 1,
+                _ => {}
+            }
+        }
+    }
+
     fn inject_home(&mut self, idx: i32, amount: f32, is_friendly: bool) {
         if idx < 0 || amount <= 0.0 {
             return;

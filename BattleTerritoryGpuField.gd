@@ -408,6 +408,15 @@ func _rd_texture_to_r8_image(tex: RID) -> Image:
 	return Image.create_from_data(grid_w, grid_h, false, Image.FORMAT_R8, data)
 
 
+func refresh_claimable_from(map_data, tile_control: BattleTileControlLib) -> void:
+	if not ready or map_data == null or tile_control == null:
+		return
+	_upload_static_from_tile_control(map_data, tile_control)
+	_upload_owners_from_cpu(tile_control.owners)
+	_update_tile_counts_from_owners_cpu(tile_control.owners)
+	_sync_inject_points_from_tile_control(tile_control)
+
+
 func _upload_static_from_tile_control(map_data, tile_control: BattleTileControlLib) -> void:
 	var n: int = tile_count
 	var claim := PackedByteArray()

@@ -181,6 +181,27 @@ impl TerritorySim {
     }
 
     #[func]
+    fn update_claimable(
+        &mut self,
+        claimable: PackedByteArray,
+        elevation: PackedFloat32Array,
+        flow_mult: PackedFloat32Array,
+        claim_mult: PackedFloat32Array,
+        owners: PackedByteArray,
+    ) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        kernel.update_claimable(
+            packed_byte_to_vec(&claimable),
+            packed_f32_to_vec(&elevation),
+            packed_f32_to_vec(&flow_mult),
+            packed_f32_to_vec(&claim_mult),
+            packed_byte_to_vec(&owners),
+        );
+    }
+
+    #[func]
     fn update_spawners(
         &mut self,
         spawner_teams: PackedByteArray,

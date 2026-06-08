@@ -69,6 +69,8 @@ var placed_structures: Array = []
 ## World conquest: capital tiles for objective win.
 var player_capital_grid: Vector2i = Vector2i(-1, -1)
 var enemy_capital_grid: Vector2i = Vector2i(-1, -1)
+## World conquest: {id, type, gx, gy, size, yield_per_sec, cell_keys: PackedInt32Array}
+var resource_deposits: Array = []
 
 
 func cell_index(gx: int, gy: int) -> int:

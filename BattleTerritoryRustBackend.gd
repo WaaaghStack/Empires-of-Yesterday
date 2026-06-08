@@ -131,6 +131,30 @@ func sync_spawners_from(tile_control: BattleTileControlLib) -> void:
 	_sim.call("update_spawners", spawner_data.teams, spawner_data.gx, spawner_data.gy)
 
 
+func sync_claimable_from(
+	tile_control: BattleTileControlLib,
+	map_data = null,
+	use_active_set: bool = true,
+) -> void:
+	if not ready or _sim == null or tile_control == null:
+		return
+	if _sim.has_method("update_claimable"):
+		_sim.call(
+			"update_claimable",
+			tile_control.claimable_mask,
+			tile_control._elevation,
+			tile_control._terrain_flow_mult,
+			tile_control._claim_ratio_mult,
+			tile_control.owners,
+		)
+		return
+	if map_data != null:
+		push_warning(
+			"TerritorySim missing update_claimable — reinitializing Rust sim from tile control."
+		)
+		setup_from_tile_control(map_data, tile_control, use_active_set)
+
+
 static func encode_pressure_v2(pressure: PackedFloat32Array) -> PackedByteArray:
 	if not extension_available():
 		return PackedByteArray()

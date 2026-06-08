@@ -7,6 +7,7 @@ const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend
 const BattleTerritoryTapeLib := preload("res://BattleTerritoryTape.gd")
 const BattlePacingLib := preload("res://BattlePacing.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+const BattleTileFluidFieldLib := preload("res://BattleTileFluidField.gd")
 const BattlePerfProfilerLib := preload("res://BattlePerfProfiler.gd")
 const BuildingDefinitionLib := preload("res://BuildingDefinition.gd")
 const GalaxyMapStateLib := preload("res://GalaxyMapState.gd")
@@ -201,7 +202,7 @@ func _apply_max_rounds_for_context() -> void:
 		"world_conquest":
 			step_dt = WorldConquestConfigLib.SIM_DT
 			max_rounds_limit = int(WorldConquestConfigLib.MAX_SIM_TIME_SEC / step_dt)
-			_stall_rounds_limit = int(WorldConquestConfigLib.STALL_SEC / step_dt)
+			_stall_rounds_limit = max_rounds_limit
 		"world":
 			max_rounds_limit = MAX_ROUNDS_DEFAULT * 4
 			_stall_rounds_limit = STALL_ROUNDS_VIEWER
@@ -478,6 +479,16 @@ func _tiles_owned_by_enemy() -> int:
 	return 0
 
 
+func _hostile_power_total() -> float:
+	if tile_control == null:
+		return 0.0
+	var totals: Vector2 = BattleTileFluidFieldLib.cumulative_power_totals(
+		tile_control.pressure_friendly,
+		tile_control.pressure_hostile,
+	)
+	return totals.y
+
+
 func _estimate_max_rounds() -> int:
 	if battle_data == null:
 		return MAX_ROUNDS_DEFAULT
@@ -493,64 +504,26 @@ func _check_conquest_world() -> void:
 		player_won = friendly >= hostile
 		end_reason = "cap"
 		return
-	if friendly >= claimable_tiles:
+	var need: int = int(ceil(float(claimable_tiles) * WorldConquestConfigLib.CONQUEST_LAND_FRAC))
+	if friendly >= need:
 		finished = true
 		player_won = true
-		end_reason = "conquest"
+		end_reason = "total_conquest"
 		return
-	if hostile >= claimable_tiles:
+	if hostile >= need:
 		finished = true
 		player_won = false
-		end_reason = "conquest"
+		end_reason = "total_conquest"
 		return
-	if battle_data != null and tile_control != null:
-		var pc: Vector2i = battle_data.player_capital_grid
-		var ec: Vector2i = battle_data.enemy_capital_grid
-		if pc.x >= 0 and _owner_at(pc.x, pc.y) == BattleTileControlLib.OWNER_HOSTILE:
-			finished = true
-			player_won = false
-			end_reason = "capital"
-			return
-		if ec.x >= 0 and _owner_at(ec.x, ec.y) == BattleTileControlLib.OWNER_FRIENDLY:
-			finished = true
-			player_won = true
-			end_reason = "capital"
-			return
-	var dom_frac: float = WorldConquestConfigLib.CONQUEST_LAND_FRAC
-	var leader: int = 0
-	if float(friendly) >= float(claimable_tiles) * dom_frac:
-		leader = 1
-	elif float(hostile) >= float(claimable_tiles) * dom_frac:
-		leader = 2
-	if leader != 0 and leader == _dominance_leader:
-		_dominance_hold_sec += step_dt
-	else:
-		_dominance_leader = leader
-		_dominance_hold_sec = step_dt if leader != 0 else 0.0
-	if _dominance_hold_sec >= WorldConquestConfigLib.DOMINANCE_HOLD_SEC:
+	if _hostile_power_total() <= WorldConquestConfigLib.ZERO_POWER_VICTORY_EPS:
 		finished = true
-		player_won = _dominance_leader == 1
-		end_reason = "dominance"
-		return
-	var tile_delta: int = absi(friendly - _prev_friendly) + absi(hostile - _prev_hostile)
-	if tile_delta <= STALL_TILE_DELTA:
-		_stall_sec += step_dt
-	else:
-		_stall_sec = 0.0
-	_prev_friendly = friendly
-	_prev_hostile = hostile
-	if _stall_sec >= WorldConquestConfigLib.STALL_SEC:
-		finished = true
-		player_won = friendly > hostile
-		end_reason = "stall"
-		return
-	_check_decisive_lead_world(friendly, hostile)
-	if finished:
+		player_won = true
+		end_reason = "enemy_zero_power"
 		return
 	if sim_time >= WorldConquestConfigLib.MAX_SIM_TIME_SEC:
 		finished = true
 		player_won = friendly > hostile
-		end_reason = "cap"
+		end_reason = "time_cap"
 
 
 func _owner_at(gx: int, gy: int) -> int:
@@ -559,33 +532,6 @@ func _owner_at(gx: int, gy: int) -> int:
 	if gx < 0 or gy < 0 or gx >= battle_data.grid_width or gy >= battle_data.grid_height:
 		return BattleTileControlLib.OWNER_NEUTRAL
 	return int(tile_control.owners[battle_data.cell_index(gx, gy)])
-
-
-func _check_decisive_lead_world(friendly: int, hostile: int) -> void:
-	if claimable_tiles <= 0 or player_force <= 0 or enemy_force <= 0:
-		return
-	var force_ratio: float = float(player_force) / float(maxi(1, enemy_force))
-	var inv_ratio: float = float(enemy_force) / float(maxi(1, player_force))
-	var leader: int = 0
-	if (
-		float(friendly) >= float(claimable_tiles) * DECISIVE_TILE_FRAC
-		and force_ratio >= DECISIVE_FORCE_RATIO
-	):
-		leader = 1
-	elif (
-		float(hostile) >= float(claimable_tiles) * DECISIVE_TILE_FRAC
-		and inv_ratio >= DECISIVE_FORCE_RATIO
-	):
-		leader = 2
-	if leader != 0 and leader == _decisive_leader:
-		_decisive_hold_sec += step_dt
-	else:
-		_decisive_leader = leader
-		_decisive_hold_sec = step_dt if leader != 0 else 0.0
-	if _decisive_hold_sec >= WorldConquestConfigLib.DECISIVE_HOLD_SEC:
-		finished = true
-		player_won = _decisive_leader == 1
-		end_reason = "decisive"
 
 
 func _check_decisive_lead(friendly: int, hostile: int) -> void:
