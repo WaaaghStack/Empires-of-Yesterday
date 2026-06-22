@@ -3,6 +3,14 @@ extends Node
 const REPORT_PATH := "res://qa_report.txt"
 const PERF_BOOTSTRAP_MAX_FRAMES := 900
 const PERF_LIVE_FRAMES := 180
+const PERF_REQUIRED_ACTION_TAGS: Array[String] = [
+	"action=sim",
+	"action=overlay",
+	"action=resources",
+	"action=gpu_upload",
+	"action=roads",
+	"action=markers",
+]
 
 const SCRIPT_PATHS: Array[String] = [
 	"res://BattleCellGrid.gd",
@@ -238,6 +246,12 @@ func _validate_world_conquest_fps_bench() -> void:
 
 func _validate_perf_helpers() -> void:
 	_log("-- Perf HUD / screen _process / action-tag helpers --")
+	var scratch := OS.get_environment("GROK_GOAL_SCRATCH")
+	if not scratch.is_empty():
+		for stale_name in ["perf_action_lines.txt", "screen_process_p99.txt"]:
+			var stale_path := scratch.path_join(stale_name)
+			if FileAccess.file_exists(stale_path):
+				DirAccess.remove_absolute(stale_path)
 	const WCS := preload("res://WorldConquestScreen.gd")
 	var gpu: Dictionary = WCS.perf_gather_gpu_counters()
 	if not gpu.has("draw_calls"):
@@ -262,6 +276,11 @@ func _validate_perf_helpers() -> void:
 		screen.queue_free()
 		return
 	_log("OK  WorldConquestScreen bootstrap ready frames=%d" % bootstrap_frames)
+	if screen.has_method("qa_perf_clear_recent_action_lines"):
+		screen.qa_perf_clear_recent_action_lines()
+	screen.set("_outpost_road_dirty", true)
+	screen.set("_outpost_marker_dirty", true)
+	await get_tree().process_frame
 	for _fi in range(PERF_LIVE_FRAMES):
 		await get_tree().process_frame
 	if not screen.has_method("gather_perf_and_action_context"):
@@ -294,24 +313,26 @@ func _validate_perf_helpers() -> void:
 	)
 	for hud_line in hud_text.split("\n", false):
 		_log("HUD %s" % hud_line.strip_edges())
-	RunLog.flush_now()
-	var log_path: String = RunLog.get_session_path()
-	var log_text: String = ""
-	if FileAccess.file_exists(log_path):
-		log_text = FileAccess.get_file_as_string(log_path)
-	var action_count: int = 0
-	for line in log_text.split("\n", false):
-		if line.contains("action="):
-			_log(line.strip_edges())
-			action_count += 1
-		elif line.contains("FrameBudget SPIKE"):
-			_log(line.strip_edges())
-	if action_count == 0:
-		_fail("no action= lines in RunLog after live bootstrap+play frames")
+	if not screen.has_method("get_recent_perf_action_lines"):
+		_fail("WorldConquestScreen missing get_recent_perf_action_lines")
 		screen.queue_free()
 		return
+	var action_lines: Array = screen.get_recent_perf_action_lines()
+	var action_count: int = action_lines.size()
+	for line in action_lines:
+		_log(str(line))
+	if action_count == 0:
+		_fail("no action= lines from screen ring after live bootstrap+play frames")
+		screen.queue_free()
+		return
+	var joined: String = "\n".join(action_lines)
+	for req_tag in PERF_REQUIRED_ACTION_TAGS:
+		if not joined.contains(req_tag):
+			_fail("missing required perf action tag in ring: %s" % req_tag)
+			screen.queue_free()
+			return
 	_log(
-		"OK  perf helpers bootstrap_frames=%d live_frames=%d action_lines=%d cpu_p99=%.2f"
+		"OK  perf helpers bootstrap_frames=%d live_frames=%d action_lines=%d cpu_p99=%.2f tags_ok=yes"
 		% [bootstrap_frames, PERF_LIVE_FRAMES, action_count, float(cpu_summary.get("p99_ms", 0.0))]
 	)
 	screen.queue_free()

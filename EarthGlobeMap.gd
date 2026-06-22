@@ -87,6 +87,7 @@ var _dragging: bool = false
 var _last_mouse: Vector2 = Vector2.ZERO
 var _owner_gpu_upload_pending: bool = false
 var _last_owner_gpu_upload_usec: int = 0
+var _owner_gpu_upload_committed: bool = false
 
 
 func setup(map_data) -> void:
@@ -526,6 +527,12 @@ func flush_pending_owner_gpu_upload() -> bool:
 	return true
 
 
+func consume_owner_gpu_upload_committed() -> bool:
+	var committed := _owner_gpu_upload_committed
+	_owner_gpu_upload_committed = false
+	return committed
+
+
 func _commit_owner_gpu_textures() -> void:
 	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null or _owner_tex_gpu == null:
 		return
@@ -538,6 +545,7 @@ func _commit_owner_gpu_textures() -> void:
 		_border_tex_gpu.update(_border_img_gpu)
 	_owner_gpu_upload_pending = false
 	_last_owner_gpu_upload_usec = Time.get_ticks_usec()
+	_owner_gpu_upload_committed = true
 
 
 func apply_ownership_overlay(owners: PackedByteArray) -> void:

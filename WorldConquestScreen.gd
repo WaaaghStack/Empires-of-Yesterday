@@ -103,6 +103,8 @@ var _show_perf_hud: bool = false
 var _last_frame_sim_steps: int = 0
 var _last_overlay_delta_count: int = 0
 var _perf_action_cooldowns: Dictionary = {}
+var _recent_perf_action_lines: Array[String] = []
+const PERF_RECENT_ACTION_MAX := 64
 
 
 func _ready() -> void:
@@ -344,8 +346,9 @@ func _process(delta: float) -> void:
 		var gpu_t: int = 0
 		if _frame_profiler != null:
 			gpu_t = _frame_profiler.begin_phase("gpu_upload")
-		if globe_map.flush_pending_owner_gpu_upload():
-			_maybe_log_perf_action("gpu_upload", {"flushed": 1}, 1.0)
+		globe_map.flush_pending_owner_gpu_upload()
+		if globe_map.consume_owner_gpu_upload_committed():
+			_maybe_log_perf_action("gpu_upload", {"committed": 1}, 1.0)
 		if _frame_profiler != null:
 			_frame_profiler.end_phase("gpu_upload", gpu_t)
 	_end_process_profiler_frame()
@@ -821,8 +824,11 @@ func _tick_resources(dt: float) -> void:
 		_resource_links_dirty = true
 	_last_resource_pulses = info.get("pulses", [])
 	var pulse_n: int = _last_resource_pulses.size()
-	if pulse_n > 0 or bool(info.get("links_dirty", false)):
-		_maybe_log_perf_action("resources", {"pulses": pulse_n, "links_dirty": int(info.get("links_dirty", false))}, 2.0)
+	_maybe_log_perf_action(
+		"resources",
+		{"pulses": pulse_n, "links_dirty": int(info.get("links_dirty", false))},
+		2.0,
+	)
 
 
 func _update_resource_visuals(_delta: float) -> void:
@@ -1984,8 +1990,21 @@ func _decrement_perf_action_cooldowns(delta: float) -> void:
 		_perf_action_cooldowns[key] = maxf(0.0, float(_perf_action_cooldowns[key]) - delta)
 
 
+func get_recent_perf_action_lines() -> Array[String]:
+	return _recent_perf_action_lines.duplicate()
+
+
 func _maybe_log_perf_action(action: String, fields: Dictionary, cooldown_sec: float) -> void:
 	if float(_perf_action_cooldowns.get(action, 0.0)) > 0.0:
 		return
 	_perf_action_cooldowns[action] = cooldown_sec
-	RunLog.info(perf_format_log_line(action, gather_perf_and_action_context(), fields))
+	var line: String = perf_format_log_line(action, gather_perf_and_action_context(), fields)
+	_recent_perf_action_lines.append(line)
+	if _recent_perf_action_lines.size() > PERF_RECENT_ACTION_MAX:
+		_recent_perf_action_lines.pop_front()
+	RunLog.info(line)
+
+
+func qa_perf_clear_recent_action_lines() -> void:
+	_recent_perf_action_lines.clear()
+	_perf_action_cooldowns.clear()
