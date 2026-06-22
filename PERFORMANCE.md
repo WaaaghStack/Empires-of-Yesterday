@@ -1,216 +1,119 @@
-# Performance tuning — Empires of Yesterday
+# Performance tuning — Empires of Yesterday (World Conquest)
 
-## Territory conquest resolve
-
-Canonical design: [DESIGN.md](DESIGN.md) §4.1.
-
-| Phase | Focus | Key files |
-|-------|--------|-----------|
-| 0 | Phase timers (`inject`, `gradient`, `cancel`, `sync`, `conquest`, `record_frame`); `BATTLE_PERF_LOG=1` | `BattlePerfProfiler.gd`, `BattleTerritorySim.gd`, `qa_runner.gd` |
-| 1 | `record_stride=4`, raw owners on tape, soften on playback, incremental tile counts, pressure keyframes | `BattlePacing.gd`, `BattleTerritorySim.gd`, `BattleTerritoryTape.gd`, `BattleViewer.gd` |
-| 2 | Ping-pong gradient, fixed 4-neighbor scratch, `claimable_mask`, incremental conquest counts, adaptive 2nd spread | `BattleTileControl.gd` |
-| 3 | Frontier `active_indices` sim (golden vs full grid in QA) | `BattleTileControl.gd`, `qa_runner.gd` |
-| 4 | Delta tape frames, `BattleReplayPack` v2, log pressure codec v2 (v1 load compat) | `BattleReplayPack.gd`, `BattleTilePressureCodec.gd` |
-| 5 | `end_reason`, dominance/stall early end, queue vs viewer round caps | `BattleTerritorySim.gd`, `BattlePacing.gd` |
-| 6 | `FLUID_ALPHA_PRESSURE_MAX=100_000`, strided replay lerp, skip re-resolve when SQL tape loaded | `BattleTileFluidField.gd`, `BattleViewer.gd` |
-| 7 | `resolve_ms < 3000` on 96×72 fixture; golden tape regression | `qa_runner.gd`, `QA_LIFECYCLE.md` |
-| 9 | **Option D:** pre-bake display frames after sim; playback = texture swap; wall-clock timer | `BattleTerritoryReplayBake.gd`, `BattleTerritoryTape.gd`, `BattleViewer.gd` |
-| 10 | **GPU live territory** — compute spread on GPU; display shader samples sim textures; CPU tape/resolve unchanged | `BattleTerritoryGpuField.gd`, `shaders/territory/*.glsl`, `BattleTerritorySim.gd`, `BattleViewer.gd`, `WorldRTSScreen.gd` |
-
-**Knobs:** `BattlePacing.RESOLVE_TAPE_RECORD_STRIDE` (default 4), `RESOLVE_MAX_ROUNDS_CAP` (960 queue), `VIEWER_MAX_ROUNDS_CAP` (3200), `BATTLE_PERF_LOG=1`, `BATTLE_REPLAY_LOG=1`, `TERRITORY_MAX_SEGMENT_SECONDS` (1.25), `OVERLAY_MAX_UPDATES_PER_SEC` (12 in viewer), `BATTLE_TERRITORY_BACKEND` (`gpu` default for live, `cpu` for legacy live), `BATTLE_GPU_COMPARE=1` (optional CPU vs GPU parity in qa_runner).
-
-**GPU live targets (Phase 10):** 96×72 Engage sim+display &lt; **2 ms** combined on mid hardware; 192×144 RTS World sim dispatch &lt; **4 ms** per frame budget. **Non-goals:** GPU tape encode, GPU headless resolve, multiplayer sync.
-
-### RTS World live play (CPU path)
-
-| Change | File | Effect |
-|--------|------|--------|
-| Terrain baked to one `ImageTexture` | `WorldRTSTerrainBake.gd`, `WorldRTSScreen.gd` | Removes thousands of `ColorRect` nodes |
-| Active-set rebuild every 3 rounds (or on frontier change) | `BattleTileControl.gd` | Avoids full-grid scan each sim round |
-| Cancel pressure on active tiles only | `BattleTileControl.gd` | Cheaper overlap pass as front grows |
-| Overlay: cached land mask + byte buffers | `BattleTileOwnershipOverlay.gd` | Faster `apply_live_state` |
-| Adaptive sim rounds when frontier &gt; 4500 tiles | `WorldRTSConfig.gd`, `WorldRTSScreen.gd` | Late-battle frame time cap |
-| Lower default sim/overlay rates for world | `WorldRTSConfig.gd` | 10 r/s, 8 max/frame, 5 Hz overlay |
-
-Env: `BATTLE_TERRITORY_BACKEND=gpu` to try GPU sim on world (experimental).
-
-**Replay vs resolve:** `resolve_ms` is headless sim + tape build; `total_duration()` is spectator watch time at 1× (normalized). Wall-clock lag was caused by full fluid rebuild every frame — replay clock now advances every tick, overlay throttled.
+Runtime budgets and knobs for the 360×180 Earth territory sim. Canonical mechanics: [DESIGN.md](DESIGN.md).
 
 ---
 
-This document summarizes runtime optimizations for tactical maps (**campaign sectors: 8–18 rooms each; legacy planet: 12–16 rooms in one hull**) with 12+ units, and the knobs you can adjust.
+## Frame budgets (60 FPS target)
 
-**Campaign mode** loads a fresh smaller map per navigation node (lower peak room/enemy count per session than one full planet run, but multiple missions per run).
+| Subsystem | Target |
+|-----------|--------|
+| Territory sim (all steps in one frame) | < 6 ms |
+| Ownership overlay CPU + texture upload | < 2 ms |
+| Globe GPU render | < 8 ms |
+| HUD / soldiers / resources | < 2 ms |
+| **Total** | < 16 ms sustained, p99 < 16 ms |
 
-## Root causes addressed (pass 1)
+Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 
-1. **Hive meta error flood** — `get_meta("hive", null)` still errors in Godot 4.6 when the key is missing (null default). `_hive_in_room()` ran every frame per soldier and spammed 121+ console errors, tanking FPS and risking instability.
-2. **O(n²) scene scans** — Soldiers and enemies called `get_tree().get_nodes_in_group()` every frame for rooms, doors, enemies, soldiers, and hives.
-3. **Fog / LOS every frame** — `_update_fog_of_war()` iterated all soldiers × all frontier rooms × all enemies for line-of-sight checks at 60 Hz.
-4. **Uncached pathfinding** — Corridor path rebuilds were uncapped; door toggles did not invalidate the path cache.
-5. **HUD / minimap / comms at 60 Hz** — Roster, minimap redraw, and comms RichText rebuild ran every frame.
+## Sim budgets
 
-## Root causes addressed (pass 3 — multi-squad scale)
+| Path | Target |
+|------|--------|
+| World Conquest live step (Rust backend) | < 8 ms/step (`BATTLE_WORLD_CONQUEST_BENCH=1` gate in `qa_runner.gd`) |
+| World Conquest 60 Hz frame (sim + overlay FFI) | p99 < 16 ms, min FPS ≥ 58 (`BATTLE_FPS_BENCH=1`) |
+| CPU resolve, 96×72 fixture | `resolve_ms < 3000` (legacy QA gate) |
+| Overlay refresh (pressure mode) | `OVERLAY_UPDATES_PER_SEC` = 3 Hz |
+| Soldier dot refresh | `SOLDIER_VISUAL_UPDATES_PER_SEC` = 4 Hz |
+| Sim stepping | `SIM_DT` = 1/14 s, ≤ `SIM_MAX_STEPS_PER_FRAME` (4) per frame |
 
-1. **Soldier×room fog nesting** — Fog pass refactored to room-first iteration via `MissionEntityIndex.fog_reveal_rooms()` with one living-soldier list per tick and a single `rebuild_frontier()` after batched reveals.
-2. **Dead unit process leak** — KIA soldiers set `PROCESS_MODE_DISABLED`, unregister from `MissionEntityIndex` immediately, and are removed from `active_units` so `_process` never runs again.
-3. **Per-soldier combat rescans** — `CombatCoordinator` assigns targets at 10 Hz using room-scoped enemy/hive lists from the entity index; soldiers consume assigned targets instead of independent 0.15 s full scans.
-4. **Uncapped pathfind under load** — `DynamicPathGraph` max A* finds per frame scales with living soldier count (4 → 3 → 2).
+## Territory sim optimizations (in place)
 
-## Optimizations applied (pass 3)
+| Optimization | File | Effect |
+|--------------|------|--------|
+| **Rust GDExtension backend** (default when loaded) | `BattleTerritoryRustBackend.gd`, `rust/empire_territory/` | Full-grid propagation in native code; state syncs back per step |
+| Frontier **active-set** sim (rebuild every 3 rounds or on frontier change) | `BattleTileControl.gd` | Avoids full 64 800-tile scan per round |
+| Ping-pong pressure buffers, fixed 4-neighbor scratch | `BattleTileControl.gd` | No allocations in the flow inner loop |
+| Cancel pass on active tiles only | `BattleTileControl.gd` | Cheaper overlap pass as fronts grow |
+| Incremental ownership / conquest counts | `BattleTileControl.gd`, `BattleTerritorySim.gd` | No full-grid recount per round |
+| Bridge → backend claimable sync throttled | `WorldConquestConfig.BRIDGE_BACKEND_SYNC_INTERVAL_SEC` (0.2 s) | Avoids per-cell full-grid sync while a bridge extends |
+| **Incremental owner sync (Rust)** | `sync_owners_delta`, `BattleTerritoryRustBackend._apply_owners_delta_to_tile_control` | Only changed owner cells cross FFI each sim batch |
+| **Option A pressure pull** | `get_pressure_*` at overlay tick only | ~518 KB pressure FFI avoided per sim step |
+| **Incremental owner overlay (Rust live)** | `consume_owner_overlay_delta` + `apply_ownership_overlay_delta` | One batched delta upload per frame; `set_data` not per-pixel |
+| **Precomputed border mask** | `EarthGlobeMap._border_bytes_cache`, `ownership_display.gdshader` | 2 texture fetches per fragment instead of 9 |
+| **Spawner FFI cache** | `BattleTerritoryRustBackend._maybe_update_spawners` | Skips `update_spawners` when placed spawners unchanged |
+| **GPU fluid shader** | `shaders/globe/fluid_display.gdshader`, `EarthGlobeMap.apply_fluid_from_pressures_gpu` | No CPU `bake_fluid_rgba` on live path; camera-facing tex upload |
+| **Incremental active set** | `TerritoryKernel.patch_active_indices`, `BattleTileControl._patch_active_indices` | Patches frontier tiles instead of full 64k scan when dirty set is small |
+| **Claimable delta sync** | `update_claimable_delta`, `BattleTileControl.take_claimable_dirty_indices` | Bridge extend sends changed cells only |
+| **Batched soldier aura** | `AgentLayer.apply_batched_aura` | One capped pressure add per tile per team per step |
+| **Stamped soldier BFS** | `AgentLayer.plan_march_route` | Generation-stamped visit marks — no full-grid `fill` per replan |
+| **Budgeted soldier replans** | `AgentLayer.run_budgeted_replans` | Cap BFS replans per tick; urgent stuck slots reserved |
+| **Frontier-stale replans** | `TerritoryKernel.nav_dirty_stamp` | Replan only when ownership/claimable/nav masks change near agent |
+| **Portal route graph** | `RoutePlanner` + `PortalGraph` | Rebuild on outpost/bridge change; scoped BFS per click |
+| **Async route worker** | `RoutePlanner` background thread | Placement/hover pathfind off main thread |
+| **Rust gradient in-place** | `sim.rs gradient_flow_pass_into` | No per-pass full-grid buffer clones |
+| **Agent snapshot buffer reuse** | `TerritorySim.agent_snap_*` in `lib.rs` | Reuses Vec buffers across 4 Hz visual ticks |
+| **SubViewport when visible** | `WorldConquestScreen` `UPDATE_WHEN_VISIBLE` | Skips 3D render when play area hidden |
+| **Surface position LUT** | `EarthGlobeMap._surface_lut` | Soldiers/markers/roads skip per-frame trig |
+| **Road/link segment pools** | `EarthGlobeMap._road_seg_pool`, `_link_seg_pool` | Reuses `MeshInstance3D` nodes |
+| **Dirty-flag maintenance** | `WorldConquestScreen._has_active_construction`, `_bridges_repaired` | Skips outpost/bridge loops when idle |
+| **Frame phase profiler** | `FrameBudgetProfiler.gd` | Always samples `_process` ms for F3 HUD; spike logging when `BATTLE_FRAME_BUDGET_LOG=1` |
+| Globe meshes coarser than sim grid | `GLOBE_MESH_W/H` 144×72, `FLUID_MESH_W/H` 180×90 | GPU budget independent of sim resolution |
+| GPU compute backend (optional) | `BattleTerritoryGpuField.gd`, `shaders/territory/*.glsl` | Flow on GPU; throttled owner readback; skips `pack_display` when owners-only |
 
-| Area | Change | Expected impact |
-|------|--------|-----------------|
-| Fog pass | Room-first single sweep via `MissionEntityIndex`; one soldier list per tick | Less redundant fog bookkeeping at 12+ units |
-| Dead units | `PROCESS_MODE_DISABLED` + immediate index unregister | Zero `_process` cost for KIA operators |
-| Combat coordinator | 10 Hz shared target assignment, room-scoped caches | ~6× less combat target scanning vs per-unit 0.15 s |
-| Pathfind cap | Dynamic budget: ≥8 alive → 2/frame, ≥4 → 3/frame, else 4/frame | Smoother frames during large squad movement |
+## Placement / routing responsiveness
 
-## Root causes addressed (pass 4 — idle work at scale)
+- `OUTPOST_PATHFIND_MAX_EXPAND` (12 000) caps route floods; hover preview uses greedy-only (`OUTPOST_HOVER_ALLOW_ASTAR=false`), replans at most every `OUTPOST_HOVER_REPLAN_SEC` (0.32 s), and draws ≤ `OUTPOST_PREVIEW_MAX_SEGMENTS` (48) 3D segments.
+- Land-component IDs are precomputed once per map (`prepare_land_components`) so placement prechecks never flood-fill.
+- Resource haul visuals capped at `RESOURCE_MAX_VISUAL_PULSES` (36); economy still credits all yield.
 
-1. **Door `_process` on every bulkhead** — ~58 doors ran each frame and each idle-close check scanned all soldiers via `get_nodes_in_group`. Doors now sleep when closed; proximity uses `TacticalMap.get_living_soldiers_cached()`.
-2. **Combat LOS on every enemy** — S&D nearest-target picked from the full living enemy list (~12 soldiers × N enemies × LOS at 10 Hz). Now room-first + 520 px radius candidates from `MissionEntityIndex`.
-3. **Fog enemy visibility on all enemies** — Every fog tick iterated `active_enemies`. Now `get_enemies_for_fog_check()` (revealed rooms + near soldiers + already-spotted).
-4. **Room label redraw storm** — `_refresh_status()` called `queue_redraw()` even when status text unchanged. Redraw only when text changes.
-5. **Per-soldier squad mark tick** — `MissionStateLib.tick_squad_mark()` ran 12×/frame; moved to one call on `TacticalMap`.
-6. **Squad separation O(n²)** — Near-camera soldiers scanned all soldiers in the tree; now `get_squad_mates()` at 20 Hz.
-7. **Dormant hive `_process`** — Each dormant hive polled activation every frame; batched on `TacticalMap` at 0.2 s with hives sleeping until active or focus-marked.
-8. **LOS room lookup** — `_room_containing()` repeated for every LOS call; grid-key cache per fog/combat frame via `LineOfSight.begin_frame_cache()`.
+## Environment variables
 
-## Optimizations applied (pass 4)
+| Env | Effect |
+|-----|--------|
+| `BATTLE_TERRITORY_BACKEND` | `rust` (default if loaded) / `gpu` / `cpu` |
+| `BATTLE_PERF_LOG=1` | Per-phase sim timers via `BattlePerfProfiler` |
+| `BATTLE_FRAME_BUDGET_LOG=1` | >16 ms spike logs via `FrameBudgetProfiler` (sampling always on for F3 CPU line) |
+| `BATTLE_WORLD_CONQUEST_BENCH=1` | QA bench gate (60 sim-sec, fails > 8 ms/step) |
+| `BATTLE_FPS_BENCH=1` | QA 60 Hz frame gate (120 sim-sec, p99 ≤ 16 ms, min FPS ≥ 58) |
+| `BATTLE_RUST_COMPARE=0` | Skip the default Rust-vs-CPU parity QA check |
 
-| Area | Change | Expected impact |
-|------|--------|-----------------|
-| Doors | `set_process(false)` when closed; cached soldier list for proximity | ~58× fewer door ticks + no group scans |
-| Combat coordinator | Room + radius enemy candidates before LOS | ~10× fewer LOS calls in S&D |
-| Fog enemies | Subset via `get_enemies_for_fog_check()` | Scales with contact, not map enemy count |
-| Room labels | `queue_redraw()` only on status text change | Less canvas text work |
-| Squad mark | Single `tick_squad_mark` on map | 12× → 1× per frame |
-| Separation | Squad mates cache + 20 Hz throttle | O(squad) not O(all soldiers) |
-| Dormant hives | Map-batched activation; hive sleeps | ~N_hives fewer idle `_process` |
-| LineOfSight | Per-frame room-at-point cache | Faster repeated LOS in one tick |
+## Live debug HUD (F3)
 
-## Root causes addressed (pass 2 — 1 FPS fix)
+During World Conquest play, press **F3** to toggle a perf overlay (top-right) showing:
 
-1. **Fog frontier rebuild in inner loop** — `entity_index.rebuild_frontier()` ran inside every soldier×room fog iteration (~12×35×20/sec), an O(n³) catastrophe. Now runs **once** after a fog pass when any room was newly revealed.
-2. **Per-fog-pass room intel refresh** — `room.refresh_intel()` on all rooms every fog tick forced `_refresh_status()` + `queue_redraw()` across the whole map. Removed; rooms update on state-change signals only.
-3. **12× global enemy count scans** — Each soldier in S&D mode called `living_enemy_count()` (full tree scan) every frame via `_update_snd_label()`. Now cached on `MissionEntityIndex` and labels throttled to 10 Hz.
-4. **Hive activation scan** — Each dormant hive called `get_nodes_in_group("rooms")` every frame. Now throttled to 0.2 s and uses cached `TacticalMap.rooms`.
-5. **Swarm adapt log spam** — Deploy triggered `on_disturbance()` per soldier (12 comms lines + RichText rebuilds). Log debounced to once per 12 s.
-6. **Ghost path preview on planet** — Paused multi-select issued up to 12 A* path previews per mouse move. Planet maps: ghost paths only with **one** selected unit.
-7. **Off-screen unit/process load** — All soldiers, enemies, and hives ran full `_process`/`_physics_process` at 60 Hz. Distant units sleep; visible enemies stay active.
+- **FPS** (engine counter)
+- **CPU** — `FrameBudgetProfiler` p50 / p95 / p99 ms for `WorldConquestScreen._process` (not SubViewport GPU render)
+- **GPU** — draw calls, objects in frame, video/texture memory (`Performance` monitors)
+- **Action context** — last sim steps, ownership overlay delta size, pending owner GPU upload flag
 
-## Optimizations applied
+Off by default. HUD text is assembled by `WorldConquestScreen.perf_build_hud_text()` from `gather_perf_and_action_context()`.
 
-| Area | Change | Expected impact |
-|------|--------|-----------------|
-| Fog frontier | Single `rebuild_frontier()` after pass, not per soldier×room | **Primary 1 FPS fix** — ~100× less fog bookkeeping |
-| Fog timing | 0.5 s timer + dirty flag (room enter, door toggle) | ~2 Hz fog instead of ~20 Hz |
-| Fog enemy LOS | Skip enemies farther than 480 px from any soldier | Fewer LOS checks on large maps |
-| Room intel | No per-fog `refresh_intel()` sweep | Eliminates mass `queue_redraw()` |
-| Entity index | Cached `living_enemy_count` on register/unregister | O(1) S&D label counts |
-| Hive lookup | `Room.get_attached_hive()` + `MissionEntityIndex.get_hive_in_room()` with `has_meta` guards | Eliminates error flood |
-| Hive activation | 0.2 s tick + cached room list | ~5× less dormant hive work |
-| Soldier UI | S&D/explore labels + path line at 10 Hz | ~6× less per-unit UI work |
-| Soldier separation | Skipped when unit far from camera | Less O(n²) separation |
-| Comms log | Append-only BBCode, cap 40 lines, 10 Hz batch | No full RichText rebuild per line |
-| Minimap | 0.5 s refresh or on fog reveal | ~2 Hz canvas work |
-| HUD roster | Refresh every 0.1 s (10 Hz) | ~6× less UI churn vs 60 Hz |
-| Ghost preview | Planet: single selected unit only | Avoids 12× A* on mouse move |
-| Process tiers | Off-screen units/hives `set_process(false)` every 0.2 s | Lower AI/movement cost off-camera |
-| Orbital bar | Evolution bonus recalc every 0.5 s | Less per-frame board polling |
-| SwarmDirector | Adapt log cooldown 12 s; `tick()` 1 Hz | No deploy comms flood |
-| Planet size | Default generation **12–16 rooms**; 1–2 nest hives | Fewer rooms/enemies/fog cells |
-| Map enemy cap | **22** living enemies map-wide (`TacticalMap.MAP_ENEMY_CAP`) | Prevents hive swarm FPS collapse |
-| LineOfSight | Cache room-at-endpoints in segment tests | Faster LOS on corridor checks |
-| Path graph | Max 3 A* rebuilds per frame; invalidate on door open/close | Smoother movement spikes |
-| Fog pass (pass 3) | Room-first sweep in `MissionEntityIndex.fog_reveal_rooms()` | Single soldier list + batched reveals |
-| Dead units (pass 3) | `PROCESS_MODE_DISABLED` on KIA; index unregister | No zombie `_process` on casualties |
-| Combat coordinator (pass 3) | 10 Hz `CombatCoordinator.gd` target batch | Shared room enemy/hive lists |
-| Pathfind budget (pass 3) | 4/3/2 finds per frame by alive count | Scales with squad size |
+## Action-tagged RunLog lines
 
-## Tuning knobs
+Hot paths emit `RunLog.info` / `warn` lines with an `action=` prefix plus fps/cpu/gpu counters, for example:
 
-### `RunState.get_planet_config()`
+| Tag | When |
+|-----|------|
+| `action=sim` | Sim advanced (`steps=N`) — throttled ~2 s |
+| `action=overlay:delta` | Incremental owner overlay patch (`cells=N`) |
+| `action=resources` | Resource tick with pulses or link dirty |
+| `action=gpu_upload` | Pending owner texture flush committed |
+| `action=roads` | Road mesh sync |
+| `action=markers` | Structure marker refresh |
+| `action=fps_drop` | Sustained FPS &lt; 42 (existing drop watcher) |
 
-```gdscript
-"planet_room_min": 12,
-"planet_room_max": 16,
-```
+Written to `logs/latest_run.txt` with the usual 0.25 s batch flush.
 
-Pass overrides into `ProceduralMapGenerator.generate_planet(seed, config)`.
-
-### `TacticalMap.gd` constants
-
-- `FOG_UPDATE_INTERVAL_SEC` — seconds between fog passes (default `0.5`); also runs when `_fog_dirty`
-- `FOG_LOS_RANGE` — skip enemy LOS if farther than this from all soldiers (default `480`)
-- `HUD_REFRESH_INTERVAL` — seconds between roster refresh (default `0.1`)
-- `MINIMAP_REFRESH_INTERVAL` — seconds between minimap redraw (default `0.5`); also on fog reveal
-- `COMMS_REFRESH_INTERVAL` — seconds between comms display flush (default `0.1`)
-- `MAX_COMMS_LINES` — comms buffer cap (default `40`)
-- `UNIT_TIER_INTERVAL` — seconds between off-screen process tier updates (default `0.2`)
-- `UNIT_SLEEP_RADIUS` — world px beyond camera center to sleep units (default `960`)
-- `ORBITAL_BAR_INTERVAL` — seconds between evolution orbital bonus recalc (default `0.5`)
-
-### `SoldierUnit.gd`
-
-- `UI_REFRESH_INTERVAL` — seconds between S&D/explore labels and path line (default `0.25`)
-- Combat targets assigned by `CombatCoordinator` at 10 Hz (no per-unit combat rescan interval)
-
-### `CombatCoordinator.gd`
-
-- `TICK_INTERVAL` — seconds between combat target batch passes (default `0.1`)
-
-### `DynamicPathGraph.gd`
-
-- `set_max_finds_per_frame(max)` — runtime cap on uncached A* runs per frame
-- Default max finds: **4** when fewer than 4 soldiers alive; **3** at 4–7; **2** at 8+
-- `TacticalMap._update_pathfind_budget()` sets this each frame from living soldier count
-
-### `Hive.gd`
-
-- Dormant activation batched on `TacticalMap` every **0.2 s** via `tick_dormant_activation()`; hive `_process` only when **ACTIVE** or focus-mark timer running
-
-### `Door.gd`
-
-- `_process` only while animating or open (idle auto-close); `bind_tactical_map()` for cached soldier proximity
-
-### `SoldierUnit.gd` (pass 4)
-
-- `SEPARATION_INTERVAL` — seconds between separation pushes (default `0.05`)
-
-### `EnemyUnit.gd`
-
-- Distant AI interval: enemies farther than **640 px** from the nearest soldier use a 3-frame tick instead of 2.
-
-### `SwarmDirector.gd`
-
-- `_adapt_log_cooldown` — seconds between adapt pressure comms (default `12`)
-
-## Profiling
-
-While a mission runs, `RunLog.perf()` can emit a line like (verbose mode only, max every 5 s):
-
-```text
-PERF fog=1.2ms rooms=28 enemies=42 soldiers=12
-```
-
-Use `logs/latest_run.txt` to confirm fog ms stays low after changes. Call `RunLog.set_verbose(true)` to enable PERF/DEBUG and engine print capture.
+`FrameBudgetProfiler` phases (when `BATTLE_FRAME_BUDGET_LOG=1`): `sim`, `overlay`, `resources`, `roads`, `markers`, `gpu_upload`, plus existing `spawner_sync`, `outpost`, `bridge`, `soldiers`.
 
 ## RunLog I/O
 
-Session logs batch-flush to disk every **0.25 s** (immediate flush on window close). Engine `print()` capture is off during gameplay unless verbose. Max **10 000** lines per session.
+Session logs batch-flush every **0.25 s** (immediate on window close), max **10 000** lines per session. Engine `print()` capture only in verbose mode (`RunLog.set_verbose(true)`).
 
-## QA
+## Known costs to watch
 
-```bash
-godot --headless --path . res://qa_runner.tscn
-```
-
-Planet map smoke test expects **12–16** rooms and **1–2** regular hive rooms.
-
-## Further ideas (not implemented)
-
-- Spatial hash for LOS only among co-located / adjacent rooms
-- Shared enemy AI coordinator tick on TacticalMap (single nearest-soldier query per enemy batch)
-- Static minimap texture baked on layout load
+- `build_replay_tape(-1)` on the world map runs a full battle and can take many minutes — always pass a round cap in tests (QA bake compare uses 64).
+- `operational_sources` now includes bridge landings; if bridge counts grow large, watch multi-source BFS cost in `nearest_path_to_target`.
+- Owner readback from GPU backend is throttled via `readback_owners_if_due` (every 4 rounds on large maps); HUD counters mirror sim-side counts.
+- Soldier march uses greedy steps toward a cached goal. BFS replans are **budgeted** (`SOLDIER_REPLANS_PER_TICK`), **frontier-triggered** (`nav_dirty_stamp`), with a long fallback interval (`SOLDIER_REPLAN_FALLBACK_ROUNDS`).

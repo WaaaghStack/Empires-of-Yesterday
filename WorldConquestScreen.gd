@@ -4,12 +4,15 @@ const CFG := preload("res://WorldConquestConfig.gd")
 const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
 const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
-const BattleTileOwnershipOverlayLib := preload("res://BattleTileOwnershipOverlay.gd")
-const BattleTileFluidFieldLib := preload("res://BattleTileFluidField.gd")
 const GameThemeLib := preload("res://GameTheme.gd")
 const EarthGlobeMapLib := preload("res://EarthGlobeMap.gd")
 const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const ResourceLib := preload("res://WorldConquestResources.gd")
+const RoutePlannerLib := preload("res://RoutePlannerRustBackend.gd")
+const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
+
+## QA-only: skip async bootstrap so qa_runner can inject map/sim and drive _process.
+static var qa_perf_probe_skip_bootstrap: bool = false
 
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
@@ -28,14 +31,21 @@ const ResourceLib := preload("res://WorldConquestResources.gd")
 @onready var pause_button: Button = $HUD/HBox/PauseButton
 @onready var speed_button: Button = $HUD/HBox/SpeedButton
 @onready var spawner_button: Button = $HUD/HBox/SpawnerButton
+@onready var barracks_button: Button = $HUD/HBox/BarracksButton
+@onready var corridor_link_button: Button = $HUD/HBox/CorridorLinkButton
+@onready var inspect_button: Button = $HUD/HBox/InspectButton
+@onready var tile_probe_label: Label = $HUD/TileProbeLabel
 @onready var back_button: Button = $TopBar/BackButton
 @onready var build_hint_label: Label = $HUD/BuildHintLabel
+@onready var perf_hud_label: Label = $PerfHudLabel
 @onready var end_overlay: PanelContainer = $EndOverlay
 @onready var end_label: Label = $EndOverlay/Center/EndLabel
+@onready var loading_overlay: PanelContainer = $LoadingOverlay
+@onready var loading_status_label: Label = $LoadingOverlay/Center/LoadPanel/VBox/StatusLabel
+@onready var loading_progress: ProgressBar = $LoadingOverlay/Center/LoadPanel/VBox/ProgressBar
 
 var battle_data = null
 var territory_sim: BattleTerritorySimLib
-var _tile_overlay: BattleTileOwnershipOverlayLib
 var _claimable_tiles: int = 0
 var _friendly_tiles: int = 0
 var _hostile_tiles: int = 0
@@ -45,7 +55,7 @@ var _paused: bool = false
 var _speed_mult: float = 1.0
 var _overlay_clock: float = 0.0
 var _battle_finished: bool = false
-var _build_spawner_active: bool = false
+var _build_mode: String = ""
 var _last_overlay_step: int = -1
 var _next_structure_id: int = 1
 var _build_hint_clock: float = 0.0
@@ -56,34 +66,99 @@ var _orbit_drag: bool = false
 var _outpost_road_dirty: bool = false
 var _outpost_marker_dirty: bool = false
 var _outpost_marker_clock: float = 0.0
+var _spawners_pending_sync: bool = false
 var _hover_check_grid: Vector2i = Vector2i(-99999, -99999)
 var _hover_reject_cache: String = ""
-var _hover_route_packed: PackedInt32Array = PackedInt32Array()
-var _hover_route_source: Vector2i = Vector2i(-1, -1)
 var _hover_hint_grid: Vector2i = Vector2i(-99999, -99999)
+var _hover_landing_grid: Vector2i = Vector2i(-99999, -99999)
 var _hover_sources_version: int = 0
+var _hover_build_mode_cache: String = ""
 var _structure_sources_version: int = 0
 var _road_network_version: int = 0
 var _friendly_resources: Array[float] = [0.0, 0.0, 0.0]
 var _hostile_resources: Array[float] = [0.0, 0.0, 0.0]
 var _resource_links_dirty: bool = true
 var _last_resource_pulses: Array = []
+var _tile_inspect_active: bool = false
+var _tile_probe_clock: float = 0.0
+var _bridges_repaired: bool = false
+var _bridge_backend_sync_pending: bool = false
+var _bridge_backend_sync_accum: float = 0.0
+var _soldier_visual_dirty: bool = true
+var _soldier_visual_clock: float = 0.0
+var route_planner: RoutePlannerLib
+var _route_request_id: int = -1
+var _route_place_pending: bool = false
+var _route_pending_grid: Vector2i = Vector2i(-1, -1)
+var _route_pending_landing: Vector2i = Vector2i(-1, -1)
+var _route_pending_mode: String = ""
+var _route_hover_clock: float = 0.0
+var _route_hover_request_id: int = -1
+var _route_sources_synced: int = -1
+var _route_road_synced: int = -1
+var _route_road_debounce: float = 0.0
+var _loading: bool = true
+var _load_started_msec: int = 0
+var _frame_profiler: FrameBudgetProfilerLib
+var _fps_low_streak: int = 0
+var _fps_log_cooldown: float = 0.0
+var _show_perf_hud: bool = false
+var _last_frame_sim_steps: int = 0
+var _last_overlay_delta_count: int = 0
+var _perf_action_cooldowns: Dictionary = {}
 
 
 func _ready() -> void:
+	Engine.max_fps = 60
+	_frame_profiler = FrameBudgetProfilerLib.new()
 	GameTheme.apply_to_control(self)
 	_style_summary_hud()
+	_style_loading_overlay()
+	loading_overlay.visible = true
+	_set_load_progress(0.0, "Starting…")
+	_load_started_msec = Time.get_ticks_msec()
 	back_button.pressed.connect(_on_back_pressed)
 	pause_button.pressed.connect(_on_pause_pressed)
 	speed_button.pressed.connect(_on_speed_pressed)
 	spawner_button.toggled.connect(_on_spawner_toggled)
+	if barracks_button:
+		barracks_button.toggled.connect(_on_barracks_toggled)
+	corridor_link_button.toggled.connect(_on_corridor_link_toggled)
+	inspect_button.toggled.connect(_on_inspect_toggled)
+	if tile_probe_label:
+		tile_probe_label.visible = false
 	end_overlay.visible = false
 	_supply = float(CFG.STARTING_SUPPLY)
 	ResourceLib.reset()
 	_friendly_resources = [0.0, 0.0, 0.0]
 	_hostile_resources = [0.0, 0.0, 0.0]
+	play_area.resized.connect(_on_play_area_resized)
+	sub_viewport_container.gui_input.connect(_on_play_area_gui_input)
+	if sub_viewport:
+		sub_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	if summary_bar:
+		summary_bar.z_index = 40
+	if has_node("TopBar"):
+		$TopBar.z_index = 41
+	if has_node("HUD"):
+		$HUD.z_index = 40
+	if perf_hud_label:
+		perf_hud_label.visible = false
+		perf_hud_label.z_index = 42
+	if qa_perf_probe_skip_bootstrap:
+		loading_overlay.visible = false
+		_loading = false
+		return
+	call_deferred("_bootstrap_async")
+
+
+func _bootstrap_async() -> void:
+	_set_load_progress(0.08, "Generating Earth map…")
+	await get_tree().process_frame
 	var seed_val: int = RunState.run_seed if RunState.run_seed != 0 else randi() & 0x7FFFFFFF
 	battle_data = EarthMapGeneratorLib.generate(seed_val)
+	_set_load_progress(0.28, "Initializing territory simulation…")
+	await get_tree().process_frame
 	territory_sim = BattleTerritorySimLib.new()
 	territory_sim.use_simple_water_model = true
 	territory_sim.set_resolve_context("world_conquest")
@@ -92,31 +167,59 @@ func _ready() -> void:
 	_player_home = battle_data.player_home_grid
 	_enemy_home = battle_data.enemy_home_grid
 	_sync_counts()
-	play_area.resized.connect(_on_play_area_resized)
-	sub_viewport_container.gui_input.connect(_on_play_area_gui_input)
-	if summary_bar:
-		summary_bar.z_index = 40
-	if has_node("TopBar"):
-		$TopBar.z_index = 41
-	if has_node("HUD"):
-		$HUD.z_index = 40
-	call_deferred("_setup_world_visuals")
+	_set_load_progress(0.48, "Preparing simulation backend…")
+	await get_tree().process_frame
+	_setup_world_visuals()
+	_set_load_progress(0.82, "Warming up globe…")
+	await get_tree().process_frame
+	_update_tile_overlay(true)
+	_update_hud()
+	_set_load_progress(0.95, "Almost ready…")
+	await _await_min_load_time()
+	_set_load_progress(1.0, "Ready")
+	await get_tree().process_frame
+	if sub_viewport:
+		sub_viewport.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
+	loading_overlay.visible = false
+	_loading = false
 	RunLog.info(
 		"World Conquest — %dx%d Earth globe" % [battle_data.grid_width, battle_data.grid_height]
 	)
 
 
+func _await_min_load_time() -> void:
+	var elapsed_sec: float = float(Time.get_ticks_msec() - _load_started_msec) / 1000.0
+	var wait_sec: float = CFG.WORLD_CONQUEST_MIN_LOAD_SEC - elapsed_sec
+	if wait_sec > 0.0:
+		await get_tree().create_timer(wait_sec).timeout
+
+
+func _set_load_progress(ratio: float, status: String) -> void:
+	if loading_status_label != null:
+		loading_status_label.text = status
+	if loading_progress != null:
+		loading_progress.value = clampf(ratio, 0.0, 1.0) * 100.0
+
+
+func _style_loading_overlay() -> void:
+	if loading_overlay == null:
+		return
+	var panel: PanelContainer = loading_overlay.get_node_or_null("Center/LoadPanel") as PanelContainer
+	if panel != null:
+		panel.add_theme_stylebox_override("panel", GameThemeLib.make_panel_style())
+
+
 func _setup_world_visuals() -> void:
 	OutpostBuildLib.prepare_land_components(battle_data)
-	_tile_overlay = BattleTileOwnershipOverlayLib.new()
-	_tile_overlay.setup(battle_data)
 	_setup_territory_backend()
+	if territory_sim != null:
+		_sync_bridge_corridors_to_sim(true, true)
 	if globe_map != null:
 		globe_map.setup(battle_data)
 		var light := DirectionalLight3D.new()
 		light.rotation_degrees = Vector3(-42.0, -30.0, 0.0)
 		light.light_energy = 1.2
-		light.shadow_enabled = true
+		light.shadow_enabled = false
 		globe_map.add_child(light)
 		var env_node := WorldEnvironment.new()
 		var e := Environment.new()
@@ -131,34 +234,103 @@ func _setup_world_visuals() -> void:
 	_refresh_resource_deposits()
 	_resource_links_dirty = true
 	_on_play_area_resized(true)
-	_update_tile_overlay(true)
-	_update_hud()
 
 
 func _process(delta: float) -> void:
+	if _loading:
+		return
 	if _battle_finished or battle_data == null or territory_sim == null:
 		return
-	if _orbit_drag and globe_map != null:
-		var md: Vector2 = sub_viewport_container.get_local_mouse_position()
-		pass
+	if _frame_profiler != null:
+		_frame_profiler.begin_frame()
+	_decrement_perf_action_cooldowns(delta)
+
+	var sim_steps: int = 0
+
+	# Process deferred spawner activations from previous frame's build completions.
+	# This moves the sync work (placed_spawners + Rust update_spawners) off the completion frame itself,
+	# so "make the building" (dict + marker visual) is cheap on the build frame,
+	# and the new pump starts contributing "aura power" on the next tick's advance (as the user expects).
+	if _spawners_pending_sync:
+		var spawner_t: int = 0
+		if _frame_profiler != null:
+			spawner_t = _frame_profiler.begin_phase("spawner_sync")
+		if territory_sim.tile_control != null:
+			territory_sim.tile_control.sync_placed_spawners_from_map(battle_data)
+			if territory_sim.rust_live_ready and territory_sim.rust_field != null:
+				territory_sim.rust_field.sync_spawners_from(territory_sim.tile_control)
+		_spawners_pending_sync = false
+		if _frame_profiler != null:
+			_frame_profiler.end_phase("spawner_sync", spawner_t)
+
 	if not _paused and not territory_sim.finished:
 		_supply += float(_friendly_tiles) * CFG.INCOME_PER_TILE_PER_SEC * delta
+		var sim_t: int = 0
+		if _frame_profiler != null:
+			sim_t = _frame_profiler.begin_phase("sim")
 		var info: Dictionary = territory_sim.advance_dt(
 			delta * _speed_mult, CFG.SIM_MAX_STEPS_PER_FRAME
 		)
-		_sync_counts()
-		_advance_outpost_construction(delta * _speed_mult)
+		sim_steps = int(info.get("steps", 0))
+		_last_frame_sim_steps = sim_steps
+		if _frame_profiler != null:
+			_frame_profiler.end_phase("sim", sim_t)
+		if sim_steps > 0:
+			_sync_counts()
+			_maybe_log_perf_action("sim", {"steps": sim_steps}, 2.0)
+		if _has_active_construction():
+			var outpost_t: int = 0
+			if _frame_profiler != null:
+				outpost_t = _frame_profiler.begin_phase("outpost")
+			_advance_outpost_construction(delta * _speed_mult)
+			if _frame_profiler != null:
+				_frame_profiler.end_phase("outpost", outpost_t)
+		_tick_soldier_economy(delta * _speed_mult)
+		_tick_barracks_spawns(delta * _speed_mult)
+		_flush_bridge_backend_sync(delta * _speed_mult)
+		if not _bridges_repaired:
+			var bridge_t: int = 0
+			if _frame_profiler != null:
+				bridge_t = _frame_profiler.begin_phase("bridge")
+			_maintain_bridge_corridors()
+			if _frame_profiler != null:
+				_frame_profiler.end_phase("bridge", bridge_t)
+		var res_t: int = 0
+		if _frame_profiler != null:
+			res_t = _frame_profiler.begin_phase("resources")
 		_tick_resources(delta * _speed_mult)
-		_overlay_clock += delta
-		if _overlay_clock >= 1.0 / CFG.OVERLAY_UPDATES_PER_SEC:
-			_overlay_clock = 0.0
-			_update_tile_overlay(false)
+		if _frame_profiler != null:
+			_frame_profiler.end_phase("resources", res_t)
+
+	if sim_steps > 0:
+		_soldier_visual_dirty = true
+		if CFG.OVERLAY_OWNERS_ONLY:
+			var overlay_t: int = 0
+			if _frame_profiler != null:
+				overlay_t = _frame_profiler.begin_phase("overlay")
+			_patch_ownership_overlay()
+			if _frame_profiler != null:
+				_frame_profiler.end_phase("overlay", overlay_t)
+
+	if not _paused and territory_sim != null and not territory_sim.finished:
+		if not CFG.OVERLAY_OWNERS_ONLY:
+			_overlay_clock += delta
+			if _overlay_clock >= 1.0 / CFG.OVERLAY_UPDATES_PER_SEC:
+				_overlay_clock = 0.0
+				_update_tile_overlay(false)
 	_update_outpost_visuals(delta)
 	_update_resource_visuals(delta)
+	var soldier_t: int = 0
+	if _frame_profiler != null:
+		soldier_t = _frame_profiler.begin_phase("soldiers")
+	_update_soldier_visuals(delta)
+	if _frame_profiler != null:
+		_frame_profiler.end_phase("soldiers", soldier_t)
 	if territory_sim.finished and not _battle_finished:
 		_on_battle_finished()
-	if _build_spawner_active:
+	if _is_build_mode_active():
 		_build_hint_clock += delta
+		_route_hover_clock += delta
 		if _build_hint_clock >= 0.12:
 			_build_hint_clock = 0.0
 			_update_build_hover_hint()
@@ -166,25 +338,38 @@ func _process(delta: float) -> void:
 	if _hud_clock >= 0.12:
 		_hud_clock = 0.0
 		_update_hud()
+	if _tile_inspect_active:
+		_tile_probe_clock += delta
+		if _tile_probe_clock >= 0.1:
+			_tile_probe_clock = 0.0
+			_update_tile_probe()
+	_poll_route_planner()
+	_maybe_refresh_route_backend(delta)
+	if globe_map != null:
+		var gpu_t: int = 0
+		if _frame_profiler != null:
+			gpu_t = _frame_profiler.begin_phase("gpu_upload")
+		if globe_map.flush_pending_owner_gpu_upload():
+			_maybe_log_perf_action("gpu_upload", {"flushed": 1}, 1.0)
+		if _frame_profiler != null:
+			_frame_profiler.end_phase("gpu_upload", gpu_t)
+	if _frame_profiler != null:
+		_frame_profiler.end_frame()
 
 
 func _setup_territory_backend() -> void:
 	var backend_env: String = OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower()
 	if backend_env == "cpu":
 		territory_sim.set_live_backend(false)
-		_tile_overlay.enable_gpu_pressure_mode()
 		RunLog.info("World Conquest using CPU territory backend (BATTLE_TERRITORY_BACKEND=cpu)")
 		return
 	if backend_env == "gpu" and territory_sim.enable_gpu_live():
-		_tile_overlay.enable_gpu_sim_mode(territory_sim.gpu_field)
 		RunLog.info("World Conquest using GPU territory backend")
 		return
 	if territory_sim.enable_rust_live():
-		_tile_overlay.enable_gpu_pressure_mode()
 		RunLog.info("World Conquest using Rust territory backend")
 		return
 	territory_sim.set_live_backend(false)
-	_tile_overlay.enable_gpu_pressure_mode()
 	RunLog.info("World Conquest using CPU territory backend (Rust extension not loaded)")
 
 
@@ -204,8 +389,8 @@ func _on_play_area_gui_input(event: InputEvent) -> void:
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
 			_orbit_drag = mb.pressed
 			sub_viewport_container.accept_event()
-		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and _build_spawner_active:
-			_try_place_spawner()
+		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and _is_build_mode_active():
+			_try_place_structure()
 			sub_viewport_container.accept_event()
 	elif event is InputEventMouseMotion and _orbit_drag and globe_map != null:
 		var mm := event as InputEventMouseMotion
@@ -213,95 +398,302 @@ func _on_play_area_gui_input(event: InputEvent) -> void:
 		sub_viewport_container.accept_event()
 
 
-func _try_place_spawner() -> void:
+func _is_build_mode_active() -> bool:
+	return _build_mode != ""
+
+
+func _build_mode_cost() -> float:
+	if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return float(CFG.CORRIDOR_LINK_COST_SUPPLY)
+	if _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		return float(CFG.BARRACKS_COST_SUPPLY)
+	return float(CFG.SPAWNER_COST_SUPPLY)
+
+
+func _build_mode_noun() -> String:
+	if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return "land bridge"
+	if _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		return "barracks"
+	return "outpost"
+
+
+func _try_place_structure() -> void:
 	var grid: Vector2i = _mouse_to_grid()
 	if not _is_on_map_grid(grid.x, grid.y):
-		build_hint_label.text = "Click land on the globe to place an outpost."
+		build_hint_label.text = "Click land on the globe to place a %s." % _build_mode_noun()
 		return
-	if _supply < float(CFG.SPAWNER_COST_SUPPLY):
+	var cost: float = _build_mode_cost()
+	if _supply < cost:
 		build_hint_label.text = "Need %s supply (have %s)." % [
-			_format_supply(float(CFG.SPAWNER_COST_SUPPLY)),
+			_format_supply(cost),
 			_format_supply(_supply),
 		]
 		return
-	var reject: String = _spawner_reject_reason(grid.x, grid.y)
+	var reject: String = _placement_hover_reject(grid.x, grid.y)
 	if reject != "":
 		build_hint_label.text = reject
 		return
 	build_hint_label.text = "Planning route…"
-	call_deferred("_finish_place_spawner", grid)
-
-
-func _finish_place_spawner(grid: Vector2i) -> void:
-	if battle_data == null:
+	_ensure_route_planner()
+	var use_async: bool = (
+		CFG.ROUTE_ASYNC_PLACEMENT
+		and route_planner != null
+		and route_planner.ready
+		and _build_mode != OutpostBuildLib.KIND_CORRIDOR_LINK
+	)
+	if use_async:
+		var precheck: Dictionary = _placement_precheck(grid, _build_mode)
+		if str(precheck.get("reject", "")) != "":
+			build_hint_label.text = str(precheck.get("reject", ""))
+			return
+		var landing: Vector2i = precheck.get("landing", Vector2i(-1, -1))
+		if landing.x < 0:
+			build_hint_label.text = "Could not place outpost here."
+			return
+		_cancel_route_requests()
+		_route_pending_grid = grid
+		_route_pending_landing = landing
+		_route_pending_mode = _build_mode
+		_route_place_pending = true
+		_route_request_id = route_planner.start_route_async(landing, _build_mode, true)
+		if _route_request_id < 0:
+			_route_place_pending = false
+			call_deferred("_finish_place_structure", grid)
 		return
-	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		battle_data.placed_structures, _player_home
-	)
-	var route: Dictionary = OutpostBuildLib.nearest_path_to_target(
-		battle_data, grid, sources, _structure_sources_version
-	)
-	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
+	call_deferred("_finish_place_structure", grid)
+
+
+func _finish_place_structure(grid: Vector2i) -> void:
+	if battle_data == null or _build_mode == "":
+		return
+	var placement: Dictionary = _resolve_placement(grid, true, _build_mode)
+	var landing: Vector2i = placement.get("landing", Vector2i(-1, -1))
+	var reject: String = str(placement.get("reject", ""))
+	if reject != "":
+		build_hint_label.text = reject
+		return
+	var path_packed: PackedInt32Array = placement.get("path_packed", PackedInt32Array())
 	if path_packed.is_empty():
-		build_hint_label.text = "No route from HQ or an active outpost."
+		build_hint_label.text = "Could not place outpost here."
 		return
-	if _supply < float(CFG.SPAWNER_COST_SUPPLY):
+	path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
+	var cost: float = _build_mode_cost()
+	if _supply < cost:
 		build_hint_label.text = "Need %s supply (have %s)." % [
-			_format_supply(float(CFG.SPAWNER_COST_SUPPLY)),
+			_format_supply(cost),
 			_format_supply(_supply),
 		]
 		return
-	_supply -= float(CFG.SPAWNER_COST_SUPPLY)
-	var src: Vector2i = route.get("source", Vector2i(-1, -1))
-	battle_data.placed_structures.append({
+	_supply -= cost
+	var src: Vector2i = placement.get("source", Vector2i(-1, -1))
+	var st: Dictionary = {
 		"id": _next_structure_id,
 		"team": BattleTileControlLib.OWNER_FRIENDLY,
-		"gx": grid.x,
-		"gy": grid.y,
-		"kind": "spawner",
+		"gx": landing.x,
+		"gy": landing.y,
+		"kind": _build_mode,
 		"state": OutpostBuildLib.STATE_CONNECTING,
 		"source_gx": src.x,
 		"source_gy": src.y,
 		"path_keys": path_packed,
 		"path_len": path_packed.size(),
 		"path_built": 1.0,
-		"health": CFG.OUTPOST_MAX_HEALTH,
-	})
+	}
+	if _build_mode == OutpostBuildLib.KIND_SPAWNER or _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		st["health"] = CFG.OUTPOST_MAX_HEALTH
+	if landing != grid:
+		st["click_gx"] = grid.x
+		st["click_gy"] = grid.y
+	battle_data.placed_structures.append(st)
 	_next_structure_id += 1
-	_structure_sources_version += 1
+	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
+		_structure_sources_version += 1
 	_road_network_version += 1
 	_invalidate_hover_path_cache()
+	_clear_placement_preview()
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
 	_resource_links_dirty = true
+	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
 	_refresh_outpost_visuals(true, true)
-	_build_spawner_active = false
-	_update_build_ui()
+	_apply_build_mode("")
 
 
-func _spawner_reject_reason(gx: int, gy: int) -> String:
+func _find_placement_route(
+	landing: Vector2i,
+	build_kind: String,
+	sources: Array[Vector2i],
+	allow_astar: bool,
+) -> Dictionary:
+	var empty: Dictionary = {
+		"path_packed": PackedInt32Array(),
+		"source": Vector2i(-1, -1),
+	}
+	if battle_data == null or landing.x < 0:
+		return empty
+	# Land bridges must reach detached landmasses; keep the proven GDScript pathfinder.
+	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return OutpostBuildLib.nearest_corridor_path_to_target(
+			battle_data, landing, sources, allow_astar
+		)
+	if route_planner != null and route_planner.ready:
+		var rust_res: Dictionary = route_planner.find_route_sync(
+			landing, build_kind, allow_astar
+		)
+		var rust_route: Dictionary = route_planner.decode_route_result(rust_res)
+		if not rust_route.get("path_packed", PackedInt32Array()).is_empty():
+			return rust_route
+	return OutpostBuildLib.nearest_path_to_target(
+		battle_data, landing, sources, _structure_sources_version, allow_astar
+	)
+
+
+func _resolve_placement(
+	click: Vector2i, allow_astar: bool = false, build_kind: String = OutpostBuildLib.KIND_SPAWNER
+) -> Dictionary:
+	var empty: Dictionary = {
+		"landing": Vector2i(-1, -1),
+		"path_packed": PackedInt32Array(),
+		"source": Vector2i(-1, -1),
+		"reject": "",
+	}
+	if battle_data == null:
+		empty["reject"] = "Map not ready."
+		return empty
+	var precheck: Dictionary = _placement_precheck(click, build_kind)
+	var pre_reject: String = str(precheck.get("reject", ""))
+	if pre_reject != "":
+		empty["reject"] = pre_reject
+		return empty
+	var landing: Vector2i = precheck.get("landing", Vector2i(-1, -1))
+	var sources: Array[Vector2i] = precheck.get("sources", [])
+	var route: Dictionary = _find_placement_route(
+		landing, build_kind, sources, allow_astar
+	)
+	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty():
+		if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+			empty["reject"] = "No water crossing found for this land bridge."
+			return empty
+		var landing_idx: int = battle_data.cell_index(landing.x, landing.y)
+		if landing_idx >= 0:
+			RunLog.warn(
+				"Outpost routing failed at (%d, %d); placing standalone (no supply path)."
+				% [landing.x, landing.y]
+			)
+			path_packed = PackedInt32Array([landing_idx])
+			empty["landing"] = landing
+			empty["path_packed"] = path_packed
+			empty["source"] = landing
+			return empty
+		empty["reject"] = "Invalid landing tile."
+		return empty
+	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		if not OutpostBuildLib.is_valid_bridge_path(battle_data, path_packed):
+			empty["reject"] = "Land bridge must cross open water (not overland)."
+			return empty
+	empty["landing"] = landing
+	empty["path_packed"] = path_packed
+	empty["source"] = route.get("source", Vector2i(-1, -1))
+	return empty
+
+
+func _placement_precheck(click: Vector2i, build_kind: String) -> Dictionary:
+	var result: Dictionary = {
+		"landing": Vector2i(-1, -1),
+		"reject": "",
+		"sources": [],
+	}
+	if battle_data == null:
+		result["reject"] = "Map not ready."
+		return result
+	if not _is_on_map_grid(click.x, click.y):
+		result["reject"] = "Out of map bounds."
+		return result
+	if not battle_data.is_land_cell(click.x, click.y):
+		result["reject"] = "Need land (not ocean)."
+		return result
+	var territory_reject: String = _placement_territory_reject(click.x, click.y, build_kind)
+	if territory_reject != "":
+		result["reject"] = territory_reject
+		return result
+	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
+		battle_data.placed_structures, _player_home, battle_data
+	)
+	result["sources"] = sources
+	var landing: Vector2i
+	if (
+		build_kind == OutpostBuildLib.KIND_SPAWNER
+		or build_kind == OutpostBuildLib.KIND_BARRACKS
+	):
+		landing = click
+	else:
+		var snap_inland: bool = build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK
+		landing = OutpostBuildLib.resolve_invasion_target(
+			battle_data, click, sources, snap_inland
+		)
+		if landing.x < 0:
+			result["reject"] = "No coastal landing on this landmass."
+			return result
+	result["landing"] = landing
+	for st: Dictionary in battle_data.placed_structures:
+		var dx: int = landing.x - int(st.get("gx", 0))
+		var dy: int = landing.y - int(st.get("gy", 0))
+		if dx * dx + dy * dy < CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS:
+			result["reject"] = "Too close to another structure."
+			return result
+	for corridor: Dictionary in battle_data.bridge_corridors:
+		var cdx: int = landing.x - int(corridor.get("gx", 0))
+		var cdy: int = landing.y - int(corridor.get("gy", 0))
+		if cdx * cdx + cdy * cdy < CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS:
+			result["reject"] = "Too close to an existing land bridge."
+			return result
+	var kind_reject: String = _placement_kind_reject(landing, sources, build_kind)
+	if kind_reject != "":
+		result["reject"] = kind_reject
+	return result
+
+
+func _placement_kind_reject(
+	landing: Vector2i, _sources: Array[Vector2i], build_kind: String
+) -> String:
+	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		if not OutpostBuildLib.is_coastal_cell(battle_data, landing.x, landing.y):
+			return "Land Bridge needs a coastal landing."
+	return ""
+
+
+func _placement_territory_reject(gx: int, gy: int, build_kind: String = "") -> String:
+	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return ""
+	if battle_data == null or territory_sim == null or territory_sim.tile_control == null:
+		return ""
+	var idx: int = battle_data.cell_index(gx, gy)
+	if idx < 0 or idx >= territory_sim.tile_control.owners.size():
+		return ""
+	if int(territory_sim.tile_control.owners[idx]) == BattleTileControlLib.OWNER_HOSTILE:
+		return "Cannot build on enemy-held territory."
+	return ""
+
+
+func _placement_hover_reject(gx: int, gy: int) -> String:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return "Simulation not ready."
-	if not _is_on_map_grid(gx, gy):
-		return "Out of map bounds."
-	if not battle_data.is_land_cell(gx, gy):
-		return "Need land (not ocean)."
-	for st: Dictionary in battle_data.placed_structures:
-		var dx: int = gx - int(st.get("gx", 0))
-		var dy: int = gy - int(st.get("gy", 0))
-		if dx * dx + dy * dy < CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS:
-			return "Too close to another outpost."
+	var mode_key: String = _build_mode if _build_mode != "" else OutpostBuildLib.KIND_SPAWNER
 	if (
 		Vector2i(gx, gy) == _hover_check_grid
 		and _hover_sources_version == _structure_sources_version
+		and mode_key == _hover_build_mode_cache
 	):
 		return _hover_reject_cache
 	_hover_check_grid = Vector2i(gx, gy)
 	_hover_sources_version = _structure_sources_version
-	_hover_route_packed = PackedInt32Array()
-	_hover_route_source = Vector2i(-1, -1)
-	_hover_reject_cache = ""
-	return ""
+	_hover_build_mode_cache = mode_key
+	var precheck: Dictionary = _placement_precheck(Vector2i(gx, gy), mode_key)
+	_hover_landing_grid = precheck.get("landing", Vector2i(-99999, -99999))
+	_hover_reject_cache = str(precheck.get("reject", ""))
+	return _hover_reject_cache
 
 
 func _mouse_to_grid() -> Vector2i:
@@ -317,24 +709,92 @@ func _mouse_to_grid() -> Vector2i:
 	return globe_map.pick_grid_from_viewport(vp_pos)
 
 
+func _ownership_overlay_source() -> PackedByteArray:
+	if territory_sim == null:
+		return PackedByteArray()
+	if territory_sim.use_rust_for_live() and territory_sim.rust_field != null and territory_sim.rust_field.ready:
+		var rust_owners: PackedByteArray = territory_sim.rust_field.get_owners()
+		if not rust_owners.is_empty():
+			return rust_owners
+	if territory_sim.tile_control != null:
+		return territory_sim.tile_control.owners
+	return PackedByteArray()
+
+
 func _update_tile_overlay(force: bool) -> void:
-	if _tile_overlay == null or territory_sim == null or territory_sim.tile_control == null:
+	if territory_sim == null or globe_map == null:
 		return
+	if CFG.OVERLAY_OWNERS_ONLY:
+		var owners: PackedByteArray = _ownership_overlay_source()
+		if not owners.is_empty():
+			# Prefer the zero-script-loop fast path when Rust can give us pre-baked display bytes.
+			if territory_sim.rust_live_ready and territory_sim.rust_field != null and territory_sim.rust_field.has_method("get_owner_display_r8"):
+				var bytes: PackedByteArray = territory_sim.rust_field.get_owner_display_r8()
+				if bytes.size() > 0:
+					globe_map.apply_ownership_display_bytes(bytes)
+				else:
+					globe_map.apply_ownership_overlay(owners)
+			else:
+				globe_map.apply_ownership_overlay(owners)
+		return
+	if territory_sim.tile_control == null:
+		return
+	var tc := territory_sim.tile_control
 	var step: int = territory_sim.round_index
 	if not force and _last_overlay_step == step:
 		return
 	_last_overlay_step = step
-	var tc := territory_sim.tile_control
 	if territory_sim.use_gpu_for_live() and territory_sim.gpu_field != null:
 		if not territory_sim.gpu_field.export_state_to_tile_control(tc):
 			return
-	if globe_map != null:
-		globe_map.apply_fluid_from_pressures(tc.pressure_friendly, tc.pressure_hostile)
+	if globe_map == null:
+		return
+	var pf: PackedFloat32Array = tc.pressure_friendly
+	var ph: PackedFloat32Array = tc.pressure_hostile
+	if territory_sim.use_rust_for_live() and territory_sim.rust_field != null:
+		pf = territory_sim.rust_field.get_pressure_friendly()
+		ph = territory_sim.rust_field.get_pressure_hostile()
+	var peak: float = 10000.0
+	if territory_sim.use_rust_for_live() and territory_sim.rust_field != null:
+		peak = territory_sim.rust_field.pressure_overlay_peak()
+	globe_map.apply_fluid_from_pressures_gpu(pf, ph, tc.claimable_mask, Rect2i(), peak)
+
+
+func _patch_ownership_overlay() -> void:
+	if globe_map == null or territory_sim == null:
+		return
+	if not CFG.OVERLAY_OWNERS_ONLY:
+		return
+	# Use incremental owner delta for live Rust visuals (the common/hot path for pressure-driven conquest).
+	# This avoids full 360x180 get_owners FFI + GDScript scan + texture work every sim step.
+	# Bridge/new-land owner injection is handled by forced full refresh in _sync_claimable paths.
+	if territory_sim.use_rust_for_live() and territory_sim.rust_field != null and territory_sim.rust_field.ready:
+		if territory_sim.rust_field.has_method("consume_owner_overlay_delta"):
+			var d: Dictionary = territory_sim.rust_field.consume_owner_overlay_delta()
+			var idxs: PackedInt32Array = d.get("indices", PackedInt32Array())
+			if idxs.size() > 0:
+				var vals: PackedByteArray = d.get("values", PackedByteArray())
+				_last_overlay_delta_count = idxs.size()
+				globe_map.apply_ownership_overlay_delta(idxs, vals)
+				_maybe_log_perf_action("overlay:delta", {"cells": idxs.size()}, 1.0)
+				return
+			return  # no flips in this batch; already current
+	# Fallback (CPU, or delta method missing): full authoritative map from source.
+	var owners: PackedByteArray = _ownership_overlay_source()
+	if not owners.is_empty():
+		globe_map.apply_ownership_overlay(owners)
 
 
 func _refresh_markers() -> void:
-	if globe_map != null:
-		globe_map.refresh_markers(battle_data.placed_structures, _player_home, _enemy_home)
+	if globe_map == null:
+		return
+	var markers_t: int = 0
+	if _frame_profiler != null:
+		markers_t = _frame_profiler.begin_phase("markers")
+	globe_map.refresh_markers(battle_data.placed_structures, _player_home, _enemy_home)
+	if _frame_profiler != null:
+		_frame_profiler.end_phase("markers", markers_t)
+	_maybe_log_perf_action("markers", {"structures": battle_data.placed_structures.size()}, 3.0)
 
 
 func _refresh_resource_deposits() -> void:
@@ -361,6 +821,9 @@ func _tick_resources(dt: float) -> void:
 	if bool(info.get("links_dirty", false)):
 		_resource_links_dirty = true
 	_last_resource_pulses = info.get("pulses", [])
+	var pulse_n: int = _last_resource_pulses.size()
+	if pulse_n > 0 or bool(info.get("links_dirty", false)):
+		_maybe_log_perf_action("resources", {"pulses": pulse_n, "links_dirty": int(info.get("links_dirty", false))}, 2.0)
 
 
 func _update_resource_visuals(_delta: float) -> void:
@@ -371,12 +834,20 @@ func _update_resource_visuals(_delta: float) -> void:
 		_resource_links_dirty = false
 	if not _last_resource_pulses.is_empty():
 		globe_map.update_resource_pulses(_last_resource_pulses)
+		_last_resource_pulses.clear()
 
 
 
 func _sync_roads() -> void:
-	if globe_map != null:
-		globe_map.sync_roads(battle_data.placed_structures)
+	if globe_map == null:
+		return
+	var roads_t: int = 0
+	if _frame_profiler != null:
+		roads_t = _frame_profiler.begin_phase("roads")
+	globe_map.sync_roads(battle_data.placed_structures)
+	if _frame_profiler != null:
+		_frame_profiler.end_phase("roads", roads_t)
+	_maybe_log_perf_action("roads", {"structures": battle_data.placed_structures.size()}, 3.0)
 
 
 func _refresh_outpost_visuals(roads: bool, markers: bool) -> void:
@@ -409,11 +880,8 @@ func _has_vulnerable_outposts() -> bool:
 
 
 func _update_outpost_visuals(delta: float) -> void:
-	if (
-		not _outpost_road_dirty
-		and not _outpost_marker_dirty
-		and not _has_vulnerable_outposts()
-	):
+	var vulnerable: bool = _has_vulnerable_outposts()
+	if not _outpost_road_dirty and not _outpost_marker_dirty and not vulnerable:
 		return
 	if _outpost_road_dirty:
 		_refresh_outpost_visuals(true, false)
@@ -422,8 +890,10 @@ func _update_outpost_visuals(delta: float) -> void:
 		_refresh_outpost_visuals(false, true)
 		_outpost_marker_dirty = false
 		return
-	if _has_vulnerable_outposts():
+	if vulnerable:
 		_outpost_marker_clock += delta
+		if globe_map != null:
+			globe_map.set_marker_pulse(_outpost_marker_clock)
 		if _outpost_marker_clock >= 0.25:
 			_outpost_marker_clock = 0.0
 			_refresh_markers()
@@ -432,9 +902,241 @@ func _update_outpost_visuals(delta: float) -> void:
 func _invalidate_hover_path_cache() -> void:
 	_hover_check_grid = Vector2i(-99999, -99999)
 	_hover_hint_grid = Vector2i(-99999, -99999)
+	_hover_landing_grid = Vector2i(-99999, -99999)
+	_hover_build_mode_cache = ""
 	_hover_reject_cache = ""
-	_hover_route_packed = PackedInt32Array()
-	_hover_route_source = Vector2i(-1, -1)
+	OutpostBuildLib.invalidate_snap_cache()
+	_cancel_route_requests()
+	_clear_placement_preview()
+
+
+func _cancel_route_requests() -> void:
+	if route_planner != null and route_planner.ready:
+		if _route_request_id >= 0:
+			route_planner.cancel_route(_route_request_id)
+		if _route_hover_request_id >= 0:
+			route_planner.cancel_route(_route_hover_request_id)
+	_route_request_id = -1
+	_route_hover_request_id = -1
+	_route_place_pending = false
+
+
+func _rebuild_route_portals() -> void:
+	if route_planner == null or not route_planner.ready or battle_data == null:
+		return
+	route_planner.rebuild_portals(
+		battle_data, battle_data.placed_structures, _player_home
+	)
+
+
+func _ensure_route_planner() -> void:
+	if route_planner != null and route_planner.ready:
+		return
+	if route_planner == null:
+		route_planner = RoutePlannerLib.new()
+	if route_planner.setup_map(battle_data, battle_data.placed_structures):
+		_route_sources_synced = _structure_sources_version
+		_route_road_synced = _road_network_version
+		_rebuild_route_portals()
+
+
+func _refresh_route_snapshot_and_portals() -> void:
+	if battle_data == null:
+		return
+	_ensure_route_planner()
+	if route_planner == null or not route_planner.ready:
+		return
+	route_planner.setup_map(battle_data, battle_data.placed_structures)
+	_rebuild_route_portals()
+
+
+func _refresh_route_infra_and_portals() -> void:
+	if battle_data == null:
+		return
+	_ensure_route_planner()
+	if route_planner == null or not route_planner.ready:
+		return
+	route_planner.update_infra(battle_data, battle_data.placed_structures)
+	_rebuild_route_portals()
+
+
+func _maybe_refresh_route_backend(delta: float) -> void:
+	if not _is_build_mode_active() and not _route_place_pending:
+		return
+	if route_planner == null or battle_data == null:
+		return
+	if not route_planner.ready:
+		_ensure_route_planner()
+	if not route_planner.ready:
+		return
+	if _structure_sources_version != _route_sources_synced:
+		_route_sources_synced = _structure_sources_version
+		_route_road_synced = _road_network_version
+		_route_road_debounce = 0.0
+		# Do NOT force immediate rebuild here (was causing FPS hitch on every new outpost activation/connect).
+		# The planner will pick up the new source on the next debounced infra refresh after some road change.
+		# A short lag in routing planner state for *subsequent* placements is acceptable for smoothness.
+		return
+	if _road_network_version == _route_road_synced:
+		_route_road_debounce = 0.0
+		return
+	_route_road_debounce += delta
+	if _route_road_debounce < CFG.ROUTE_ROAD_INFRA_DEBOUNCE_SEC:
+		return
+	_route_road_synced = _road_network_version
+	_route_road_debounce = 0.0
+	_refresh_route_infra_and_portals()
+
+
+func _poll_route_planner() -> void:
+	if route_planner == null or not route_planner.ready:
+		return
+	if not _route_place_pending and _route_hover_request_id < 0:
+		return
+	var drained: int = 0
+	while drained < 4:
+		drained += 1
+		var res: Dictionary = route_planner.poll_route()
+		if not bool(res.get("ready", false)):
+			break
+		var req_id: int = int(res.get("request_id", -1))
+		if _route_place_pending and req_id == _route_request_id:
+			_route_request_id = -1
+			_route_place_pending = false
+			_finish_place_from_route(res, _route_pending_grid, _route_pending_landing)
+			break
+		elif req_id == _route_hover_request_id and _route_hover_request_id >= 0:
+			_route_hover_request_id = -1
+			_apply_hover_route_preview(res)
+
+
+func _finish_place_from_route(
+	res: Dictionary, grid: Vector2i, landing: Vector2i
+) -> void:
+	if battle_data == null or _build_mode == "":
+		return
+	var route: Dictionary = route_planner.decode_route_result(res)
+	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty() or not bool(res.get("found", false)):
+		var precheck: Dictionary = _placement_precheck(grid, _build_mode)
+		var sources: Array[Vector2i] = precheck.get("sources", [])
+		route = _find_placement_route(landing, _build_mode, sources, true)
+		path_packed = route.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty():
+		if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+			build_hint_label.text = "No water crossing found for this land bridge."
+		else:
+			build_hint_label.text = "Could not place outpost here."
+		return
+	if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		if not OutpostBuildLib.is_valid_bridge_path(battle_data, path_packed):
+			build_hint_label.text = "Land bridge must cross open water (not overland)."
+			return
+	path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
+	var cost: float = _build_mode_cost()
+	if _supply < cost:
+		build_hint_label.text = "Need %s supply (have %s)." % [
+			_format_supply(cost),
+			_format_supply(_supply),
+		]
+		return
+	_supply -= cost
+	var src: Vector2i = route.get("source", Vector2i(-1, -1))
+	var st: Dictionary = {
+		"id": _next_structure_id,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": landing.x,
+		"gy": landing.y,
+		"kind": _build_mode,
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"source_gx": src.x,
+		"source_gy": src.y,
+		"path_keys": path_packed,
+		"path_len": path_packed.size(),
+		"path_built": 1.0,
+	}
+	if _build_mode == OutpostBuildLib.KIND_SPAWNER or _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		st["health"] = CFG.OUTPOST_MAX_HEALTH
+	if landing != grid:
+		st["click_gx"] = grid.x
+		st["click_gy"] = grid.y
+	battle_data.placed_structures.append(st)
+	_next_structure_id += 1
+	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
+		_structure_sources_version += 1
+	_road_network_version += 1
+	_invalidate_hover_path_cache()
+	_clear_placement_preview()
+	_outpost_road_dirty = true
+	_outpost_marker_dirty = true
+	_resource_links_dirty = true
+	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
+	_refresh_outpost_visuals(true, true)
+	_apply_build_mode("")
+
+
+func _apply_hover_route_preview(res: Dictionary) -> void:
+	if globe_map == null or battle_data == null:
+		return
+	var route: Dictionary = route_planner.decode_route_result(res)
+	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty():
+		_clear_placement_preview()
+		return
+	var is_corridor: bool = _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK
+	globe_map.set_placement_preview(
+		path_packed, _route_pending_landing, _hover_hint_grid, true, is_corridor
+	)
+
+
+func _clear_placement_preview() -> void:
+	if globe_map != null:
+		globe_map.clear_placement_preview()
+
+
+func _sync_claimable_to_backends(force_owner_visual: bool = true) -> void:
+	if territory_sim == null or territory_sim.tile_control == null:
+		return
+	var tc := territory_sim.tile_control
+	territory_sim.claimable_tiles = tc.claimable_tile_count
+	_claimable_tiles = territory_sim.claimable_tiles
+	if territory_sim.rust_live_ready and territory_sim.rust_field != null:
+		territory_sim.rust_field.sync_claimable_from(tc, battle_data, true)
+	if territory_sim.agents_ready():
+		territory_sim.sync_agent_nav()
+	if territory_sim.use_gpu_for_live() and territory_sim.gpu_field != null:
+		territory_sim.gpu_field.refresh_claimable_from(battle_data, tc)
+	if force_owner_visual and CFG.OVERLAY_OWNERS_ONLY:
+		var owners: PackedByteArray = _ownership_overlay_source()
+		if not owners.is_empty():
+			globe_map.apply_ownership_overlay(owners)
+
+
+func _sync_bridge_corridors_to_sim(force_full: bool = false, sync_backends_now: bool = false, force_owner_visual: bool = true) -> void:
+	if territory_sim == null or territory_sim.tile_control == null or battle_data == null:
+		return
+	var changed: bool = territory_sim.tile_control.sync_bridge_corridors_from_map(
+		battle_data, force_full
+	)
+	if sync_backends_now:
+		_bridge_backend_sync_pending = false
+		_bridge_backend_sync_accum = 0.0
+		_sync_claimable_to_backends(force_owner_visual)
+	elif changed and territory_sim.agents_ready():
+		territory_sim.sync_agent_nav()
+	else:
+		_bridge_backend_sync_pending = true
+
+
+func _flush_bridge_backend_sync(dt: float) -> void:
+	if not _bridge_backend_sync_pending:
+		return
+	_bridge_backend_sync_accum += dt
+	if _bridge_backend_sync_accum < CFG.BRIDGE_BACKEND_SYNC_INTERVAL_SEC:
+		return
+	_bridge_backend_sync_accum = 0.0
+	_bridge_backend_sync_pending = false
+	_sync_claimable_to_backends(true)  # force visual during bridge build for prompt beachhead shading (now cheap via Rust bytes)
 
 
 func _advance_outpost_construction(dt: float) -> void:
@@ -443,16 +1145,15 @@ func _advance_outpost_construction(dt: float) -> void:
 	var sim_dirty: bool = false
 	var pending_claims: Array[Vector2i] = []
 	var destroyed_ids: Array[int] = []
+	var completed_corridor_ids: Array[int] = []
 	for st: Dictionary in battle_data.placed_structures:
-		if str(st.get("kind", "")) != "spawner":
+		var kind: String = str(st.get("kind", ""))
+		if not OutpostBuildLib.is_corridor_path_kind(kind):
 			continue
 		var state: String = str(st.get("state", OutpostBuildLib.STATE_ACTIVE))
 		var gx: int = int(st.get("gx", 0))
 		var gy: int = int(st.get("gy", 0))
-		if (
-			state == OutpostBuildLib.STATE_CONNECTING
-			or state == OutpostBuildLib.STATE_BUILDING
-		):
+		if OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
 			_tick_outpost_construction_damage(st, gx, gy, dt, destroyed_ids)
 			if destroyed_ids.has(int(st.get("id", -1))):
 				continue
@@ -466,34 +1167,171 @@ func _advance_outpost_construction(dt: float) -> void:
 				path_len = int(st.get("path_len", 0))
 			st["path_len"] = path_len
 			if built >= float(path_len):
-				st["state"] = OutpostBuildLib.STATE_BUILDING
-				st["build_remaining"] = CFG.OUTPOST_BUILD_SEC
+				st["path_built"] = float(path_len)
+				var is_corridor_link = kind == OutpostBuildLib.KIND_CORRIDOR_LINK
+				# For corridor links (land bridges) force full owner visual so new invasion land lights up immediately without gaps.
+				# Regular outposts only claim a small local area; delta updates or the next sim step will color it cheaply.
+				_sync_bridge_corridors_to_sim(false, true, true)  # force owner visual; now cheap via Rust bytes path, ensures immediate shading on new claimed area
 				_outpost_road_dirty = true
 				_outpost_marker_dirty = true
+				if is_corridor_link:
+					completed_corridor_ids.append(int(st.get("id", -1)))
+				else:
+					st["state"] = OutpostBuildLib.STATE_BUILDING
+					st["build_remaining"] = OutpostBuildLib.build_sec_for_kind(kind)
+					_extend_beachhead_at_landing(st, gx, gy)
 			elif int(floor(built)) != prev_cells:
 				_outpost_road_dirty = true
-				_road_network_version += 1
-				_resource_links_dirty = true
-		elif state == OutpostBuildLib.STATE_BUILDING:
-			var rem: float = float(st.get("build_remaining", CFG.OUTPOST_BUILD_SEC))
+				if OutpostBuildLib.is_corridor_path_kind(kind) and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
+					_road_network_version += 1
+					if kind == OutpostBuildLib.KIND_SPAWNER:
+						_resource_links_dirty = true
+				territory_sim.tile_control.sync_bridge_corridors_from_map(battle_data, false)
+				if territory_sim.agents_ready():
+					territory_sim.sync_agent_nav()
+				_bridge_backend_sync_pending = true
+		elif OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
+			var build_sec: float = OutpostBuildLib.build_sec_for_kind(kind)
+			var rem: float = float(st.get("build_remaining", build_sec))
 			rem -= dt
 			st["build_remaining"] = rem
 			if rem <= 0.0:
 				st["state"] = OutpostBuildLib.STATE_ACTIVE
 				st.erase("build_remaining")
 				st.erase("health")
-				_structure_sources_version += 1
+				st["spawn_timer"] = 0.0
+				if kind == OutpostBuildLib.KIND_SPAWNER:
+					_structure_sources_version += 1
+					_spawners_pending_sync = true
 				_road_network_version += 1
 				_invalidate_hover_path_cache()
 				_outpost_marker_dirty = true
-				pending_claims.append(
-					Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0)))
-				)
-				sim_dirty = true
+				if kind == OutpostBuildLib.KIND_SPAWNER:
+					var team = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+					var w = battle_data.grid_width
+					var idx = int(st.get("gy", 0)) * w + int(st.get("gx", 0))
+					var tctrl = territory_sim.tile_control if territory_sim != null else null
+					if tctrl != null and idx >= 0 and idx < tctrl.owners.size() and tctrl.owners[idx] != team:
+						pending_claims.append(Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0))))
+				else:
+					_sync_bridge_corridors_to_sim(false, true, true)  # force visual; cheap now
+				if kind != OutpostBuildLib.KIND_SPAWNER or pending_claims.size() > 0:
+					sim_dirty = true
 	for sid: int in destroyed_ids:
 		_destroy_outpost(sid)
+	for sid: int in completed_corridor_ids:
+		_complete_corridor_link_by_id(sid)
 	if sim_dirty:
 		_sync_active_spawners_to_sim(pending_claims)
+
+
+func _tick_soldier_economy(dt: float) -> void:
+	if territory_sim == null or dt <= 0.0:
+		return
+	var living: int = territory_sim.agent_living_count()
+	if not territory_sim.agents_ready() or living <= 0:
+		territory_sim.agent_deficit_dps = Vector2.ZERO
+		return
+	var au_idx: int = ResourceLib.TYPE_AURELIUM
+	var upkeep: float = float(living) * CFG.SOLDIER_UPKEEP_AURELIUM_PER_SEC * dt
+	var wallet: float = _friendly_resources[au_idx]
+	var paid: float = minf(upkeep, wallet)
+	_friendly_resources[au_idx] = wallet - paid
+	var deficit: float = upkeep - paid
+	if deficit > 0.0 and upkeep > 0.0:
+		var frac: float = deficit / upkeep
+		territory_sim.agent_deficit_dps.x = CFG.SOLDIER_UPKEEP_DEFICIT_DPS * frac
+	else:
+		territory_sim.agent_deficit_dps.x = 0.0
+
+
+func _tick_barracks_spawns(dt: float) -> void:
+	if battle_data == null or territory_sim == null or dt <= 0.0:
+		return
+	if not territory_sim.agents_ready():
+		return
+	var au_idx: int = ResourceLib.TYPE_AURELIUM
+	var spawn_cost: float = float(CFG.SOLDIER_SPAWN_AURELIUM_COST)
+	for st: Dictionary in battle_data.placed_structures:
+		if str(st.get("kind", "")) != OutpostBuildLib.KIND_BARRACKS:
+			continue
+		if str(st.get("state", "")) != OutpostBuildLib.STATE_ACTIVE:
+			continue
+		var bid: int = int(st.get("id", -1))
+		if bid < 0:
+			continue
+		var timer: float = float(st.get("spawn_timer", 0.0)) + dt
+		st["spawn_timer"] = timer
+		if timer < CFG.BARRACKS_SPAWN_INTERVAL_SEC:
+			continue
+		if territory_sim.agent_living_for_barracks(bid) >= CFG.BARRACKS_MAX_ACTIVE_UNITS:
+			continue
+		if territory_sim.agent_living_count() >= CFG.GLOBAL_SOLDIER_CAP:
+			continue
+		if _friendly_resources[au_idx] < spawn_cost:
+			continue
+		var gx: int = int(st.get("gx", 0))
+		var gy: int = int(st.get("gy", 0))
+		var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+		territory_sim.sync_agent_nav()
+		if territory_sim.try_spawn_soldier(bid, team, gx, gy):
+			_friendly_resources[au_idx] -= spawn_cost
+			st["spawn_timer"] = timer - CFG.BARRACKS_SPAWN_INTERVAL_SEC
+			_soldier_visual_dirty = true
+
+
+func _update_soldier_visuals(delta: float) -> void:
+	if globe_map == null or territory_sim == null:
+		return
+	if not territory_sim.agents_ready():
+		globe_map.sync_soldiers(PackedByteArray(), PackedInt32Array(), PackedInt32Array())
+		return
+	_soldier_visual_clock += delta
+	var soldier_refresh_sec: float = 1.0 / CFG.SOLDIER_VISUAL_UPDATES_PER_SEC
+	if not _soldier_visual_dirty and _soldier_visual_clock < soldier_refresh_sec:
+		return
+	_soldier_visual_clock = 0.0
+	_soldier_visual_dirty = false
+	var snap: Dictionary = territory_sim.get_agent_snapshot()
+	globe_map.sync_soldiers(
+		snap.get("teams", PackedByteArray()),
+		snap.get("gx", PackedInt32Array()),
+		snap.get("gy", PackedInt32Array()),
+	)
+
+
+func _complete_corridor_link_by_id(sid: int) -> void:
+	if sid < 0 or battle_data == null:
+		return
+	var st: Dictionary = {}
+	var idx: int = -1
+	for i in range(battle_data.placed_structures.size() - 1, -1, -1):
+		var candidate: Dictionary = battle_data.placed_structures[i]
+		if int(candidate.get("id", -1)) == sid:
+			st = candidate
+			idx = i
+			break
+	if idx < 0:
+		return
+	var gx: int = int(st.get("gx", 0))
+	var gy: int = int(st.get("gy", 0))
+	battle_data.bridge_corridors.append({
+		"id": sid,
+		"team": int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)),
+		"gx": gx,
+		"gy": gy,
+		"path_keys": st.get("path_keys", PackedInt32Array()),
+	})
+	battle_data.placed_structures.remove_at(idx)
+	_sync_bridge_corridors_to_sim(true, true, true)  # corridor link: force owner visual for new land
+	_extend_beachhead_at_landing(st, gx, gy)
+	_structure_sources_version += 1
+	_road_network_version += 1
+	_resource_links_dirty = true
+	_invalidate_hover_path_cache()
+	_outpost_road_dirty = true
+	_outpost_marker_dirty = true
+	_refresh_outpost_visuals(true, true)
 
 
 func _tick_outpost_construction_damage(
@@ -519,15 +1357,20 @@ func _destroy_outpost(sid: int) -> void:
 	if sid < 0 or battle_data == null:
 		return
 	var grid: Vector2i = Vector2i(-1, -1)
+	var was_barracks: bool = false
 	for i in range(battle_data.placed_structures.size() - 1, -1, -1):
 		var st: Dictionary = battle_data.placed_structures[i]
 		if int(st.get("id", -1)) != sid:
 			continue
 		grid = Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0)))
+		was_barracks = str(st.get("kind", "")) == OutpostBuildLib.KIND_BARRACKS
 		battle_data.placed_structures.remove_at(i)
 		break
 	if grid.x < 0:
 		return
+	if was_barracks and territory_sim != null:
+		territory_sim.notify_barracks_destroyed(sid)
+		_soldier_visual_dirty = true
 	if globe_map != null:
 		globe_map.clear_road(sid)
 		globe_map.spawn_outpost_destroy_fx(grid)
@@ -536,6 +1379,7 @@ func _destroy_outpost(sid: int) -> void:
 	_invalidate_hover_path_cache()
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
+	_sync_bridge_corridors_to_sim(true, true, false)  # destroy: no need to force full owner visual
 	_refresh_outpost_visuals(true, true)
 
 
@@ -550,21 +1394,145 @@ func _outpost_risk_hint(gx: int, gy: int) -> String:
 	return "Enemy territory — %.0f DPS vs %d HP." % [dps, int(CFG.OUTPOST_MAX_HEALTH)]
 
 
+func _placement_risk_hint(gx: int, gy: int) -> String:
+	if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return "Opens beachhead when bridge connects — place outposts afterward."
+	return _outpost_risk_hint(gx, gy)
+
+
+func _extend_beachhead_at_landing(st: Dictionary, gx: int, gy: int) -> void:
+	if territory_sim == null or territory_sim.tile_control == null:
+		return
+	var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+	if territory_sim.tile_control.extend_beachhead_from_landing(battle_data, gx, gy, team):
+		_sync_claimable_to_backends(true)  # force immediate owner visual (cheap bytes path); ensures shading appears right away on new claimed land from bridge or outpost road
+
+
+func _has_active_construction() -> bool:
+	if battle_data == null:
+		return false
+	for st: Dictionary in battle_data.placed_structures:
+		var state: String = str(st.get("state", OutpostBuildLib.STATE_ACTIVE))
+		if state == OutpostBuildLib.STATE_CONNECTING:
+			return true
+		var kind: String = str(st.get("kind", ""))
+		if OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
+			return true
+	return false
+
+
+func _maintain_bridge_corridors() -> void:
+	if battle_data == null or territory_sim == null or territory_sim.tile_control == null:
+		return
+	if _bridges_repaired or battle_data.bridge_corridors.is_empty():
+		return
+	_repair_bridge_corridor_paths()
+	_bridges_repaired = true
+
+
+func _repair_bridge_corridor_paths() -> void:
+	if battle_data == null or territory_sim == null:
+		return
+	var changed: bool = false
+	for corridor: Dictionary in battle_data.bridge_corridors:
+		var packed: PackedInt32Array = corridor.get("path_keys", PackedInt32Array())
+		if packed.is_empty():
+			continue
+		var dense: PackedInt32Array = OutpostBuildLib.densify_path_cardinal(battle_data, packed)
+		if dense.size() != packed.size():
+			corridor["path_keys"] = dense
+			changed = true
+	_sync_bridge_corridors_to_sim(true, true)
+	for corridor: Dictionary in battle_data.bridge_corridors:
+		var gx: int = int(corridor.get("gx", -1))
+		var gy: int = int(corridor.get("gy", -1))
+		if gx < 0:
+			continue
+		_extend_beachhead_at_landing(corridor, gx, gy)
+	if changed:
+		_outpost_road_dirty = true
+		_refresh_outpost_visuals(true, false)
+
+
+func _update_tile_probe() -> void:
+	if tile_probe_label == null or battle_data == null or territory_sim == null:
+		return
+	var tc := territory_sim.tile_control
+	if tc == null:
+		return
+	var grid: Vector2i = _mouse_to_grid()
+	var bridge_stats: Dictionary = tc.count_claimable_bridge_cells(battle_data)
+	var bridge_line: String = (
+		"Bridges %d · water %d/%d claimable"
+		% [
+			int(bridge_stats.get("landings", 0)),
+			int(bridge_stats.get("water_claimable", 0)),
+			int(bridge_stats.get("water_total", 0)),
+		]
+	)
+	if not _is_on_map_grid(grid.x, grid.y):
+		tile_probe_label.text = "%s\nMove cursor over the globe." % bridge_line
+		return
+	var probe: Dictionary = tc.tile_probe(battle_data, grid.x, grid.y)
+	if not bool(probe.get("valid", false)):
+		tile_probe_label.text = bridge_line
+		return
+	tile_probe_label.text = (
+		(
+			"%s\n(%s,%s) %s · %s · claim=%s flow=%.2f\n"
+			+ "Blue %.2f · Red %.2f\n"
+			+ "reach F%s H%s · bridge F%s H%s · corridor F%s"
+		)
+		% [
+			bridge_line,
+			probe.get("gx", 0),
+			probe.get("gy", 0),
+			probe.get("terrain", "?"),
+			probe.get("owner", "?"),
+			probe.get("claimable", false),
+			float(probe.get("flow_mult", 0.0)),
+			float(probe.get("pf", 0.0)),
+			float(probe.get("ph", 0.0)),
+			probe.get("f_reach", false),
+			probe.get("h_reach", false),
+			probe.get("f_bridge", false),
+			probe.get("h_bridge", false),
+			probe.get("f_corridor", false),
+		]
+	)
+
+
+func _on_inspect_toggled(on: bool) -> void:
+	_tile_inspect_active = on
+	if tile_probe_label:
+		tile_probe_label.visible = on
+	if on:
+		_update_tile_probe()
+	elif tile_probe_label:
+		tile_probe_label.text = ""
+
+
 func _sync_active_spawners_to_sim(pending_claims: Array = []) -> void:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return
 	var tc := territory_sim.tile_control
 	tc.sync_placed_spawners_from_map(battle_data)
+	tc.sync_bridge_corridors_from_map(battle_data, true)
 	territory_sim.claimable_tiles = tc.claimable_tile_count
 	_claimable_tiles = territory_sim.claimable_tiles
 	for cell in pending_claims:
 		if cell is Vector2i:
 			tc.claim_tile(cell.x, cell.y, BattleTileControlLib.OWNER_FRIENDLY)
+	var had_new_claims = pending_claims.size() > 0
 	if territory_sim.rust_live_ready and territory_sim.rust_field != null:
-		territory_sim.rust_field.sync_claimable_from(tc, battle_data, true)
-		territory_sim.rust_field.sync_spawners_from(tc)
+		if had_new_claims:
+			territory_sim.rust_field.sync_claimable_from(tc, battle_data, true)
+		territory_sim.rust_field.sync_spawners_from(tc)  # always needed for the new active pump
 	if territory_sim.use_gpu_for_live() and territory_sim.gpu_field != null:
-		territory_sim.gpu_field.refresh_claimable_from(battle_data, tc)
+		if had_new_claims:
+			territory_sim.gpu_field.refresh_claimable_from(battle_data, tc)
+	# No forced owner visual here when no new claims (outpost in already controlled land).
+	# The spawners list is synced so the new pressure source works. Marker visual will update the outpost color.
 
 
 func _sync_counts() -> void:
@@ -574,6 +1542,26 @@ func _sync_counts() -> void:
 	_sim_time = territory_sim.sim_time
 	_friendly_tiles = tc.friendly_tiles
 	_hostile_tiles = tc.hostile_tiles
+
+
+func _watch_fps_drops(fps: int) -> void:
+	_fps_log_cooldown = maxf(0.0, _fps_log_cooldown - 0.12)
+	if fps < 42:
+		_fps_low_streak += 1
+	else:
+		_fps_low_streak = 0
+		return
+	if _fps_low_streak < 4 or _fps_log_cooldown > 0.0:
+		return
+	_fps_low_streak = 0
+	_fps_log_cooldown = 8.0
+	RunLog.warn(
+		perf_format_log_line(
+			"fps_drop",
+			gather_perf_and_action_context(),
+			{"note": "likely_gpu"}
+		)
+	)
 
 
 func _on_play_area_resized(_fit: bool = false) -> void:
@@ -587,18 +1575,19 @@ func _on_play_area_resized(_fit: bool = false) -> void:
 	var play_size: Vector2 = play_area.size
 	if play_size.x < 8.0 or play_size.y < 8.0:
 		return
-	sub_viewport_container.stretch = false
-	sub_viewport.size = Vector2i(maxi(int(play_size.x), 1), maxi(int(play_size.y), 1))
+	sub_viewport_container.stretch = true
+	var scale: float = CFG.GLOBE_RENDER_SCALE
+	sub_viewport.size = Vector2i(
+		maxi(int(play_size.x * scale), 1),
+		maxi(int(play_size.y * scale), 1),
+	)
 
 
 func _update_hud() -> void:
 	var fp: float = 0.0
 	var ep: float = 0.0
-	if territory_sim != null and territory_sim.tile_control != null:
-		var totals: Vector2 = BattleTileFluidFieldLib.cumulative_power_totals(
-			territory_sim.tile_control.pressure_friendly,
-			territory_sim.tile_control.pressure_hostile,
-		)
+	if territory_sim != null:
+		var totals: Vector2 = territory_sim.power_totals()
 		fp = totals.x
 		ep = totals.y
 	blue_count_label.text = _format_supply(fp)
@@ -611,12 +1600,31 @@ func _update_hud() -> void:
 		red_resources_label.text = _format_resources_line(_hostile_resources)
 	time_label.text = _format_sim_time(_sim_time)
 	supply_label.text = "Supply %s" % _format_supply(_supply)
-	status_label.text = "World Conquest  |  %s  |  x%.0f  |  drag globe · scroll zoom" % [
-		"PAUSED" if _paused else "LIVE",
-		_speed_mult,
-	]
+	var fps := Engine.get_frames_per_second()
+	_watch_fps_drops(int(fps))
+	if _show_perf_hud and perf_hud_label:
+		perf_hud_label.visible = true
+		perf_hud_label.text = perf_build_hud_text(gather_perf_and_action_context())
+	elif perf_hud_label:
+		perf_hud_label.visible = false
+	status_label.text = (
+		"World Conquest  |  %s  |  x%.0f  |  soldiers %d/%d  |  FPS %d  |  drag globe · scroll zoom"
+		% [
+			"PAUSED" if _paused else "LIVE",
+			_speed_mult,
+			territory_sim.agent_living_count() if territory_sim != null else 0,
+			CFG.GLOBAL_SOLDIER_CAP,
+			int(fps),
+		]
+	)
 	speed_button.text = "▶ x%.0f" % _speed_mult
 	spawner_button.text = "Outpost (%s)" % _format_supply(float(CFG.SPAWNER_COST_SUPPLY))
+	if barracks_button:
+		barracks_button.text = "Barracks (%s)" % _format_supply(float(CFG.BARRACKS_COST_SUPPLY))
+	if corridor_link_button:
+		corridor_link_button.text = "Land Bridge (%s)" % _format_supply(
+			float(CFG.CORRIDOR_LINK_COST_SUPPLY)
+		)
 
 
 func _style_summary_hud() -> void:
@@ -627,23 +1635,57 @@ func _style_summary_hud() -> void:
 
 func _update_build_ui() -> void:
 	spawner_button.set_block_signals(true)
-	spawner_button.button_pressed = _build_spawner_active
+	spawner_button.button_pressed = _build_mode == OutpostBuildLib.KIND_SPAWNER
 	spawner_button.set_block_signals(false)
-	if _build_spawner_active:
+	if corridor_link_button:
+		corridor_link_button.set_block_signals(true)
+		corridor_link_button.button_pressed = _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK
+		corridor_link_button.set_block_signals(false)
+	if barracks_button:
+		barracks_button.set_block_signals(true)
+		barracks_button.button_pressed = _build_mode == OutpostBuildLib.KIND_BARRACKS
+		barracks_button.set_block_signals(false)
+	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
 		build_hint_label.text = (
-			"Left-click land (%s). Road from HQ/outpost, then ~%.0fs build. Hostile tiles deal more DPS. Esc cancel."
+			(
+				"Left-click connected land (%s). Use Land Bridge first for foreign coasts. "
+				+ "~%.0fs build after any bridge segment. Esc cancel."
+			)
 			% [_format_supply(float(CFG.SPAWNER_COST_SUPPLY)), CFG.OUTPOST_BUILD_SEC]
+		)
+		_update_build_hover_hint()
+	elif _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		build_hint_label.text = (
+			(
+				"Left-click connected land (%s). Road builds, then ~%.0fs barracks build. "
+				+ "Spawns cost Au. Esc cancel."
+			)
+			% [_format_supply(float(CFG.BARRACKS_COST_SUPPLY)), CFG.BARRACKS_BUILD_SEC]
+		)
+		_update_build_hover_hint()
+	elif _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		build_hint_label.text = (
+			(
+				"Left-click enemy or neutral coast (%s). Inland clicks snap to shore. "
+				+ "Route crosses water — short land leg from your territory, then bridge to landing. Esc cancel."
+			)
+			% _format_supply(float(CFG.CORRIDOR_LINK_COST_SUPPLY))
 		)
 		_update_build_hover_hint()
 	else:
 		build_hint_label.text = (
-			"Place outposts on any land. Enemy territory %.0f DPS, %d HP while building."
-			% [CFG.OUTPOST_ENEMY_DPS, int(CFG.OUTPOST_MAX_HEALTH)]
+			"Outpost (%s) · Barracks (%s) · Land Bridge (%s)"
+			% [
+				_format_supply(float(CFG.SPAWNER_COST_SUPPLY)),
+				_format_supply(float(CFG.BARRACKS_COST_SUPPLY)),
+				_format_supply(float(CFG.CORRIDOR_LINK_COST_SUPPLY)),
+			]
 		)
 
 
 func _update_build_hover_hint() -> void:
-	if not _build_spawner_active:
+	if not _is_build_mode_active():
+		_clear_placement_preview()
 		return
 	var grid: Vector2i = _mouse_to_grid()
 	if grid == _hover_hint_grid:
@@ -652,25 +1694,107 @@ func _update_build_hover_hint() -> void:
 	if not _is_on_map_grid(grid.x, grid.y):
 		build_hint_label.text = "Move cursor over the globe."
 		return
-	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		battle_data.placed_structures, _player_home
-	)
-	var reject: String = _spawner_reject_reason(grid.x, grid.y)
+	var reject: String = _placement_hover_reject(grid.x, grid.y)
 	if reject != "":
 		build_hint_label.text = "(%d,%d) — %s" % [grid.x, grid.y, reject]
-	elif OutpostBuildLib.needs_bridge_route(battle_data, grid, sources):
-		build_hint_label.text = (
-			"(%d,%d) Island — click to plan bridge route." % [grid.x, grid.y]
-		)
-	else:
-		build_hint_label.text = "(%d,%d) Click to place — %s" % [
-			grid.x, grid.y, _outpost_risk_hint(grid.x, grid.y),
-		]
+		_clear_placement_preview()
+		return
+	build_hint_label.text = "(%d,%d) Click to place — %s" % [
+		grid.x, grid.y, _placement_risk_hint(grid.x, grid.y),
+	]
+	_request_hover_route_preview(grid)
+
+
+func _request_hover_route_preview(grid: Vector2i) -> void:
+	if not CFG.ROUTE_HOVER_PREVIEW:
+		return
+	if route_planner == null or not route_planner.ready or battle_data == null:
+		return
+	if _build_mode == "":
+		return
+	if _route_hover_clock < CFG.OUTPOST_HOVER_REPLAN_SEC:
+		return
+	_route_hover_clock = 0.0
+	var precheck: Dictionary = _placement_precheck(grid, _build_mode)
+	if str(precheck.get("reject", "")) != "":
+		_clear_placement_preview()
+		return
+	var landing: Vector2i = precheck.get("landing", Vector2i(-1, -1))
+	if landing.x < 0:
+		_clear_placement_preview()
+		return
+	if landing == _hover_landing_grid and _route_hover_request_id >= 0:
+		return
+	_hover_landing_grid = landing
+	_route_pending_landing = landing
+	if _route_hover_request_id >= 0:
+		route_planner.cancel_route(_route_hover_request_id)
+	var allow_astar: bool = CFG.OUTPOST_HOVER_ALLOW_ASTAR
+	_route_hover_request_id = route_planner.start_route_async(landing, _build_mode, allow_astar)
+
+
+func _apply_build_mode(mode: String) -> void:
+	_build_mode = mode
+	_route_hover_clock = 0.0
+	_invalidate_hover_path_cache()
+	if mode != "":
+		_ensure_route_planner()
+		if (
+			_structure_sources_version != _route_sources_synced
+			or _road_network_version != _route_road_synced
+		):
+			_refresh_route_infra_and_portals()
+			_route_sources_synced = _structure_sources_version
+			_route_road_synced = _road_network_version
+			_route_road_debounce = 0.0
+	if mode == OutpostBuildLib.KIND_SPAWNER and barracks_button:
+		barracks_button.set_block_signals(true)
+		barracks_button.button_pressed = false
+		barracks_button.set_block_signals(false)
+		if corridor_link_button:
+			corridor_link_button.set_block_signals(true)
+			corridor_link_button.button_pressed = false
+			corridor_link_button.set_block_signals(false)
+	elif mode == OutpostBuildLib.KIND_BARRACKS:
+		spawner_button.set_block_signals(true)
+		spawner_button.button_pressed = false
+		spawner_button.set_block_signals(false)
+		if corridor_link_button:
+			corridor_link_button.set_block_signals(true)
+			corridor_link_button.button_pressed = false
+			corridor_link_button.set_block_signals(false)
+	elif mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		spawner_button.set_block_signals(true)
+		spawner_button.button_pressed = false
+		spawner_button.set_block_signals(false)
+		if barracks_button:
+			barracks_button.set_block_signals(true)
+			barracks_button.button_pressed = false
+			barracks_button.set_block_signals(false)
+	if mode == "":
+		_clear_placement_preview()
+	_update_build_ui()
 
 
 func _on_spawner_toggled(on: bool) -> void:
-	_build_spawner_active = on
-	_update_build_ui()
+	if on:
+		_apply_build_mode(OutpostBuildLib.KIND_SPAWNER)
+	elif _build_mode == OutpostBuildLib.KIND_SPAWNER:
+		_apply_build_mode("")
+
+
+func _on_corridor_link_toggled(on: bool) -> void:
+	if on:
+		_apply_build_mode(OutpostBuildLib.KIND_CORRIDOR_LINK)
+	elif _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		_apply_build_mode("")
+
+
+func _on_barracks_toggled(on: bool) -> void:
+	if on:
+		_apply_build_mode(OutpostBuildLib.KIND_BARRACKS)
+	elif _build_mode == OutpostBuildLib.KIND_BARRACKS:
+		_apply_build_mode("")
 
 
 func _on_pause_pressed() -> void:
@@ -715,9 +1839,16 @@ func _on_back_pressed() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		_build_spawner_active = false
-		_update_build_ui()
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F3:
+			_show_perf_hud = not _show_perf_hud
+			if perf_hud_label:
+				perf_hud_label.visible = _show_perf_hud
+				if _show_perf_hud:
+					perf_hud_label.text = perf_build_hud_text(gather_perf_and_action_context())
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_ESCAPE:
+			_apply_build_mode("")
 
 
 func _is_on_map_grid(gx: int, gy: int) -> bool:
@@ -742,8 +1873,137 @@ func _format_resources_line(wallet: Array[float]) -> String:
 	return "  ".join(parts)
 
 
+## QA-only: wire a live map + sim onto an instantiated screen (globe_map must exist from .tscn).
+func qa_perf_attach_live_state(bmap, sim: BattleTerritorySimLib) -> void:
+	battle_data = bmap
+	territory_sim = sim
+	_claimable_tiles = territory_sim.claimable_tiles
+	_player_home = bmap.player_home_grid
+	_enemy_home = bmap.enemy_home_grid
+	_sync_counts()
+	_loading = false
+	_paused = false
+	_battle_finished = false
+	_perf_action_cooldowns.clear()
+	OutpostBuildLib.prepare_land_components(battle_data)
+	if globe_map != null:
+		globe_map.setup(battle_data)
+
+
 func _format_sim_time(t: float) -> String:
 	var day: int = int(t / 60.0) + 1
 	var sec: int = int(t) % 60
-	var min: int = int(t / 60.0) % 60
-	return "Day %d  %02d:%02d" % [day, min, sec]
+	var minute: int = int(t / 60.0) % 60
+	return "Day %d  %02d:%02d" % [day, minute, sec]
+
+
+static func perf_gather_gpu_counters() -> Dictionary:
+	return {
+		"draw_calls": int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
+		"objects": int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)),
+		"video_mem_mb": float(Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED)) / 1048576.0,
+		"texture_mem_mb": float(Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED)) / 1048576.0,
+	}
+
+
+static func perf_gather_action_context(fields: Dictionary) -> Dictionary:
+	return {
+		"sim_steps": int(fields.get("sim_steps", 0)),
+		"overlay_delta": int(fields.get("overlay_delta", 0)),
+		"gpu_pending": bool(fields.get("gpu_pending", false)),
+	}
+
+
+static func perf_format_action_tag(action: String, fields: Dictionary = {}) -> String:
+	var parts: PackedStringArray = PackedStringArray(["action=%s" % action])
+	for key in fields.keys():
+		parts.append("%s=%s" % [str(key), str(fields[key])])
+	return " ".join(parts)
+
+
+static func perf_format_log_line(action: String, snapshot: Dictionary, extra: Dictionary = {}) -> String:
+	var fields: Dictionary = extra.duplicate()
+	fields["fps"] = int(snapshot.get("fps", 0.0))
+	var cpu: Dictionary = snapshot.get("cpu", {})
+	var gpu: Dictionary = snapshot.get("gpu", {})
+	fields["cpu_p99"] = "%.1fms" % float(cpu.get("p99_ms", 0.0))
+	fields["draw"] = int(gpu.get("draw_calls", 0))
+	fields["vid_mb"] = "%.1f" % float(gpu.get("video_mem_mb", 0.0))
+	var action_ctx: Dictionary = snapshot.get("action", {})
+	if not action_ctx.is_empty():
+		fields["sim_steps"] = int(action_ctx.get("sim_steps", 0))
+		fields["overlay_delta"] = int(action_ctx.get("overlay_delta", 0))
+		fields["gpu_pending"] = int(action_ctx.get("gpu_pending", false))
+	return perf_format_action_tag(action, fields)
+
+
+static func perf_build_hud_text(snapshot: Dictionary) -> String:
+	var fps := float(snapshot.get("fps", 0.0))
+	var cpu: Dictionary = snapshot.get("cpu", {})
+	var gpu: Dictionary = snapshot.get("gpu", {})
+	var action: Dictionary = snapshot.get("action", {})
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("FPS %.0f" % fps)
+	if not cpu.is_empty():
+		lines.append(
+			"CPU p50=%.1f p95=%.1f p99=%.1f ms (min_fps %.0f)"
+			% [
+				float(cpu.get("p50_ms", 0.0)),
+				float(cpu.get("p95_ms", 0.0)),
+				float(cpu.get("p99_ms", 0.0)),
+				float(cpu.get("min_fps", 0.0)),
+			]
+		)
+	else:
+		lines.append("CPU (warming up)")
+	lines.append(
+		"GPU draw=%d objs=%d vid=%.0fMB tex=%.0fMB"
+		% [
+			int(gpu.get("draw_calls", 0)),
+			int(gpu.get("objects", 0)),
+			float(gpu.get("video_mem_mb", 0.0)),
+			float(gpu.get("texture_mem_mb", 0.0)),
+		]
+	)
+	lines.append(
+		"ctx sim_steps=%d overlay_delta=%d gpu_pending=%s"
+		% [
+			int(action.get("sim_steps", 0)),
+			int(action.get("overlay_delta", 0)),
+			"yes" if bool(action.get("gpu_pending", false)) else "no",
+		]
+	)
+	return "\n".join(lines)
+
+
+func gather_perf_and_action_context(sim_steps: int = -1) -> Dictionary:
+	if sim_steps < 0:
+		sim_steps = _last_frame_sim_steps
+	var cpu_summary: Dictionary = {}
+	if _frame_profiler != null:
+		cpu_summary = _frame_profiler.summary()
+	var gpu_pending := false
+	if globe_map != null and globe_map.has_method("owner_gpu_upload_pending"):
+		gpu_pending = globe_map.owner_gpu_upload_pending()
+	return {
+		"fps": float(Engine.get_frames_per_second()),
+		"cpu": cpu_summary,
+		"gpu": perf_gather_gpu_counters(),
+		"action": perf_gather_action_context({
+			"sim_steps": sim_steps,
+			"overlay_delta": _last_overlay_delta_count,
+			"gpu_pending": gpu_pending,
+		}),
+	}
+
+
+func _decrement_perf_action_cooldowns(delta: float) -> void:
+	for key in _perf_action_cooldowns.keys():
+		_perf_action_cooldowns[key] = maxf(0.0, float(_perf_action_cooldowns[key]) - delta)
+
+
+func _maybe_log_perf_action(action: String, fields: Dictionary, cooldown_sec: float) -> void:
+	if float(_perf_action_cooldowns.get(action, 0.0)) > 0.0:
+		return
+	_perf_action_cooldowns[action] = cooldown_sec
+	RunLog.info(perf_format_log_line(action, gather_perf_and_action_context(), fields))

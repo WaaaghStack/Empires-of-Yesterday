@@ -144,7 +144,7 @@ stretch = true
 [node name="SubViewport" type="SubViewport" parent="PlayArea/SubViewportContainer"]
 handle_input_locally = false
 size = Vector2i(1152, 648)
-render_target_update_mode = 4
+render_target_update_mode = 2
 
 [node name="GlobeMap" type="Node3D" parent="PlayArea/SubViewportContainer/SubViewport"]
 script = ExtResource("2")
@@ -192,6 +192,42 @@ layout_mode = 2
 toggle_mode = true
 text = "Outpost (400)"
 
+[node name="BarracksButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+toggle_mode = true
+text = "Barracks (400)"
+
+[node name="CorridorLinkButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+toggle_mode = true
+text = "Land Bridge (250)"
+
+[node name="InspectButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+toggle_mode = true
+text = "Inspect"
+
+[node name="TileProbeLabel" type="Label" parent="HUD"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+text = ""
+
+[node name="PerfHudLabel" type="Label" parent="."]
+visible = false
+z_index = 45
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -300.0
+offset_top = 152.0
+offset_right = -8.0
+offset_bottom = 300.0
+grow_horizontal = 0
+theme_override_colors/font_color = Color(0.88, 0.94, 1, 1)
+theme_override_font_sizes/font_size = 11
+text = ""
+
 [node name="EndOverlay" type="PanelContainer" parent="."]
 visible = false
 layout_mode = 1
@@ -214,3 +250,53 @@ layout_mode = 2
 horizontal_alignment = 1
 theme_override_font_sizes/font_size = 22
 text = "Battle Over"
+
+[node name="LoadingOverlay" type="PanelContainer" parent="."]
+z_index = 50
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 0
+
+[node name="Dim" type="ColorRect" parent="LoadingOverlay"]
+layout_mode = 2
+mouse_filter = 2
+color = Color(0.02, 0.03, 0.05, 0.92)
+
+[node name="Center" type="CenterContainer" parent="LoadingOverlay"]
+layout_mode = 2
+
+[node name="LoadPanel" type="PanelContainer" parent="LoadingOverlay/Center"]
+custom_minimum_size = Vector2(380, 0)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="LoadingOverlay/Center/LoadPanel"]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="Title" type="Label" parent="LoadingOverlay/Center/LoadPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "World Conquest"
+horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="LoadingOverlay/Center/LoadPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.65, 0.75, 1)
+text = "Preparing Earth globe…"
+horizontal_alignment = 1
+
+[node name="StatusLabel" type="Label" parent="LoadingOverlay/Center/LoadPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.75, 0.82, 0.9, 1)
+text = "Starting…"
+horizontal_alignment = 1
+
+[node name="ProgressBar" type="ProgressBar" parent="LoadingOverlay/Center/LoadPanel/VBox"]
+custom_minimum_size = Vector2(0, 14)
+layout_mode = 2
+max_value = 100.0
+show_percentage = false

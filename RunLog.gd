@@ -100,6 +100,10 @@ func get_session_path() -> String:
 	return _latest_path
 
 
+func flush_now() -> void:
+	_flush_pending(true)
+
+
 func get_workspace_log_dir() -> String:
 	return _log_dir
 
