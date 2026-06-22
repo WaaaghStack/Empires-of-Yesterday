@@ -30,14 +30,19 @@ func end_phase(phase_name: String, start_usec: int) -> void:
 	_phase_ms[phase_name] = float(Time.get_ticks_usec() - start_usec) / 1000.0
 
 
-func end_frame() -> void:
+func reset_samples() -> void:
+	_frame_times_ms.clear()
+
+
+func end_frame(record_sample: bool = true) -> void:
 	if _frame_start_usec <= 0:
 		return
 	var total_ms: float = float(Time.get_ticks_usec() - _frame_start_usec) / 1000.0
-	_frame_times_ms.append(total_ms)
-	if _frame_times_ms.size() > MAX_SAMPLES:
-		_frame_times_ms.pop_front()
-	if spike_log_enabled and total_ms > SPIKE_MS:
+	if record_sample:
+		_frame_times_ms.append(total_ms)
+		if _frame_times_ms.size() > MAX_SAMPLES:
+			_frame_times_ms.pop_front()
+	if spike_log_enabled and record_sample and total_ms > SPIKE_MS:
 		var parts: PackedStringArray = PackedStringArray()
 		for key in _phase_ms.keys():
 			parts.append("%s=%.2fms" % [key, float(_phase_ms[key])])

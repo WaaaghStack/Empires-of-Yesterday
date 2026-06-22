@@ -177,6 +177,8 @@ func _bootstrap_async() -> void:
 		sub_viewport.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
 	loading_overlay.visible = false
 	_loading = false
+	if _frame_profiler != null:
+		_frame_profiler.reset_samples()
 	RunLog.info(
 		"World Conquest — %dx%d Earth globe" % [battle_data.grid_width, battle_data.grid_height]
 	)
@@ -235,10 +237,10 @@ func _process(delta: float) -> void:
 	if _frame_profiler != null:
 		_frame_profiler.begin_frame()
 	if _loading:
-		_end_process_profiler_frame()
+		_end_process_profiler_frame(false)
 		return
 	if _battle_finished or battle_data == null or territory_sim == null:
-		_end_process_profiler_frame()
+		_end_process_profiler_frame(false)
 		return
 	_decrement_perf_action_cooldowns(delta)
 
@@ -354,9 +356,16 @@ func _process(delta: float) -> void:
 	_end_process_profiler_frame()
 
 
-func _end_process_profiler_frame() -> void:
+func _end_process_profiler_frame(record_sample: bool = true) -> void:
 	if _frame_profiler != null:
-		_frame_profiler.end_frame()
+		_frame_profiler.end_frame(record_sample)
+
+
+func request_outpost_visual_refresh(roads: bool, markers: bool) -> void:
+	if roads:
+		_outpost_road_dirty = true
+	if markers:
+		_outpost_marker_dirty = true
 
 
 func _setup_territory_backend() -> void:
@@ -2005,6 +2014,8 @@ func _maybe_log_perf_action(action: String, fields: Dictionary, cooldown_sec: fl
 	RunLog.info(line)
 
 
-func qa_perf_clear_recent_action_lines() -> void:
+func reset_perf_action_telemetry() -> void:
 	_recent_perf_action_lines.clear()
 	_perf_action_cooldowns.clear()
+	if _frame_profiler != null:
+		_frame_profiler.reset_samples()

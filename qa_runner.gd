@@ -248,7 +248,12 @@ func _validate_perf_helpers() -> void:
 	_log("-- Perf HUD / screen _process / action-tag helpers --")
 	var scratch := OS.get_environment("GROK_GOAL_SCRATCH")
 	if not scratch.is_empty():
-		for stale_name in ["perf_action_lines.txt", "screen_process_p99.txt"]:
+		for stale_name in [
+			"perf_action_lines.txt",
+			"screen_process_p99.txt",
+			"qa_report.txt",
+			"qa_exit_codes.txt",
+		]:
 			var stale_path := scratch.path_join(stale_name)
 			if FileAccess.file_exists(stale_path):
 				DirAccess.remove_absolute(stale_path)
@@ -276,10 +281,16 @@ func _validate_perf_helpers() -> void:
 		screen.queue_free()
 		return
 	_log("OK  WorldConquestScreen bootstrap ready frames=%d" % bootstrap_frames)
-	if screen.has_method("qa_perf_clear_recent_action_lines"):
-		screen.qa_perf_clear_recent_action_lines()
-	screen.set("_outpost_road_dirty", true)
-	screen.set("_outpost_marker_dirty", true)
+	if not screen.has_method("reset_perf_action_telemetry"):
+		_fail("WorldConquestScreen missing reset_perf_action_telemetry")
+		screen.queue_free()
+		return
+	screen.reset_perf_action_telemetry()
+	if screen.has_method("request_outpost_visual_refresh"):
+		screen.request_outpost_visual_refresh(true, true)
+	else:
+		screen.set("_outpost_road_dirty", true)
+		screen.set("_outpost_marker_dirty", true)
 	await get_tree().process_frame
 	for _fi in range(PERF_LIVE_FRAMES):
 		await get_tree().process_frame
@@ -626,3 +637,20 @@ func _write_report() -> void:
 		for line in _lines:
 			f.store_line(line)
 		f.close()
+	_mirror_report_to_scratch()
+
+
+func _mirror_report_to_scratch() -> void:
+	var scratch := OS.get_environment("GROK_GOAL_SCRATCH")
+	if scratch.is_empty():
+		return
+	DirAccess.make_dir_recursive_absolute(scratch)
+	var src := ProjectSettings.globalize_path(REPORT_PATH)
+	if not FileAccess.file_exists(src):
+		return
+	var dst := scratch.path_join("qa_report.txt")
+	var text := FileAccess.get_file_as_string(src)
+	var out := FileAccess.open(dst, FileAccess.WRITE)
+	if out:
+		out.store_string(text)
+		out.close()
