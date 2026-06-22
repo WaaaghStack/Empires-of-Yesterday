@@ -88,6 +88,7 @@ var _last_mouse: Vector2 = Vector2.ZERO
 var _owner_gpu_upload_pending: bool = false
 var _last_owner_gpu_upload_usec: int = 0
 var _owner_gpu_upload_committed: bool = false
+var _owner_overlay_patch_frame: int = -1
 var _marker_sid_slot: Dictionary = {}
 
 
@@ -511,21 +512,34 @@ func _upload_owner_gpu_textures(force: bool = false) -> void:
 	if not force:
 		_owner_gpu_upload_pending = true
 		return
-	_commit_owner_gpu_textures()
+	_commit_owner_gpu_textures(true)
 
 
 func owner_gpu_upload_pending() -> bool:
 	return _owner_gpu_upload_pending
 
 
+func owner_overlay_patch_frame() -> int:
+	return _owner_overlay_patch_frame
+
+
+func _overlay_patch_blocks_gpu_commit() -> bool:
+	return (
+		_owner_overlay_patch_frame >= 0
+		and Engine.get_process_frames() == _owner_overlay_patch_frame
+	)
+
+
 func flush_pending_owner_gpu_upload(defer_if_overlay_frame: bool = false) -> bool:
 	if defer_if_overlay_frame or not _owner_gpu_upload_pending:
+		return false
+	if _overlay_patch_blocks_gpu_commit():
 		return false
 	var min_interval_usec: int = int(1_000_000.0 / WorldConquestConfigLib.OVERLAY_GPU_UPLOAD_MAX_HZ)
 	var now_usec: int = Time.get_ticks_usec()
 	if now_usec - _last_owner_gpu_upload_usec < min_interval_usec:
 		return false
-	_commit_owner_gpu_textures()
+	_commit_owner_gpu_textures(false)
 	return true
 
 
@@ -535,8 +549,11 @@ func consume_owner_gpu_upload_committed() -> bool:
 	return committed
 
 
-func _commit_owner_gpu_textures() -> void:
+func _commit_owner_gpu_textures(allow_same_frame_as_patch: bool = false) -> void:
 	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null or _owner_tex_gpu == null:
+		return
+	if not allow_same_frame_as_patch and _overlay_patch_blocks_gpu_commit():
+		_owner_gpu_upload_pending = true
 		return
 	var w: int = battle_data.grid_width
 	var h: int = battle_data.grid_height
@@ -574,6 +591,7 @@ func apply_ownership_overlay(owners: PackedByteArray) -> void:
 		var row: int = gy * w
 		_owner_bytes_cache[row + w - 1] = _owner_bytes_cache[row]
 	_rebuild_border_mask_full()
+	_owner_overlay_patch_frame = -1
 	_upload_owner_gpu_textures(true)
 
 ## Fast path for when we have pre-baked R8 display bytes from Rust (no 65k GDScript loop at all).
@@ -592,6 +610,7 @@ func apply_ownership_display_bytes(bytes: PackedByteArray) -> void:
 		_owner_bytes_cache[i] = bytes[i]
 	_border_bytes_cache.resize(n)
 	_rebuild_border_mask_full()
+	_owner_overlay_patch_frame = -1
 	_upload_owner_gpu_textures(true)
 
 
@@ -625,6 +644,7 @@ func apply_ownership_overlay_delta(
 		_rebuild_border_mask_full()
 	else:
 		_update_border_mask_for_indices(indices)
+	_owner_overlay_patch_frame = Engine.get_process_frames()
 	_upload_owner_gpu_textures()
 
 

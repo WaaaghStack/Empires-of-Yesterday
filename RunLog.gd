@@ -108,6 +108,17 @@ func get_workspace_log_dir() -> String:
 	return _log_dir
 
 
+## Safe logging for scripts compiled before the RunLog autoload is registered (-s smoke tests).
+static func emit_info(msg: String) -> void:
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree != null:
+		var rl: Node = tree.root.get_node_or_null("RunLog")
+		if rl != null and rl.has_method("info"):
+			rl.call("info", msg)
+			return
+	print(msg)
+
+
 func get_disk_hint() -> String:
 	return _latest_path
 

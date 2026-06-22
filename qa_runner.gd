@@ -355,6 +355,8 @@ func _validate_fps_fix_paths() -> void:
 	_log("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up) --")
 	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
 	if not FrameBudgetProfilerLib.budget_allows_catchup(10.0, WorldConquestConfigLib.FRAME_BUDGET_MS):
 		_fail("budget_allows_catchup should allow 10ms prior frame")
 		return
@@ -377,47 +379,89 @@ func _validate_fps_fix_paths() -> void:
 		return
 	var globe = screen.get("globe_map")
 	var battle_data = screen.get("battle_data")
-	var territory_sim = screen.get("territory_sim")
-	if globe == null or battle_data == null or territory_sim == null:
-		_fail("fps fix validate missing globe/battle_data/territory_sim")
+	if globe == null or battle_data == null:
+		_fail("fps fix validate missing globe/battle_data")
 		screen.queue_free()
 		return
-	if not globe.has_method("sync_roads") or not globe.has_method("flush_pending_owner_gpu_upload"):
-		_fail("EarthGlobeMap missing incremental/defer methods")
+	var home: Vector2i = screen.get("_player_home")
+	var w: int = battle_data.grid_width
+	var next_id: int = 200
+	for i in range(10):
+		var gy: int = home.y
+		var path: Array[Vector2i] = [home]
+		var cx: int = home.x
+		for step in range(5):
+			cx = (cx + 1 + i) % w
+			path.append(Vector2i(cx, gy))
+		var packed: PackedInt32Array = OutpostBuildLib.path_to_packed_keys(path, w)
+		var landing: Vector2i = path[path.size() - 1]
+		battle_data.placed_structures.append({
+			"id": next_id + i,
+			"team": BattleTileControlLib.OWNER_FRIENDLY,
+			"gx": landing.x,
+			"gy": landing.y,
+			"kind": "spawner",
+			"state": OutpostBuildLib.STATE_CONNECTING,
+			"path_built": 1.0,
+			"path_len": path.size(),
+			"path_keys": packed,
+		})
+		screen.call("request_outpost_visual_refresh", true, true, next_id + i)
+		for _warm in range(8):
+			await get_tree().process_frame
+	var patch_idx: int = battle_data.cell_index(home.x, home.y)
+	var test_idxs := PackedInt32Array([patch_idx])
+	var test_vals := PackedByteArray([BattleTileControlLib.OWNER_FRIENDLY])
+	globe.apply_ownership_overlay_delta(test_idxs, test_vals)
+	if globe.flush_pending_owner_gpu_upload():
+		_fail("gpu flush committed on same frame as overlay delta patch")
 		screen.queue_free()
 		return
-	globe.sync_roads(battle_data.placed_structures, [1])
-	globe.flush_pending_owner_gpu_upload(true)
-	if globe.flush_pending_owner_gpu_upload(false):
-		_fail("gpu flush should respect defer_if_overlay_frame")
-		screen.queue_free()
-		return
-	screen.set("_defer_gpu_flush_this_frame", true)
 	await get_tree().process_frame
-	if screen.has_method("_patch_ownership_overlay"):
-		screen.call("_patch_ownership_overlay")
+	for st_v in battle_data.placed_structures:
+		var st: Dictionary = st_v
+		if int(st.get("id", -1)) < next_id:
+			continue
+		st["state"] = OutpostBuildLib.STATE_ACTIVE
+		st["path_built"] = float(st.get("path_len", 1))
+	for _settle in range(30):
+		await get_tree().process_frame
 	var profiler = screen.get("_frame_profiler")
 	if profiler == null:
 		_fail("fps fix validate missing _frame_profiler")
 		screen.queue_free()
 		return
+	profiler.reset_samples()
 	for _fi in range(120):
 		await get_tree().process_frame
 	var summary: Dictionary = profiler.summary()
 	if summary.is_empty():
-		_fail("fps fix validate profiler summary empty after live frames")
+		_fail("fps fix validate profiler summary empty after construction frames")
 		screen.queue_free()
 		return
 	var p99: float = float(summary.get("p99_ms", 999.0))
 	_log(
-		"FPS fix validate bootstrap=%d p99_ms=%.3f samples=%d"
-		% [bootstrap_frames, p99, int(summary.get("samples", 0))]
+		"FPS fix validate bootstrap=%d structures=%d p99_ms=%.3f samples=%d"
+		% [bootstrap_frames, battle_data.placed_structures.size(), p99, int(summary.get("samples", 0))]
 	)
 	if p99 > 20.0:
 		_fail("fps fix validate p99 %.3f exceeds 20ms gate" % p99)
 		screen.queue_free()
 		return
-	_log("OK  fps fix paths validate p99=%.3f" % p99)
+	if not screen.has_method("get_recent_perf_action_lines"):
+		_fail("fps fix validate missing get_recent_perf_action_lines")
+		screen.queue_free()
+		return
+	var action_lines: Array = screen.get_recent_perf_action_lines()
+	var joined: String = "\n".join(action_lines)
+	for req_tag in PERF_REQUIRED_ACTION_TAGS:
+		if not joined.contains(req_tag):
+			_fail("fps fix validate missing action tag: %s" % req_tag)
+			screen.queue_free()
+			return
+	for line in action_lines:
+		_log(str(line))
+	_log("OK  fps fix paths validate p99=%.3f tags_ok=yes" % p99)
 	screen.queue_free()
 
 

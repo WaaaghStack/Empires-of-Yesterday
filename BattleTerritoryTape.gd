@@ -202,7 +202,8 @@ func bake_display_frames(map_data, progress_out: Dictionary = {}) -> void:
 			_bake_display_frames_parallel(map_data, progress_out, total, workers)
 	_baked_image_cache.clear()
 	bake_ms = float(Time.get_ticks_usec() - t0) / 1000.0
-	RunLog.info("Territory bake %d frames in %.1f ms" % [total, bake_ms])
+	const RunLogLib := preload("res://RunLog.gd")
+	RunLogLib.emit_info("Territory bake %d frames in %.1f ms" % [total, bake_ms])
 
 
 func _warm_frame_caches_for_bake(total: int) -> void:

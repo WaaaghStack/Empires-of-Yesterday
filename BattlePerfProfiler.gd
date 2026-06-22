@@ -43,10 +43,8 @@ func log_round(round_index: int) -> void:
 		float(_round_total_us) / 1000.0,
 		" ".join(parts),
 	]
-	if Engine.has_singleton("RunLog") or ClassDB.class_exists("RunLog"):
-		RunLog.info(msg)
-	else:
-		print(msg)
+	const RunLogLib := preload("res://RunLog.gd")
+	RunLogLib.emit_info(msg)
 
 
 func log_resolve_summary(resolve_ms: float, round_count: int, frame_count: int) -> void:
@@ -59,10 +57,8 @@ func log_resolve_summary(resolve_ms: float, round_count: int, frame_count: int) 
 		"BattlePerf resolve %.1fms %d rounds %d frames | %s"
 		% [resolve_ms, round_count, frame_count, " ".join(parts)]
 	)
-	if Engine.has_singleton("RunLog") or ClassDB.class_exists("RunLog"):
-		RunLog.info(msg)
-	else:
-		print(msg)
+	const RunLogLib := preload("res://RunLog.gd")
+	RunLogLib.emit_info(msg)
 
 
 func measure_round(_sim, advance_fn: Callable) -> float:
