@@ -89,6 +89,8 @@ During World Conquest play, press **F3** to toggle a perf overlay (top-right) sh
 
 Off by default. HUD text is assembled by `WorldConquestScreen.perf_build_hud_text()` from `gather_perf_and_action_context()`.
 
+CPU samples exclude the loading screen: `_process` returns before `begin_frame()` while `_loading`, then `reset_samples()` runs once bootstrap completes.
+
 ## Action-tagged RunLog lines
 
 Hot paths emit `RunLog.info` / `warn` lines with an `action=` prefix plus fps/cpu/gpu counters, for example:

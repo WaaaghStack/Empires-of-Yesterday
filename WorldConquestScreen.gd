@@ -234,6 +234,7 @@ func _setup_world_visuals() -> void:
 
 
 func _process(delta: float) -> void:
+	# Perf: skip FrameBudgetProfiler during bootstrap loading (reset_samples after _loading=false).
 	if _loading:
 		return
 	if _battle_finished or battle_data == null or territory_sim == null:

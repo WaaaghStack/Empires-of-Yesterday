@@ -286,6 +286,7 @@ func _validate_perf_helpers() -> void:
 		screen.queue_free()
 		return
 	screen.reset_perf_action_telemetry()
+	_log("OK  profiler reset after bootstrap (loading _process returns before begin_frame)")
 	if screen.has_method("request_outpost_visual_refresh"):
 		screen.request_outpost_visual_refresh(true, true)
 	else:
