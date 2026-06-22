@@ -234,14 +234,12 @@ func _setup_world_visuals() -> void:
 
 
 func _process(delta: float) -> void:
-	if _frame_profiler != null:
-		_frame_profiler.begin_frame()
 	if _loading:
-		_end_process_profiler_frame(false)
 		return
 	if _battle_finished or battle_data == null or territory_sim == null:
-		_end_process_profiler_frame(false)
 		return
+	if _frame_profiler != null:
+		_frame_profiler.begin_frame()
 	_decrement_perf_action_cooldowns(delta)
 
 	var sim_steps: int = 0
