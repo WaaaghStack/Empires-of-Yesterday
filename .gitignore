@@ -12,4 +12,6 @@ rust/**/target/
 # Local QA output captures
 qa_bench_out.txt
 qa_run_output.txt
+qa_report.txt
+bridge_invasion_smoke_result.txt
 tools/smoke_out.txt

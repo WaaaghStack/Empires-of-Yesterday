@@ -9,9 +9,6 @@ const BattlePacingLib := preload("res://BattlePacing.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const BattleTileFluidFieldLib := preload("res://BattleTileFluidField.gd")
 const BattlePerfProfilerLib := preload("res://BattlePerfProfiler.gd")
-const BuildingDefinitionLib := preload("res://BuildingDefinition.gd")
-const GalaxyMapStateLib := preload("res://GalaxyMapState.gd")
-
 const MAX_ROUNDS_DEFAULT := 4800
 const DOMINANCE_FRAC := 0.92
 const DOMINANCE_ROUNDS := 10
@@ -26,6 +23,9 @@ const DECISIVE_HOLD_ROUNDS := 12
 const BACKEND_CPU := 0
 const BACKEND_GPU := 1
 const BACKEND_RUST := 2
+
+## Full-map pressure sums are expensive in GDScript; refresh at most once per ~sim-second.
+const POWER_TOTALS_REFRESH_ROUNDS := 14
 
 var battle_data = null
 var tile_control: BattleTileControlLib
@@ -62,6 +62,10 @@ var _dominance_hold_sec: float = 0.0
 var _stall_sec: float = 0.0
 var _decisive_hold_sec: float = 0.0
 var _profiler: BattlePerfProfilerLib
+var _power_totals: Vector2 = Vector2.ZERO
+var _power_totals_round: int = -0x7FFFFFFF
+## Aurelium upkeep deficit → soldier DPS (x=friendly, y=hostile), set by WorldConquestScreen.
+var agent_deficit_dps: Vector2 = Vector2.ZERO
 
 
 func setup(
@@ -110,6 +114,8 @@ func setup(
 	_dominance_hold_sec = 0.0
 	_stall_sec = 0.0
 	_decisive_hold_sec = 0.0
+	_power_totals = Vector2.ZERO
+	_power_totals_round = -0x7FFFFFFF
 	_prev_friendly = _tiles_owned_by_player()
 	_prev_hostile = _tiles_owned_by_enemy()
 	_apply_max_rounds_for_context()
@@ -167,6 +173,8 @@ func enable_rust_live() -> bool:
 		backend = BACKEND_RUST
 		gpu_live_ready = false
 		gpu_field = null
+		if _resolve_context == "world_conquest":
+			_configure_world_agents()
 	else:
 		backend = BACKEND_CPU
 		rust_field = null
@@ -251,13 +259,71 @@ func advance_dt(delta: float, max_steps: int = 12) -> Dictionary:
 func _advance_rust_rounds(count: int) -> int:
 	if count <= 0 or finished or tile_control == null or rust_field == null:
 		return 0
+	if rust_field.agents_active():
+		rust_field.set_agent_deficit_dps(agent_deficit_dps.x, agent_deficit_dps.y)
 	rust_field.step_rounds(tile_control, count)
 	round_index += count
-	for _i in range(count):
-		_check_conquest()
-		if finished:
-			break
+	# Rust syncs state once per batch — re-checking per round would see identical arrays.
+	_check_conquest()
 	return count
+
+
+func agents_ready() -> bool:
+	return rust_field != null and rust_field.agents_active()
+
+
+func sync_agent_nav() -> void:
+	if rust_field != null and tile_control != null:
+		rust_field.sync_agent_nav_from(tile_control)
+
+
+func try_spawn_soldier(barracks_id: int, team: int, bx: int, by: int) -> bool:
+	if rust_field == null:
+		return false
+	return rust_field.try_spawn_agent(barracks_id, team, bx, by)
+
+
+func notify_barracks_destroyed(barracks_id: int) -> void:
+	if rust_field != null:
+		rust_field.notify_barracks_destroyed(barracks_id)
+
+
+func agent_living_count() -> int:
+	if rust_field == null:
+		return 0
+	return rust_field.agent_living_count()
+
+
+func agent_living_for_barracks(barracks_id: int) -> int:
+	if rust_field == null:
+		return 0
+	return rust_field.agent_living_for_barracks(barracks_id)
+
+
+func get_agent_snapshot() -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.get_agent_snapshot()
+
+
+func _configure_world_agents() -> void:
+	if rust_field == null:
+		return
+	var cfg := WorldConquestConfigLib
+	rust_field.configure_agents({
+		"global_cap": cfg.GLOBAL_SOLDIER_CAP,
+		"per_barracks_cap": cfg.BARRACKS_MAX_ACTIVE_UNITS,
+		"max_hp": cfg.SOLDIER_MAX_HP,
+		"move_cells_per_sec": cfg.SOLDIER_MOVE_CELLS_PER_SEC,
+		"infra_move_mult": cfg.SOLDIER_INFRA_MOVE_MULT,
+		"aura_pressure": cfg.SOLDIER_AURA_PRESSURE,
+		"shoot_erode_per_sec": cfg.SOLDIER_SHOOT_ERODE_PER_SEC,
+		"orphan_dps": cfg.SOLDIER_ORPHAN_DPS,
+		"step_dt": cfg.SIM_DT,
+		"replans_per_tick": cfg.SOLDIER_REPLANS_PER_TICK,
+		"replan_fallback_rounds": cfg.SOLDIER_REPLAN_FALLBACK_ROUNDS,
+	})
+	sync_agent_nav()
 
 
 func advance_round() -> void:
@@ -266,7 +332,7 @@ func advance_round() -> void:
 	round_index += 1
 	if backend == BACKEND_GPU and gpu_field != null and gpu_field.ready:
 		gpu_field.step_round(tile_control)
-		if gpu_field.readback_owners():
+		if gpu_field.readback_owners_if_due(round_index):
 			gpu_field.copy_owners_to_cpu_buffer(tile_control.owners)
 			tile_control.friendly_tiles = gpu_field.friendly_tiles
 			tile_control.hostile_tiles = gpu_field.hostile_tiles
@@ -356,21 +422,8 @@ func get_seconds_per_cell() -> float:
 	return BattlePacingLib.seconds_per_cell(battle_data)
 
 
-static func _pressure_mods_from_galaxy(galaxy) -> Dictionary:
-	var friendly_bonus: float = 0.0
-	if galaxy == null:
-		return {"friendly_pressure": 0.0, "hostile_pressure": 0.04}
-	for node in galaxy.nodes:
-		if str(node.get("owner", "")) != GalaxyMapStateLib.OWNER_PLAYER:
-			continue
-		for building_id in node.get("buildings", []):
-			var def: Dictionary = BuildingDefinitionLib.lookup(str(building_id))
-			friendly_bonus += float(def.get("pressure_bonus", 0.0))
-			friendly_bonus += float(def.get("damage_bonus", 0.0)) * 1.5
-	return {
-		"friendly_pressure": clampf(friendly_bonus, 0.0, 0.85),
-		"hostile_pressure": 0.04 + clampf(friendly_bonus * 0.08, 0.0, 0.12),
-	}
+static func _pressure_mods_from_galaxy(_galaxy) -> Dictionary:
+	return {"friendly_pressure": 0.0, "hostile_pressure": 0.04}
 
 
 func _check_conquest() -> void:
@@ -479,14 +532,37 @@ func _tiles_owned_by_enemy() -> int:
 	return 0
 
 
-func _hostile_power_total() -> float:
+## Cached cumulative pressure totals (x friendly, y hostile); refreshed at most
+## once per POWER_TOTALS_REFRESH_ROUNDS. Used by the HUD and the zero-power win check.
+func power_totals() -> Vector2:
 	if tile_control == null:
-		return 0.0
-	var totals: Vector2 = BattleTileFluidFieldLib.cumulative_power_totals(
-		tile_control.pressure_friendly,
-		tile_control.pressure_hostile,
-	)
-	return totals.y
+		return Vector2.ZERO
+	if round_index - _power_totals_round >= POWER_TOTALS_REFRESH_ROUNDS:
+		var layers: Dictionary = _live_pressure_arrays()
+		_power_totals = BattleTileFluidFieldLib.cumulative_power_totals(
+			layers.get("friendly", PackedFloat32Array()),
+			layers.get("hostile", PackedFloat32Array()),
+		)
+		_power_totals_round = round_index
+	return _power_totals
+
+
+func _live_pressure_arrays() -> Dictionary:
+	if use_rust_for_live() and rust_field != null and rust_field.ready:
+		return {
+			"friendly": rust_field.get_pressure_friendly(),
+			"hostile": rust_field.get_pressure_hostile(),
+		}
+	if tile_control != null:
+		return {
+			"friendly": tile_control.pressure_friendly,
+			"hostile": tile_control.pressure_hostile,
+		}
+	return {"friendly": PackedFloat32Array(), "hostile": PackedFloat32Array()}
+
+
+func _hostile_power_total() -> float:
+	return power_totals().y
 
 
 func _estimate_max_rounds() -> int:

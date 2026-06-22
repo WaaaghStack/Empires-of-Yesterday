@@ -122,9 +122,22 @@ func bind_rooms(rooms: Array) -> void:
 	room_ids.clear()
 	room_positions = PackedVector2Array()
 	for room in rooms:
-		if room is Room:
-			room_ids.append(room.map_room_id)
-			room_positions.append(room.position)
+		if room == null:
+			continue
+		var map_id: String = ""
+		var pos: Vector2 = Vector2.ZERO
+		if room is Dictionary:
+			map_id = str(room.get("map_room_id", ""))
+			pos = room.get("position", Vector2.ZERO)
+		elif room is Object:
+			if "map_room_id" in room:
+				map_id = str(room.map_room_id)
+			if "position" in room:
+				pos = room.position
+		if map_id.is_empty():
+			continue
+		room_ids.append(map_id)
+		room_positions.append(pos)
 	var n := room_ids.size()
 	friendly_count_by_room = PackedInt32Array()
 	friendly_count_by_room.resize(n)

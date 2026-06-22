@@ -9,6 +9,28 @@ const STATE_CONNECTING := "connecting"
 const STATE_BUILDING := "building"
 const STATE_ACTIVE := "active"
 
+const KIND_SPAWNER := "spawner"
+const KIND_BARRACKS := "barracks"
+const KIND_CORRIDOR_LINK := "corridor_link"
+
+
+static func is_corridor_path_kind(kind: String) -> bool:
+	return kind == KIND_SPAWNER or kind == KIND_BARRACKS or kind == KIND_CORRIDOR_LINK
+
+
+static func is_pressure_spawner_kind(kind: String) -> bool:
+	return kind == KIND_SPAWNER
+
+
+static func has_build_phase(kind: String) -> bool:
+	return kind == KIND_SPAWNER or kind == KIND_BARRACKS
+
+
+static func build_sec_for_kind(kind: String) -> float:
+	if kind == KIND_BARRACKS:
+		return WorldConquestConfigLib.BARRACKS_BUILD_SEC
+	return WorldConquestConfigLib.OUTPOST_BUILD_SEC
+
 const _DIRS: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
 ]
@@ -28,18 +50,109 @@ static var _heap_f: PackedInt32Array = PackedInt32Array()
 static var _search_gen: int = 1
 static var _land_comp: PackedInt32Array = PackedInt32Array()
 static var _land_comp_seed: int = -1
+static var _snap_cache_seed: int = -1
+static var _snap_cache_click_key: int = -1
+static var _snap_cache_landing: Vector2i = Vector2i(-1, -1)
 
 
-static func operational_sources(structures: Array, home: Vector2i) -> Array[Vector2i]:
+static func invalidate_snap_cache() -> void:
+	_snap_cache_seed = -1
+	_snap_cache_click_key = -1
+	_snap_cache_landing = Vector2i(-1, -1)
+
+
+## Pack static terrain + infrastructure masks for Rust route planner.
+static func pack_route_snapshot(map_data, structures: Array) -> Dictionary:
+	if map_data == null:
+		return {}
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var n: int = w * h
+	if n <= 0:
+		return {}
+	prepare_land_components(map_data)
+	var land_mask := PackedByteArray()
+	var land_comp_out := PackedInt32Array()
+	var infra_mask := PackedByteArray()
+	land_mask.resize(n)
+	land_comp_out.resize(n)
+	infra_mask.resize(n)
+	var road_cells: Dictionary = road_cells_for_team(
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
+	)
+	var bridge_mask: PackedByteArray = _bridge_mask_for_team(
+		map_data, BattleTileControlLib.OWNER_FRIENDLY, structures
+	)
+	for gy in range(h):
+		for gx in range(w):
+			var idx: int = gy * w + gx
+			land_mask[idx] = 1 if map_data.is_land_cell(gx, gy) else 0
+			land_comp_out[idx] = _land_comp[idx] if idx < _land_comp.size() else -1
+			var infra: bool = road_cells.has(idx)
+			if idx < bridge_mask.size() and bridge_mask[idx] != 0:
+				infra = true
+			infra_mask[idx] = 1 if infra else 0
+	return {
+		"grid_w": w,
+		"grid_h": h,
+		"wrap_longitude": true,
+		"land_mask": land_mask,
+		"bridge_mask": infra_mask,
+		"land_comp": land_comp_out,
+	}
+
+
+## Road/bridge infra only — avoids re-scanning the full land grid on every road cell.
+static func pack_infra_mask_only(map_data, structures: Array) -> PackedByteArray:
+	if map_data == null:
+		return PackedByteArray()
+	var n: int = map_data.grid_width * map_data.grid_height
+	if n <= 0:
+		return PackedByteArray()
+	var infra_mask := PackedByteArray()
+	infra_mask.resize(n)
+	infra_mask.fill(0)
+	var road_cells: Dictionary = road_cells_for_team(
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
+	)
+	for key in road_cells:
+		var idx: int = int(key)
+		if idx >= 0 and idx < n:
+			infra_mask[idx] = 1
+	return infra_mask
+
+
+static func operational_sources(structures: Array, home: Vector2i, map_data = null) -> Array[Vector2i]:
 	var out: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	var key: String = ""
 	if home.x >= 0:
 		out.append(home)
+		seen["%d,%d" % [home.x, home.y]] = true
 	for st: Dictionary in structures:
 		if str(st.get("kind", "")) != "spawner":
 			continue
 		if str(st.get("state", STATE_ACTIVE)) != STATE_ACTIVE:
 			continue
-		out.append(Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0))))
+		var pt: Vector2i = Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0)))
+		key = "%d,%d" % [pt.x, pt.y]
+		if seen.has(key):
+			continue
+		seen[key] = true
+		out.append(pt)
+	if map_data != null:
+		for corridor: Dictionary in map_data.bridge_corridors:
+			if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != BattleTileControlLib.OWNER_FRIENDLY:
+				continue
+			var bx: int = int(corridor.get("gx", -1))
+			var by: int = int(corridor.get("gy", -1))
+			if bx < 0:
+				continue
+			key = "%d,%d" % [bx, by]
+			if seen.has(key):
+				continue
+			seen[key] = true
+			out.append(Vector2i(bx, by))
 	return out
 
 
@@ -98,6 +211,7 @@ static func nearest_path_to_target(
 	target: Vector2i,
 	sources: Array[Vector2i],
 	_reach_version: int = 0,
+	allow_astar: bool = true,
 ) -> Dictionary:
 	var empty: Dictionary = {
 		"path_packed": PackedInt32Array(),
@@ -113,10 +227,151 @@ static func nearest_path_to_target(
 		var land_route: Dictionary = _bfs_route_packed(map_data, target, sources, false)
 		if not land_route.path_packed.is_empty():
 			return land_route
+	var structures: Array = _structures_for_map(map_data)
+	var infra_route: Dictionary = _bfs_infrastructure_route_packed(
+		map_data,
+		target,
+		sources,
+		_bridge_mask_for_team(map_data, BattleTileControlLib.OWNER_FRIENDLY, structures),
+	)
+	if not infra_route.path_packed.is_empty():
+		return infra_route
+	var bridge_land_route: Dictionary = _land_route_from_bridge_landing(
+		map_data, target, BattleTileControlLib.OWNER_FRIENDLY
+	)
+	if not bridge_land_route.path_packed.is_empty():
+		return bridge_land_route
 	var bridge: Dictionary = _greedy_bridge_route_packed(map_data, target, sources)
 	if not bridge.path_packed.is_empty():
 		return bridge
-	return _astar_route_packed(map_data, target, sources, true)
+	if allow_astar:
+		return _astar_route_packed(map_data, target, sources, true)
+	return empty
+
+
+## Land Bridge routing: short land leg to a departure coast, water-only crossing, landing coast.
+## Longitude wraps at the map seam (x=0 connects to x=width-1) like the globe mesh.
+static func nearest_corridor_path_to_target(
+	map_data,
+	landing: Vector2i,
+	sources: Array[Vector2i],
+	_allow_astar: bool = true,
+) -> Dictionary:
+	var empty: Dictionary = {
+		"path_packed": PackedInt32Array(),
+		"source": Vector2i(-1, -1),
+	}
+	if map_data == null or landing.x < 0 or not map_data.is_land_cell(landing.x, landing.y):
+		return empty
+	if not is_coastal_cell(map_data, landing.x, landing.y):
+		return empty
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var landing_key: int = _key(landing.x, landing.y, w)
+	var landing_water: PackedInt32Array = _water_neighbor_keys(map_data, landing.x, landing.y)
+	if landing_water.is_empty():
+		return empty
+	_ensure_bufs(w * h)
+	_bump_search_gen()
+	var water_gen: int = _search_gen
+	if not _bfs_water_back_to_goals(map_data, landing_water, water_gen):
+		return empty
+	var best_coast: int = -1
+	var best_dep: int = -1
+	var best_source_key: int = -1
+	var best_len: int = _G_INF
+	_bump_search_gen()
+	var land_gen: int = _search_gen
+	_bfs_queue.clear()
+	for src in sources:
+		if src.x < 0 or not map_data.is_land_cell(src.x, src.y):
+			continue
+		var sk: int = _key(src.x, src.y, w)
+		if _g_gen[sk] == land_gen:
+			continue
+		_g_gen[sk] = land_gen
+		_g_score[sk] = 0
+		_parent[sk] = -1
+		_source_key[sk] = sk
+		_bfs_queue.append(sk)
+	if _bfs_queue.is_empty():
+		return empty
+	var head: int = 0
+	while head < _bfs_queue.size():
+		var cur_key: int = _bfs_queue[head]
+		head += 1
+		var cur_dist: int = _g_score[cur_key]
+		var cx: int = cur_key % w
+		var cy: int = cur_key / w
+		if cur_dist + 3 < best_len and _cell_has_water_neighbor(map_data, cx, cy):
+			var dep_water: PackedInt32Array = _water_neighbor_keys(map_data, cx, cy)
+			for wi in dep_water.size():
+				var dep_key: int = dep_water[wi]
+				if _g_gen[dep_key] != water_gen:
+					continue
+				var total: int = cur_dist + _g_score[dep_key] + 3
+				if total < best_len:
+					best_len = total
+					best_coast = cur_key
+					best_dep = dep_key
+					best_source_key = _source_key[cur_key]
+		for d: Vector2i in _DIRS:
+			var nxy: Vector2i = _wrap_neighbor_xy(cx, cy, d.x, d.y, w, h)
+			if nxy.x < 0:
+				continue
+			if not map_data.is_land_cell(nxy.x, nxy.y):
+				continue
+			var nk: int = _key(nxy.x, nxy.y, w)
+			if _g_gen[nk] == land_gen:
+				continue
+			_g_gen[nk] = land_gen
+			_g_score[nk] = cur_dist + 1
+			_parent[nk] = cur_key
+			_source_key[nk] = _source_key[cur_key]
+			_bfs_queue.append(nk)
+	if best_coast < 0:
+		return empty
+	var land_path: PackedInt32Array = _reconstruct_packed(best_coast)
+	var water_path: PackedInt32Array = _packed_path_reversed(_reconstruct_packed(best_dep))
+	var full: PackedInt32Array = _join_bridge_path(land_path, water_path, landing_key)
+	if full.is_empty() or not is_valid_bridge_path(map_data, full):
+		return empty
+	return {
+		"path_packed": full,
+		"source": grid_from_packed_key(best_source_key, w),
+	}
+
+
+static func is_valid_bridge_path(map_data, packed: PackedInt32Array) -> bool:
+	if packed.size() < 2 or map_data == null:
+		return false
+	var w: int = map_data.grid_width
+	var phase: int = 0
+	var saw_water: bool = false
+	for i in packed.size():
+		var gx: int = packed[i] % w
+		var gy: int = packed[i] / w
+		var water: bool = is_water_cell(map_data, gx, gy)
+		if phase == 0:
+			if water:
+				phase = 1
+				saw_water = true
+			elif not map_data.is_land_cell(gx, gy):
+				return false
+		elif phase == 1:
+			if water:
+				pass
+			elif map_data.is_land_cell(gx, gy):
+				if i != packed.size() - 1:
+					return false
+				phase = 2
+			else:
+				return false
+		if i > 0 and not _cardinal_adjacent(
+			grid_from_packed_key(packed[i - 1], w), grid_from_packed_key(packed[i], w), w
+		):
+			return false
+	return saw_water and phase == 2
 
 
 static func needs_bridge_route(map_data, target: Vector2i, sources: Array[Vector2i]) -> bool:
@@ -124,7 +379,327 @@ static func needs_bridge_route(map_data, target: Vector2i, sources: Array[Vector
 		return false
 	if _land_comp_seed != int(map_data.map_seed) or _land_comp.is_empty():
 		prepare_land_components(map_data)
-	return not _on_shared_landmass(map_data, target, sources)
+	if _on_shared_landmass(map_data, target, sources):
+		return false
+	if _reachable_via_bridges(map_data, target, sources):
+		return false
+	return true
+
+
+## Road/outpost routing cells: built outpost paths plus completed land-bridge corridors.
+static func road_cells_for_team(map_data, structures: Array, team: int) -> Dictionary:
+	var out: Dictionary = {}
+	for st: Dictionary in structures:
+		if int(st.get("team", 0)) != team:
+			continue
+		if str(st.get("kind", "")) != KIND_SPAWNER:
+			continue
+		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+		if packed.is_empty():
+			continue
+		var state: String = str(st.get("state", STATE_ACTIVE))
+		var built: int = packed.size()
+		if state == STATE_CONNECTING:
+			built = int(floor(float(st.get("path_built", 1.0))))
+		built = clampi(built, 1, packed.size())
+		for i in built:
+			out[packed[i]] = true
+	if map_data == null:
+		return out
+	var bridge_mask: PackedByteArray = _bridge_mask_for_team(map_data, team, structures)
+	for i in range(bridge_mask.size()):
+		if bridge_mask[i] != 0:
+			out[i] = true
+	return out
+
+
+static func _reachable_via_bridges(
+	map_data, target: Vector2i, sources: Array[Vector2i]
+) -> bool:
+	var route: Dictionary = _bfs_infrastructure_route_packed(
+		map_data,
+		target,
+		sources,
+		_bridge_mask_for_team(
+			map_data, BattleTileControlLib.OWNER_FRIENDLY, _structures_for_map(map_data)
+		),
+	)
+	return not route.path_packed.is_empty()
+
+
+static func _bridge_mask_for_team(map_data, team: int, structures: Array = []) -> PackedByteArray:
+	var n: int = map_data.grid_width * map_data.grid_height if map_data != null else 0
+	var mask := PackedByteArray()
+	mask.resize(n)
+	mask.fill(0)
+	if map_data == null or n <= 0:
+		return mask
+	for corridor: Dictionary in map_data.bridge_corridors:
+		if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+			continue
+		var packed: PackedInt32Array = corridor.get("path_keys", PackedInt32Array())
+		for key: int in packed:
+			if key >= 0 and key < n:
+				mask[key] = 1
+	for st: Dictionary in structures:
+		if int(st.get("team", 0)) != team:
+			continue
+		if str(st.get("kind", "")) != KIND_CORRIDOR_LINK:
+			continue
+		var state: String = str(st.get("state", STATE_ACTIVE))
+		if state != STATE_CONNECTING and state != STATE_BUILDING:
+			continue
+		var packed_st: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+		if packed_st.is_empty():
+			continue
+		var built: int = int(floor(float(st.get("path_built", 1.0))))
+		built = clampi(built, 1, packed_st.size())
+		for i in range(built):
+			var key: int = packed_st[i]
+			if key >= 0 and key < n:
+				mask[key] = 1
+	return mask
+
+
+static func _structures_for_map(map_data) -> Array:
+	if map_data == null:
+		return []
+	return map_data.placed_structures
+
+
+static func _nearest_bridge_landing_for_target(map_data, target: Vector2i, team: int) -> Vector2i:
+	if map_data == null or target.x < 0:
+		return Vector2i(-1, -1)
+	if _land_comp_seed != int(map_data.map_seed) or _land_comp.is_empty():
+		prepare_land_components(map_data)
+	var w: int = map_data.grid_width
+	var goal_comp: int = _land_comp[_key(target.x, target.y, w)]
+	if goal_comp < 0:
+		return Vector2i(-1, -1)
+	var best: Vector2i = Vector2i(-1, -1)
+	var best_d2: int = 0x7FFFFFFF
+	for corridor: Dictionary in map_data.bridge_corridors:
+		if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+			continue
+		var gx: int = int(corridor.get("gx", -1))
+		var gy: int = int(corridor.get("gy", -1))
+		if gx < 0 or not map_data.is_land_cell(gx, gy):
+			continue
+		if _land_comp[_key(gx, gy, w)] != goal_comp:
+			continue
+		var dx: int = gx - target.x
+		var dy: int = gy - target.y
+		var d2: int = dx * dx + dy * dy
+		if d2 < best_d2:
+			best_d2 = d2
+			best = Vector2i(gx, gy)
+	return best
+
+
+static func _land_route_from_bridge_landing(map_data, target: Vector2i, team: int) -> Dictionary:
+	var landing: Vector2i = _nearest_bridge_landing_for_target(map_data, target, team)
+	if landing.x < 0:
+		return {"path_packed": PackedInt32Array(), "source": Vector2i(-1, -1)}
+	return _bfs_route_packed(map_data, target, [landing], false)
+
+
+static func _is_infrastructure_cell(
+	map_data, gx: int, gy: int, bridge_mask: PackedByteArray
+) -> bool:
+	if map_data == null or gx < 0 or gy < 0:
+		return false
+	if gx >= map_data.grid_width or gy >= map_data.grid_height:
+		return false
+	var idx: int = map_data.cell_index(gx, gy)
+	if idx >= 0 and idx < bridge_mask.size() and bridge_mask[idx] != 0:
+		return true
+	return _is_route_cell(map_data, gx, gy, false)
+
+
+static func _bfs_infrastructure_route_packed(
+	map_data,
+	target: Vector2i,
+	sources: Array[Vector2i],
+	bridge_mask: PackedByteArray,
+) -> Dictionary:
+	var empty: Dictionary = {
+		"path_packed": PackedInt32Array(),
+		"source": Vector2i(-1, -1),
+	}
+	if map_data == null or target.x < 0 or bridge_mask.is_empty():
+		return empty
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var goal_key: int = _key(target.x, target.y, w)
+	_ensure_bufs(w * h)
+	_bump_search_gen()
+	var gen: int = _search_gen
+	_bfs_queue.clear()
+	for src in sources:
+		if src.x < 0 or not _is_infrastructure_cell(map_data, src.x, src.y, bridge_mask):
+			continue
+		var sk: int = _key(src.x, src.y, w)
+		if _g_gen[sk] == gen:
+			continue
+		_g_gen[sk] = gen
+		_parent[sk] = -1
+		_source_key[sk] = sk
+		_bfs_queue.append(sk)
+	if _bfs_queue.is_empty():
+		return empty
+	var head: int = 0
+	var expanded: int = 0
+	while head < _bfs_queue.size():
+		if expanded >= WorldConquestConfigLib.OUTPOST_PATHFIND_MAX_EXPAND:
+			return empty
+		var cur_key: int = _bfs_queue[head]
+		head += 1
+		if cur_key == goal_key:
+			return {
+				"path_packed": _reconstruct_packed(cur_key),
+				"source": grid_from_packed_key(_source_key[cur_key], w),
+			}
+		expanded += 1
+		var cx: int = cur_key % w
+		var cy: int = cur_key / w
+		for d: Vector2i in _DIRS:
+			var nx: int = cx + d.x
+			var ny: int = cy + d.y
+			if ny < 0 or ny >= h:
+				continue
+			if nx < 0:
+				nx = w - 1
+			elif nx >= w:
+				nx = 0
+			if not _is_infrastructure_cell(map_data, nx, ny, bridge_mask):
+				continue
+			var nk: int = _key(nx, ny, w)
+			if _g_gen[nk] == gen:
+				continue
+			_g_gen[nk] = gen
+			_parent[nk] = cur_key
+			_source_key[nk] = _source_key[cur_key]
+			_bfs_queue.append(nk)
+	return empty
+
+
+## Land tile with water, pole edge, or wrapped seam water on a cardinal neighbor.
+static func is_coastal_cell(map_data, gx: int, gy: int) -> bool:
+	if map_data == null or not map_data.is_land_cell(gx, gy):
+		return false
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	for d: Vector2i in _DIRS:
+		var nxy: Vector2i = _wrap_neighbor_xy(gx, gy, d.x, d.y, w, h)
+		if nxy.x < 0:
+			return true
+		if is_water_cell(map_data, nxy.x, nxy.y):
+			return true
+	return false
+
+
+## Nearest coastal tile on the same land component as click (BFS on land).
+static func snap_to_nearest_coast(
+	map_data, click: Vector2i, allow_longitude_wrap: bool = true
+) -> Vector2i:
+	if map_data == null or click.x < 0 or not map_data.is_land_cell(click.x, click.y):
+		return Vector2i(-1, -1)
+	if _land_comp_seed != int(map_data.map_seed) or _land_comp.is_empty():
+		prepare_land_components(map_data)
+	var click_key: int = _key(click.x, click.y, map_data.grid_width)
+	if (
+		_snap_cache_seed == int(map_data.map_seed)
+		and _snap_cache_click_key == click_key
+		and _snap_cache_landing.x >= 0
+	):
+		return _snap_cache_landing
+	if is_coastal_cell(map_data, click.x, click.y):
+		_snap_cache_seed = int(map_data.map_seed)
+		_snap_cache_click_key = click_key
+		_snap_cache_landing = click
+		return click
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var goal_comp: int = _land_comp[_key(click.x, click.y, w)]
+	if goal_comp < 0:
+		return Vector2i(-1, -1)
+	_ensure_bufs(w * h)
+	_bump_search_gen()
+	var gen: int = _search_gen
+	_bfs_queue.clear()
+	var start_key: int = _key(click.x, click.y, w)
+	_g_gen[start_key] = gen
+	_parent[start_key] = -1
+	_bfs_queue.append(start_key)
+	var head: int = 0
+	while head < _bfs_queue.size():
+		var cur_key: int = _bfs_queue[head]
+		head += 1
+		var cx: int = cur_key % w
+		var cy: int = cur_key / w
+		if is_coastal_cell(map_data, cx, cy):
+			var found: Vector2i = Vector2i(cx, cy)
+			_snap_cache_seed = int(map_data.map_seed)
+			_snap_cache_click_key = click_key
+			_snap_cache_landing = found
+			return found
+		for d: Vector2i in _DIRS:
+			var nxy: Vector2i
+			if allow_longitude_wrap:
+				nxy = _wrap_neighbor_xy(cx, cy, d.x, d.y, w, h)
+			else:
+				var nx: int = cx + d.x
+				var ny: int = cy + d.y
+				if ny < 0 or ny >= h or nx < 0 or nx >= w:
+					continue
+				nxy = Vector2i(nx, ny)
+			if nxy.x < 0:
+				continue
+			if not map_data.is_land_cell(nxy.x, nxy.y):
+				continue
+			if _land_comp[_key(nxy.x, nxy.y, w)] != goal_comp:
+				continue
+			var nk: int = _key(nxy.x, nxy.y, w)
+			if _g_gen[nk] == gen:
+				continue
+			_g_gen[nk] = gen
+			_parent[nk] = cur_key
+			_bfs_queue.append(nk)
+	return Vector2i(-1, -1)
+
+
+static func subsample_path_for_preview(
+	path_packed: PackedInt32Array, max_segments: int
+) -> PackedInt32Array:
+	if path_packed.size() <= 1 or max_segments < 1:
+		return path_packed
+	var max_pts: int = max_segments + 1
+	if path_packed.size() <= max_pts:
+		return path_packed
+	var out := PackedInt32Array()
+	out.resize(max_pts)
+	for i in max_pts:
+		var src_i: int = int(round(float(i) * float(path_packed.size() - 1) / float(max_pts - 1)))
+		out[i] = path_packed[src_i]
+	return out
+
+
+## Foreign landmass clicks snap to nearest coast; same-landmass uses raw click unless snap_inland.
+static func resolve_invasion_target(
+	map_data,
+	click: Vector2i,
+	sources: Array[Vector2i],
+	snap_inland_to_coast: bool = false,
+) -> Vector2i:
+	if map_data == null or click.x < 0:
+		return Vector2i(-1, -1)
+	if snap_inland_to_coast:
+		if is_coastal_cell(map_data, click.x, click.y):
+			return click
+		return snap_to_nearest_coast(map_data, click, true)
+	if not needs_bridge_route(map_data, click, sources):
+		return click
+	return snap_to_nearest_coast(map_data, click)
 
 
 static func is_water_cell(map_data, gx: int, gy: int) -> bool:
@@ -145,6 +720,73 @@ static func path_to_packed_keys(path: Array[Vector2i], grid_w: int) -> PackedInt
 
 static func grid_from_packed_key(cell_key: int, grid_w: int) -> Vector2i:
 	return Vector2i(cell_key % grid_w, cell_key / grid_w)
+
+
+## Ensure each path step is one cardinal tile apart (longitude seam counts as adjacent).
+static func densify_path_cardinal(map_data, packed: PackedInt32Array) -> PackedInt32Array:
+	if packed.size() < 2 or map_data == null:
+		return packed
+	var w: int = map_data.grid_width
+	var out := PackedInt32Array()
+	out.append(packed[0])
+	for i in range(1, packed.size()):
+		var prev: Vector2i = grid_from_packed_key(out[out.size() - 1], w)
+		var goal: Vector2i = grid_from_packed_key(packed[i], w)
+		if _cardinal_adjacent(prev, goal, w):
+			out.append(packed[i])
+			continue
+		var connector: PackedInt32Array = _connector_path_cardinal(map_data, prev, goal, true)
+		for j in range(1, connector.size()):
+			out.append(connector[j])
+	return out
+
+
+static func _cardinal_adjacent(a: Vector2i, b: Vector2i, grid_w: int) -> bool:
+	var dx: int = absi(a.x - b.x)
+	dx = mini(dx, grid_w - dx)
+	var dy: int = absi(a.y - b.y)
+	return dx + dy == 1
+
+
+static func _connector_path_cardinal(
+	map_data, from: Vector2i, to: Vector2i, allow_water: bool
+) -> PackedInt32Array:
+	var empty := PackedInt32Array()
+	if map_data == null or from == to:
+		empty.append(_key(from.x, from.y, map_data.grid_width))
+		return empty
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	var goal_key: int = _key(to.x, to.y, w)
+	var start_key: int = _key(from.x, from.y, w)
+	_ensure_bufs(w * h)
+	_bump_search_gen()
+	var gen: int = _search_gen
+	_parent[start_key] = -1
+	_g_gen[start_key] = gen
+	_bfs_queue.clear()
+	_bfs_queue.append(start_key)
+	var head: int = 0
+	while head < _bfs_queue.size():
+		var cur_key: int = _bfs_queue[head]
+		head += 1
+		if cur_key == goal_key:
+			return _reconstruct_packed(goal_key)
+		var cx: int = cur_key % w
+		var cy: int = cur_key / w
+		for d: Vector2i in _DIRS:
+			var nxy: Vector2i = _wrap_neighbor_xy(cx, cy, d.x, d.y, w, h)
+			if nxy.x < 0:
+				continue
+			if not _is_route_cell(map_data, nxy.x, nxy.y, allow_water):
+				continue
+			var nk: int = _key(nxy.x, nxy.y, w)
+			if _g_gen[nk] == gen:
+				continue
+			_g_gen[nk] = gen
+			_parent[nk] = cur_key
+			_bfs_queue.append(nk)
+	return empty
 
 
 static func path_len_from_structure(st: Dictionary) -> int:
@@ -526,6 +1168,112 @@ static func _is_route_cell(map_data, gx: int, gy: int, allow_water: bool) -> boo
 	if not allow_water:
 		return false
 	return int(map_data.get_cell_terrain(gx, gy)) == BattleMapDataLib.Terrain.WATER
+
+
+static func _wrap_neighbor_xy(gx: int, gy: int, dx: int, dy: int, w: int, h: int) -> Vector2i:
+	var nx: int = gx + dx
+	var ny: int = gy + dy
+	if ny < 0 or ny >= h:
+		return Vector2i(-1, -1)
+	if nx < 0:
+		nx = w - 1
+	elif nx >= w:
+		nx = 0
+	return Vector2i(nx, ny)
+
+
+static func _cell_has_water_neighbor(map_data, gx: int, gy: int) -> bool:
+	if map_data == null:
+		return false
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	for d: Vector2i in _DIRS:
+		var nxy: Vector2i = _wrap_neighbor_xy(gx, gy, d.x, d.y, w, h)
+		if nxy.x < 0:
+			return true
+		if is_water_cell(map_data, nxy.x, nxy.y):
+			return true
+	return false
+
+
+static func _water_neighbor_keys(map_data, gx: int, gy: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if map_data == null:
+		return out
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	for d: Vector2i in _DIRS:
+		var nxy: Vector2i = _wrap_neighbor_xy(gx, gy, d.x, d.y, w, h)
+		if nxy.x < 0:
+			continue
+		if is_water_cell(map_data, nxy.x, nxy.y):
+			out.append(_key(nxy.x, nxy.y, w))
+	return out
+
+
+static func _bfs_water_back_to_goals(
+	map_data, goal_water_keys: PackedInt32Array, gen: int
+) -> bool:
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	_bfs_queue.clear()
+	for i in goal_water_keys.size():
+		var gk: int = goal_water_keys[i]
+		if _g_gen[gk] == gen:
+			continue
+		_g_gen[gk] = gen
+		_g_score[gk] = 0
+		_parent[gk] = -1
+		_bfs_queue.append(gk)
+	if _bfs_queue.is_empty():
+		return false
+	var head: int = 0
+	while head < _bfs_queue.size():
+		var cur_key: int = _bfs_queue[head]
+		head += 1
+		var cur_dist: int = _g_score[cur_key]
+		var cx: int = cur_key % w
+		var cy: int = cur_key / w
+		for d: Vector2i in _DIRS:
+			var nxy: Vector2i = _wrap_neighbor_xy(cx, cy, d.x, d.y, w, h)
+			if nxy.x < 0:
+				continue
+			if not is_water_cell(map_data, nxy.x, nxy.y):
+				continue
+			var nk: int = _key(nxy.x, nxy.y, w)
+			if _g_gen[nk] == gen:
+				continue
+			_g_gen[nk] = gen
+			_g_score[nk] = cur_dist + 1
+			_parent[nk] = cur_key
+			_bfs_queue.append(nk)
+	return true
+
+
+static func _packed_path_reversed(packed: PackedInt32Array) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	out.resize(packed.size())
+	for i in packed.size():
+		out[i] = packed[packed.size() - 1 - i]
+	return out
+
+
+static func _join_bridge_path(
+	land_path: PackedInt32Array, water_path: PackedInt32Array, landing_key: int
+) -> PackedInt32Array:
+	if land_path.is_empty() or water_path.is_empty():
+		return PackedInt32Array()
+	var out := PackedInt32Array()
+	out.append_array(land_path)
+	if out[out.size() - 1] != water_path[0]:
+		out.append(water_path[0])
+	for i in range(1, water_path.size()):
+		if water_path[i] == out[out.size() - 1]:
+			continue
+		out.append(water_path[i])
+	if out[out.size() - 1] != landing_key:
+		out.append(landing_key)
+	return out
 
 
 static func _key(gx: int, gy: int, w: int) -> int:

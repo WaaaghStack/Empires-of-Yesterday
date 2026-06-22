@@ -95,18 +95,18 @@ if ($RunSmokeTest) {
     $godot = Get-Command godot -ErrorAction SilentlyContinue
     if (-not $godot) {
         Write-Warn "Could not find 'godot' in PATH. Please run manually:"
-        Write-Host "  godot --headless --path . -s res://rust_smoke_test.gd" -ForegroundColor Yellow
+        Write-Host "  godot --headless --path . -s res://bridge_invasion_smoke_test.gd" -ForegroundColor Yellow
     } else {
-        & godot --headless --path $RepoRoot -s res://rust_smoke_test.gd
+        & godot --headless --path $RepoRoot -s res://bridge_invasion_smoke_test.gd
     }
 } else {
     Write-Host ""
     Write-Info "To test immediately, run:"
-    Write-Host "  godot --headless --path . -s res://rust_smoke_test.gd" -ForegroundColor Yellow
+    Write-Host "  godot --headless --path . -s res://bridge_invasion_smoke_test.gd" -ForegroundColor Yellow
     Write-Host ""
     Write-Info "Or re-run this script with the flag:"
     Write-Host "  .\setup_rust.ps1 -RunSmokeTest" -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Success "Done. Next step after smoke test passes: we implement the real simulation kernel."
+Write-Success "Done. The smoke test exercises the Rust territory backend end to end."

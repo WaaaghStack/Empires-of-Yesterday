@@ -7,16 +7,14 @@ This document describes how to build and use the Rust native extension that acce
 - **Location:** `rust/empire_territory/`
 - **Godot class:** `TerritorySim` (RefCounted GDExtension)
 - **Modules:** `sim.rs` (simple-water kernel + active-set), `fluid_bake.rs` (replay display RGBA), `tape_codec.rs` (pressure v2 + EYTR v2 pack body)
-- **Packaging:** Same pattern as `addons/godot-sqlite` — DLLs in `rust/empire_territory/bin/`, wired by `empire_territory.gdextension`
+- **Packaging:** DLLs in `rust/empire_territory/bin/`, wired by `empire_territory.gdextension`
 
 ### Backend defaults (when extension is loaded)
 
 | Context | Default | Override |
 |---------|---------|----------|
-| Turn resolve / `build_replay_tape` | Rust | `BATTLE_TERRITORY_BACKEND=cpu` forces GDScript |
-| World RTS 2D live | Rust | `cpu` / `gpu` env overrides |
-| World RTS 3D live | Rust | same as 2D |
-| Engage `BattleViewer` live | GPU (if available) | `BATTLE_TERRITORY_BACKEND=rust` |
+| World Conquest live sim | Rust | `BATTLE_TERRITORY_BACKEND=cpu` or `gpu` |
+| `build_replay_tape` (QA resolve) | Rust | `BATTLE_TERRITORY_BACKEND=cpu` forces GDScript |
 
 Live Rust sim uses **active-set** gradient (faster) and skips the adaptive second gradient pass. Resolve uses **full grid** plus adaptive double-pass when the frontier moves enough — for exact parity with CPU golden tests.
 
@@ -65,10 +63,10 @@ $env:CARGO_HTTP_CHECK_REVOKE = "false"
 ## Smoke test
 
 ```powershell
-godot --headless --path . -s res://rust_smoke_test.gd
+godot --headless --path . -s res://bridge_invasion_smoke_test.gd
 ```
 
-Or: `.\setup_rust.ps1 -RunSmokeTest`
+Or: `.\setup_rust.ps1 -RunSmokeTest`. The Rust section of the smoke test logs a WARN if the GDExtension is not loaded.
 
 ## TerritorySim API (GDScript)
 
@@ -101,8 +99,8 @@ GDScript bridges: `BattleTerritoryRustBackend.gd`, hooks in `BattleTerritoryRepl
 
 | Variable | Effect |
 |----------|--------|
-| `BATTLE_TERRITORY_BACKEND` | `cpu`, `gpu`, or `rust` (partial — see defaults above) |
-| `BATTLE_RUST_COMPARE=1` | QA: Rust vs CPU owner parity (`qa_runner`) |
+| `BATTLE_TERRITORY_BACKEND` | `cpu`, `gpu`, or `rust` (see defaults above) |
+| `BATTLE_RUST_COMPARE=0` | QA: skip the Rust vs CPU owner parity check (runs by default when the DLL is loaded) |
 | `BATTLE_RUST_BAKE_COMPARE=1` | QA: Rust fluid bake vs GDScript byte compare |
 | `BATTLE_RUST_ACTIVE_COMPARE=1` | QA: Rust active-set vs full-grid (≤8 tile drift OK) |
 | `BATTLE_GPU_COMPARE=1` | QA: GPU vs CPU (unchanged) |
@@ -113,7 +111,7 @@ GDScript bridges: `BattleTerritoryRustBackend.gd`, hooks in `BattleTerritoryRepl
 godot --headless --path . res://qa_runner.tscn
 ```
 
-Territory section includes resolve bench (gate **≤3000 ms** total on 96×72), golden tape pack round-trip, CPU active-set golden, and optional Rust compare tests when env vars are set.
+The Rust vs CPU owner parity check (16 rounds, world map, exact match) runs by default when the extension is loaded. Optional env-gated checks: `BATTLE_RUST_BAKE_COMPARE=1`, `BATTLE_RUST_ACTIVE_COMPARE=1`, `BATTLE_WORLD_CONQUEST_BENCH=1`. See `QA_LIFECYCLE.md`.
 
 ## Development tips
 

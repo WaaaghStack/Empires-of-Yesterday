@@ -30,6 +30,7 @@ static func generate(run_seed: int):
 	data.contact_column = w / 2
 	data.objective_sectors_required = 0
 	data.placed_structures = []
+	data.bridge_corridors = []
 	data.resource_deposits = []
 	var total: int = w * h
 	data.terrain_cells = PackedByteArray()

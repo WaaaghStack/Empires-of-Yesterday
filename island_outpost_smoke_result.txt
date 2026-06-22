@@ -1,0 +1,8 @@
+TerritorySim loaded: true
+Has update_claimable: true
+Territory backend: rust
+HQ (75, 106) island (308, 136)
+Before outpost claimable=1 owners=0 rust_claimable=n/a
+After sync claimable=1 owners=1 claimable_tiles=14441
+After 20 rounds friendly pressure at island: 33.3883209228516
+PASS island outpost pressure OK (backend=rust)

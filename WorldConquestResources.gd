@@ -21,6 +21,8 @@ const _DIRS: Array[Vector2i] = [
 static var _site_states: Dictionary = {}
 static var _roads_cache: Dictionary = {}
 static var _roads_cache_version: int = -1
+static var _hubs_cache: Array[Vector2i] = []
+static var _hubs_cache_version: int = -1
 static var _bfs_parent: PackedInt32Array = PackedInt32Array()
 static var _bfs_gen: PackedInt32Array = PackedInt32Array()
 static var _bfs_queue: PackedInt32Array = PackedInt32Array()
@@ -31,6 +33,8 @@ static func reset() -> void:
 	_site_states.clear()
 	_roads_cache.clear()
 	_roads_cache_version = -1
+	_hubs_cache = []
+	_hubs_cache_version = -1
 
 
 static func tick(
@@ -60,10 +64,15 @@ static func tick(
 	var n: int = w * h
 	_ensure_bufs(n)
 	var friendly_roads: Dictionary = _road_cells_for_team_cached(
-		structures, BattleTileControlLib.OWNER_FRIENDLY, network_key
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY, network_key
 	)
 	var hostile_roads: Dictionary = {}
-	var friendly_hubs: Array[Vector2i] = OutpostBuildLib.operational_sources(structures, player_home)
+	# Hubs only change when structures/bridges change — cache per network version
+	# instead of rebuilding every frame.
+	if _hubs_cache_version != network_key:
+		_hubs_cache = OutpostBuildLib.operational_sources(structures, player_home, map_data)
+		_hubs_cache_version = network_key
+	var friendly_hubs: Array[Vector2i] = _hubs_cache
 	var hostile_hubs: Array[Vector2i] = []
 	if enemy_home.x >= 0:
 		hostile_hubs.append(enemy_home)
@@ -226,7 +235,7 @@ static func _pos_along_path(path: PackedInt32Array, t: float, grid_w: int) -> Ve
 
 
 static func _road_cells_for_team_cached(
-	structures: Array, team: int, network_key: int
+	map_data, structures: Array, team: int, network_key: int
 ) -> Dictionary:
 	if _roads_cache_version != network_key:
 		_roads_cache.clear()
@@ -234,29 +243,9 @@ static func _road_cells_for_team_cached(
 	var cache_key: String = "t%d" % team
 	if _roads_cache.has(cache_key):
 		return _roads_cache[cache_key]
-	var built: Dictionary = _road_cells_for_team(structures, team)
+	var built: Dictionary = OutpostBuildLib.road_cells_for_team(map_data, structures, team)
 	_roads_cache[cache_key] = built
 	return built
-
-
-static func _road_cells_for_team(structures: Array, team: int) -> Dictionary:
-	var out: Dictionary = {}
-	for st: Dictionary in structures:
-		if int(st.get("team", 0)) != team:
-			continue
-		if str(st.get("kind", "")) != "spawner":
-			continue
-		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
-		if packed.is_empty():
-			continue
-		var state: String = str(st.get("state", OutpostBuildLib.STATE_ACTIVE))
-		var built: int = packed.size()
-		if state == OutpostBuildLib.STATE_CONNECTING:
-			built = int(floor(float(st.get("path_built", 1.0))))
-		built = clampi(built, 1, packed.size())
-		for i in built:
-			out[packed[i]] = true
-	return out
 
 
 static func _plan_link_path(

@@ -16,17 +16,13 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Empires of Yesterday"
 run/main_scene="res://MainMenu.tscn"
-config/features=PackedStringArray("4.6")
+config/features=PackedStringArray("4.7")
 config/icon="res://icon.svg"
 
 [autoload]
 
-GameDatabase="*res://GameDatabase.gd"
 RunLog="*res://RunLog.gd"
 RunState="*res://RunState.gd"
-PortraitPool="*res://PortraitPool.gd"
-SaveManager="*res://SaveManager.gd"
-BackgroundMusic="*res://BackgroundMusic.gd"
 
 [display]
 
@@ -41,7 +37,7 @@ version=4.3
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot-sqlite/plugin.cfg")
+enabled=PackedStringArray()
 
 [input]
 

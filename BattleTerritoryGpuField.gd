@@ -3,6 +3,7 @@ extends RefCounted
 
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const BattleMapDataLib := preload("res://BattleMapData.gd")
+const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 
 const LOCAL_SIZE := 16
 const MAX_INJECT_POINTS := 128
@@ -131,7 +132,8 @@ func step_round(tile_control: BattleTileControlLib = null) -> void:
 	_dispatch_cancel()
 	_dispatch_owner()
 	frame_peak = maxf(frame_peak, maxf(_friendly_rate, _hostile_rate))
-	_dispatch_pack_display()
+	if not WorldConquestConfigLib.OVERLAY_OWNERS_ONLY:
+		_dispatch_pack_display()
 
 
 func readback_owners_if_due(round_index: int) -> bool:

@@ -66,6 +66,8 @@ var impostor_scale: float = 0.9
 var engagement_zoom: float = 0.42
 ## RTS world: {id, team, gx, gy, kind} — kind "spawner" injects like home each round.
 var placed_structures: Array = []
+## Completed land bridges: {id, team, gx, gy, path_keys} — persistent corridor routes.
+var bridge_corridors: Array = []
 ## World conquest: capital tiles for objective win.
 var player_capital_grid: Vector2i = Vector2i(-1, -1)
 var enemy_capital_grid: Vector2i = Vector2i(-1, -1)

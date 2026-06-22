@@ -126,7 +126,7 @@ static func _add_meridian_quad(
 		(lons[0] + lons[1]) * 0.5, (lats[0] + lats[1]) * 0.5, gw, gh
 	)
 	var col: Color = (
-		Color(1, 1, 1, 0.5)
+		Color(1, 1, 1, 0.0)
 		if fluid
 		else _cell_color(map_data, sample_g.x, sample_g.y)
 	)

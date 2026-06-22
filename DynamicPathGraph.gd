@@ -24,9 +24,17 @@ func invalidate_cache_for_door(_door_node_id: String = "") -> void:
 	_path_cache.clear()
 
 
-func find_path(from_pos: Vector2, to_pos: Vector2, blocked_nodes: Array[String] = [], from_room: Room = null, to_room: Room = null) -> PackedVector2Array:
-	if from_room and to_room and from_room.map_room_id != "" and to_room.map_room_id != "":
-		var cache_key := "%s|%s|%s" % [from_room.map_room_id, to_room.map_room_id, str(blocked_nodes)]
+func find_path(
+	from_pos: Vector2,
+	to_pos: Vector2,
+	blocked_nodes: Array[String] = [],
+	from_room: Variant = null,
+	to_room: Variant = null,
+) -> PackedVector2Array:
+	var from_id: String = _room_map_id(from_room)
+	var to_id: String = _room_map_id(to_room)
+	if from_room and to_room and from_id != "" and to_id != "":
+		var cache_key := "%s|%s|%s" % [from_id, to_id, str(blocked_nodes)]
 		if _path_cache.has(cache_key):
 			_cache_hits += 1
 			var cached: PackedVector2Array = _path_cache[cache_key]
@@ -55,8 +63,8 @@ func find_path(from_pos: Vector2, to_pos: Vector2, blocked_nodes: Array[String] 
 	if ids.is_empty():
 		return _fallback_path(from_pos, to_pos, from_room, to_room)
 	var result := _build_corridor_points(from_pos, ids, to_pos)
-	if from_room and to_room and from_room.map_room_id != "" and to_room.map_room_id != "":
-		var cache_key := "%s|%s|%s" % [from_room.map_room_id, to_room.map_room_id, str(blocked_nodes)]
+	if from_room and to_room and from_id != "" and to_id != "":
+		var cache_key := "%s|%s|%s" % [from_id, to_id, str(blocked_nodes)]
 		_path_cache[cache_key] = result
 	return result
 
@@ -111,19 +119,21 @@ func _corridor_dir_from_spine(spine_id: String) -> Vector2:
 func room_to_node(room_name: String) -> String:
 	return room_name_to_node.get(room_name, "")
 
-func _fallback_path(from_pos: Vector2, to_pos: Vector2, from_room: Room, to_room: Room) -> PackedVector2Array:
+func _fallback_path(from_pos: Vector2, to_pos: Vector2, from_room: Variant, to_room: Variant) -> PackedVector2Array:
 	if not from_room or not to_room or from_room == to_room:
 		return PackedVector2Array()
-	var ids: Array[String] = find_room_route(from_room.map_room_id, to_room.map_room_id)
+	var ids: Array[String] = find_room_route(_room_map_id(from_room), _room_map_id(to_room))
 	if ids.is_empty():
 		return PackedVector2Array()
 	return _build_corridor_points(from_pos, ids, to_pos)
 
-func _path_inside_same_node(from_pos: Vector2, to_pos: Vector2, from_room: Room, to_room: Room) -> PackedVector2Array:
+func _path_inside_same_node(
+	from_pos: Vector2, to_pos: Vector2, from_room: Variant, to_room: Variant
+) -> PackedVector2Array:
 	if from_pos.distance_to(to_pos) <= 8.0:
 		return PackedVector2Array()
 	if from_room and to_room and from_room == to_room:
-		if from_room.contains_local_point(from_pos, 8.0) and from_room.contains_local_point(to_pos, 8.0):
+		if _room_contains_point(from_room, from_pos, 8.0) and _room_contains_point(from_room, to_pos, 8.0):
 			return PackedVector2Array([to_pos])
 	if _point_in_corridor(from_pos) and _point_in_corridor(to_pos):
 		return PackedVector2Array([to_pos])
@@ -157,10 +167,11 @@ func _build_corridor_points(from_pos: Vector2, ids: Array[String], to_pos: Vecto
 		points.append(to_pos)
 	return points
 
-func _nearest_node(pos: Vector2, room_hint: Room = null) -> String:
-	if room_hint and room_hint.map_room_id != "" and room_hint.contains_local_point(pos, 12.0):
-		if nodes.has(room_hint.map_room_id):
-			return room_hint.map_room_id
+func _nearest_node(pos: Vector2, room_hint: Variant = null) -> String:
+	var hint_id: String = _room_map_id(room_hint)
+	if room_hint and hint_id != "" and _room_contains_point(room_hint, pos, 12.0):
+		if nodes.has(hint_id):
+			return hint_id
 	var corridor_node := _nearest_corridor_node(pos)
 	if not corridor_node.is_empty():
 		return corridor_node
@@ -237,6 +248,24 @@ func _reconstruct(came_from: Dictionary, current: String) -> Array[String]:
 		current = came_from[current]
 		path.insert(0, current)
 	return path
+
+func _room_map_id(room: Variant) -> String:
+	if room == null:
+		return ""
+	if room is Dictionary:
+		return str(room.get("map_room_id", ""))
+	if room is Object and "map_room_id" in room:
+		return str(room.map_room_id)
+	return ""
+
+
+func _room_contains_point(room: Variant, pos: Vector2, margin: float) -> bool:
+	if room == null:
+		return false
+	if room is Object and room.has_method("contains_local_point"):
+		return bool(room.call("contains_local_point", pos, margin))
+	return false
+
 
 func _dedupe_points(points: PackedVector2Array) -> PackedVector2Array:
 	if points.is_empty():

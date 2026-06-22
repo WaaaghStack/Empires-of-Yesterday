@@ -28,10 +28,10 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -280.0
-offset_top = -240.0
-offset_right = 280.0
-offset_bottom = 240.0
+offset_left = -260.0
+offset_top = -140.0
+offset_right = 260.0
+offset_bottom = 140.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -49,79 +49,22 @@ horizontal_alignment = 1
 [node name="Subtitle" type="Label" parent="MainPanel/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
-text = "Commander galaxy campaign"
+text = "World Conquest — Earth globe simulator"
 horizontal_alignment = 1
 autowrap_mode = 2
 
-[node name="RTSWorldButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 48)
+[node name="SeedLabel" type="Label" parent="MainPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "RTS World (2D — large map)"
-
-[node name="RTSWorld3DButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 48)
-layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "RTS World 3D (compact — fast)"
-
-[node name="WorldConquestButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 48)
-layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "World Conquest (Earth)"
-
-[node name="CommanderRunButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 48)
-layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "Commander Campaign"
-
-[node name="TokensLabel" type="Label" parent="MainPanel/VBox"]
-layout_mode = 2
+theme_override_font_sizes/font_size = 14
 theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
-text = "Command Tokens: 0"
+text = "Random Earth map each run"
 horizontal_alignment = 1
 
-[node name="DailyLabel" type="Label" parent="MainPanel/VBox"]
+[node name="PlayButton" type="Button" parent="MainPanel/VBox"]
+custom_minimum_size = Vector2(0, 52)
 layout_mode = 2
-theme_override_font_sizes/font_size = 13
-theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
-text = "Daily seed: —"
-horizontal_alignment = 1
-autowrap_mode = 2
-
-[node name="NewRunButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 48)
-layout_mode = 2
-theme_override_font_sizes/font_size = 18
-text = "Classic Carrier Run"
-
-[node name="LegacyOpsButton" type="Button" parent="MainPanel/VBox"]
-visible = false
-custom_minimum_size = Vector2(0, 40)
-layout_mode = 2
-text = "Legacy Ops (4-op run)"
-
-[node name="MoreButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 36)
-layout_mode = 2
-text = "More…"
-
-[node name="ContinueButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 44)
-layout_mode = 2
-text = "Continue Run"
-
-[node name="DailyRunButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 44)
-layout_mode = 2
-text = "Daily Seed Run"
-
-[node name="CodexButton" type="Button" parent="MainPanel/VBox"]
-custom_minimum_size = Vector2(0, 44)
-layout_mode = 2
-text = "Codex"
+theme_override_font_sizes/font_size = 20
+text = "Play World Conquest"
 
 [node name="QuitButton" type="Button" parent="MainPanel/VBox"]
 layout_mode = 2
