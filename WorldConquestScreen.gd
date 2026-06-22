@@ -11,9 +11,6 @@ const ResourceLib := preload("res://WorldConquestResources.gd")
 const RoutePlannerLib := preload("res://RoutePlannerRustBackend.gd")
 const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 
-## QA-only: skip async bootstrap so qa_runner can inject map/sim and drive _process.
-static var qa_perf_probe_skip_bootstrap: bool = false
-
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
 @onready var sub_viewport_container: SubViewportContainer = $PlayArea/SubViewportContainer
@@ -145,10 +142,6 @@ func _ready() -> void:
 	if perf_hud_label:
 		perf_hud_label.visible = false
 		perf_hud_label.z_index = 42
-	if qa_perf_probe_skip_bootstrap:
-		loading_overlay.visible = false
-		_loading = false
-		return
 	call_deferred("_bootstrap_async")
 
 
@@ -237,12 +230,14 @@ func _setup_world_visuals() -> void:
 
 
 func _process(delta: float) -> void:
-	if _loading:
-		return
-	if _battle_finished or battle_data == null or territory_sim == null:
-		return
 	if _frame_profiler != null:
 		_frame_profiler.begin_frame()
+	if _loading:
+		_end_process_profiler_frame()
+		return
+	if _battle_finished or battle_data == null or territory_sim == null:
+		_end_process_profiler_frame()
+		return
 	_decrement_perf_action_cooldowns(delta)
 
 	var sim_steps: int = 0
@@ -353,6 +348,10 @@ func _process(delta: float) -> void:
 			_maybe_log_perf_action("gpu_upload", {"flushed": 1}, 1.0)
 		if _frame_profiler != null:
 			_frame_profiler.end_phase("gpu_upload", gpu_t)
+	_end_process_profiler_frame()
+
+
+func _end_process_profiler_frame() -> void:
 	if _frame_profiler != null:
 		_frame_profiler.end_frame()
 
@@ -1871,23 +1870,6 @@ func _format_resources_line(wallet: Array[float]) -> String:
 		var short: String = CFG.RESOURCE_SHORT[i] if i < CFG.RESOURCE_SHORT.size() else "?"
 		parts.append("%s %d" % [short, int(floor(wallet[i]))])
 	return "  ".join(parts)
-
-
-## QA-only: wire a live map + sim onto an instantiated screen (globe_map must exist from .tscn).
-func qa_perf_attach_live_state(bmap, sim: BattleTerritorySimLib) -> void:
-	battle_data = bmap
-	territory_sim = sim
-	_claimable_tiles = territory_sim.claimable_tiles
-	_player_home = bmap.player_home_grid
-	_enemy_home = bmap.enemy_home_grid
-	_sync_counts()
-	_loading = false
-	_paused = false
-	_battle_finished = false
-	_perf_action_cooldowns.clear()
-	OutpostBuildLib.prepare_land_components(battle_data)
-	if globe_map != null:
-		globe_map.setup(battle_data)
 
 
 func _format_sim_time(t: float) -> String:

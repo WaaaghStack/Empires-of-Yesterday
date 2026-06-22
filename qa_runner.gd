@@ -1,7 +1,8 @@
 extends Node
 
 const REPORT_PATH := "res://qa_report.txt"
-const PERF_SCRATCH_DIR := "C:/Users/Komba/AppData/Local/Temp/grok-goal-3a7fe0674c4d/implementer"
+const PERF_BOOTSTRAP_MAX_FRAMES := 900
+const PERF_LIVE_FRAMES := 180
 
 const SCRIPT_PATHS: Array[String] = [
 	"res://BattleCellGrid.gd",
@@ -238,98 +239,82 @@ func _validate_world_conquest_fps_bench() -> void:
 func _validate_perf_helpers() -> void:
 	_log("-- Perf HUD / screen _process / action-tag helpers --")
 	const WCS := preload("res://WorldConquestScreen.gd")
-	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
-	const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
-	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-	var scratch := OS.get_environment("GROK_GOAL_SCRATCH")
-	if scratch.is_empty():
-		scratch = PERF_SCRATCH_DIR
-	DirAccess.make_dir_recursive_absolute(scratch)
 	var gpu: Dictionary = WCS.perf_gather_gpu_counters()
 	if not gpu.has("draw_calls"):
 		_fail("perf_gather_gpu_counters missing draw_calls")
 		return
-	WCS.qa_perf_probe_skip_bootstrap = true
+	var tag: String = WCS.perf_format_action_tag("sim", {"steps": 3})
+	if not tag.contains("action=sim") or not tag.contains("steps=3"):
+		_fail("perf_format_action_tag malformed: %s" % tag)
+		return
 	var packed: PackedScene = load("res://WorldConquestScreen.tscn")
 	if packed == null:
 		_fail("perf helpers could not load WorldConquestScreen.tscn")
-		WCS.qa_perf_probe_skip_bootstrap = false
 		return
-	var screen: Node = packed.instantiate()
+	var screen: Control = packed.instantiate()
 	add_child(screen)
-	await get_tree().process_frame
-	var bmap = EarthMapGeneratorLib.generate(44203)
-	var sim := BattleTerritorySimLib.new()
-	sim.use_simple_water_model = true
-	sim.set_resolve_context("world_conquest")
-	sim.setup(bmap, WorldConquestConfigLib.PLAYER_FORCE, WorldConquestConfigLib.ENEMY_FORCE, null, {}, true)
-	if not sim.enable_rust_live():
-		sim.set_live_backend(false)
-	screen.qa_perf_attach_live_state(bmap, sim)
-	var frame_delta: float = 1.0 / 60.0
-	var process_ms: Array[float] = []
-	for _fi in range(180):
-		var t0: int = Time.get_ticks_usec()
-		screen._process(frame_delta)
-		process_ms.append(float(Time.get_ticks_usec() - t0) / 1000.0)
+	var bootstrap_frames: int = 0
+	while bool(screen.get("_loading")) and bootstrap_frames < PERF_BOOTSTRAP_MAX_FRAMES:
+		await get_tree().process_frame
+		bootstrap_frames += 1
+	if bool(screen.get("_loading")):
+		_fail("WorldConquestScreen bootstrap timed out after %d frames" % bootstrap_frames)
+		screen.queue_free()
+		return
+	_log("OK  WorldConquestScreen bootstrap ready frames=%d" % bootstrap_frames)
+	for _fi in range(PERF_LIVE_FRAMES):
+		await get_tree().process_frame
+	if not screen.has_method("gather_perf_and_action_context"):
+		_fail("WorldConquestScreen missing gather_perf_and_action_context")
+		screen.queue_free()
+		return
 	var snapshot: Dictionary = screen.gather_perf_and_action_context()
 	var cpu_summary: Dictionary = snapshot.get("cpu", {})
 	if cpu_summary.is_empty():
-		_fail("gather_perf_and_action_context cpu empty after screen._process")
+		_fail("gather_perf_and_action_context cpu empty after live bootstrap+play")
 		screen.queue_free()
-		WCS.qa_perf_probe_skip_bootstrap = false
 		return
 	var hud_text: String = WCS.perf_build_hud_text(snapshot)
 	if hud_text.is_empty() or not hud_text.contains("FPS"):
 		_fail("perf_build_hud_text missing FPS line")
 		screen.queue_free()
-		WCS.qa_perf_probe_skip_bootstrap = false
 		return
 	if not hud_text.contains("p99"):
-		_fail("perf HUD missing CPU p99 after live _process")
+		_fail("perf HUD missing CPU p99 after live play")
 		screen.queue_free()
-		WCS.qa_perf_probe_skip_bootstrap = false
 		return
-	var tag: String = WCS.perf_format_action_tag("sim", {"steps": 3})
-	if not tag.contains("action=sim") or not tag.contains("steps=3"):
-		_fail("perf_format_action_tag malformed: %s" % tag)
-		screen.queue_free()
-		WCS.qa_perf_probe_skip_bootstrap = false
-		return
+	_log(
+		"FrameBudget summary samples=%d p50_ms=%.3f p99_ms=%.3f min_fps=%.1f"
+		% [
+			int(cpu_summary.get("samples", 0)),
+			float(cpu_summary.get("p50_ms", 0.0)),
+			float(cpu_summary.get("p99_ms", 0.0)),
+			float(cpu_summary.get("min_fps", 0.0)),
+		]
+	)
+	for hud_line in hud_text.split("\n", false):
+		_log("HUD %s" % hud_line.strip_edges())
 	RunLog.flush_now()
 	var log_path: String = RunLog.get_session_path()
 	var log_text: String = ""
 	if FileAccess.file_exists(log_path):
 		log_text = FileAccess.get_file_as_string(log_path)
-	var action_lines: PackedStringArray = PackedStringArray()
+	var action_count: int = 0
 	for line in log_text.split("\n", false):
 		if line.contains("action="):
-			action_lines.append(line.strip_edges())
-	var evidence_path := scratch.path_join("perf_action_lines.txt")
-	var evidence := FileAccess.open(evidence_path, FileAccess.WRITE)
-	if evidence:
-		for line in action_lines:
-			evidence.store_line(line)
-		evidence.store_line("hud_sample=%s" % hud_text.replace("\n", " | "))
-		evidence.close()
-	if action_lines.is_empty():
-		_fail("no action= lines in RunLog after screen._process")
+			_log(line.strip_edges())
+			action_count += 1
+		elif line.contains("FrameBudget SPIKE"):
+			_log(line.strip_edges())
+	if action_count == 0:
+		_fail("no action= lines in RunLog after live bootstrap+play frames")
 		screen.queue_free()
-		WCS.qa_perf_probe_skip_bootstrap = false
 		return
-	process_ms.sort()
-	var p99_idx: int = clampi(int(floor(float(process_ms.size() - 1) * 0.99)), 0, process_ms.size() - 1)
-	var screen_p99: float = float(process_ms[p99_idx])
-	var proc_evidence := FileAccess.open(scratch.path_join("screen_process_p99.txt"), FileAccess.WRITE)
-	if proc_evidence:
-		proc_evidence.store_line("screen_process_frames=%d p99_ms=%.3f" % [process_ms.size(), screen_p99])
-		proc_evidence.close()
 	_log(
-		"OK  perf helpers screen_process p99=%.2fms cpu_p99=%.2f action_lines=%d"
-		% [screen_p99, float(cpu_summary.get("p99_ms", 0.0)), action_lines.size()]
+		"OK  perf helpers bootstrap_frames=%d live_frames=%d action_lines=%d cpu_p99=%.2f"
+		% [bootstrap_frames, PERF_LIVE_FRAMES, action_count, float(cpu_summary.get("p99_ms", 0.0))]
 	)
 	screen.queue_free()
-	WCS.qa_perf_probe_skip_bootstrap = false
 
 
 func _validate_pressure_outflow() -> void:
