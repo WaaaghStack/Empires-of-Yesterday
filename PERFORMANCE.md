@@ -36,12 +36,16 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | Ping-pong pressure buffers, fixed 4-neighbor scratch | `BattleTileControl.gd` | No allocations in the flow inner loop |
 | Cancel pass on active tiles only | `BattleTileControl.gd` | Cheaper overlap pass as fronts grow |
 | Incremental ownership / conquest counts | `BattleTileControl.gd`, `BattleTerritorySim.gd` | No full-grid recount per round |
-| Bridge → backend claimable sync throttled | `WorldConquestConfig.BRIDGE_BACKEND_SYNC_INTERVAL_SEC` (0.2 s) | Avoids per-cell full-grid sync while a bridge extends |
+| **Frame-budgeted construction queue** | `OutpostConstructionQueue.gd`, `WorldConquestScreen._drain_outpost_construction_queue` | `_advance_outpost_construction` only enqueues; drain processes ≤1 road/corridor/marker sid per frame via `sync_bridge_corridors_for_sids` (no full-map sync) |
+| Bridge → backend claimable sync throttled | `WorldConquestConfig.BRIDGE_BACKEND_SYNC_INTERVAL_SEC` (0.2 s) | Legacy interval; construction drain replaces time-based flush for CONNECTING growth |
+| **Skip redundant bridge-pipe FFI** | `BattleTerritoryRustBackend.sync_claimable_from` | `sync_bridge_pipe_from` runs only when claimable delta indices are non-empty |
+| **Fast owner visual on backend sync** | `WorldConquestScreen._apply_owner_visual_from_backends` | Uses Rust `get_owner_display_r8` bytes path instead of 65k GDScript overlay loop |
 | **Incremental owner sync (Rust)** | `sync_owners_delta`, `BattleTerritoryRustBackend._apply_owners_delta_to_tile_control` | Only changed owner cells cross FFI each sim batch |
 | **Option A pressure pull** | `get_pressure_*` at overlay tick only | ~518 KB pressure FFI avoided per sim step |
 | **Incremental owner overlay (Rust live)** | `consume_owner_overlay_delta` + `apply_ownership_overlay_delta` | One batched delta upload per frame; `set_data` not per-pixel |
-| **Overlay delta cap + queue** | `WorldConquestConfig.OVERLAY_DELTA_CELLS_PER_FRAME`, `WorldConquestScreen._patch_ownership_overlay` | Spreads large Rust owner flips across frames; remainder queued in GDScript |
-| **Deferred owner GPU upload** | `EarthGlobeMap.flush_pending_owner_gpu_upload(defer_if_overlay_frame)` | Skips texture commit on the same frame as overlay CPU patch; respects `OVERLAY_GPU_UPLOAD_MAX_HZ` at flush |
+| **Unified visual drain queue** | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` | Ordered drain: corridors → beachhead → roads → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu (never same frame as roads/markers/overlay; gpu blocked N+1 after overlay) |
+| **Overlay delta enqueue** | `WorldConquestScreen._enqueue_ownership_overlay_delta` | Consumes Rust delta into queue; apply happens in drain, not inline in `_process` |
+| **Deferred owner GPU upload** | `OutpostConstructionQueue.request_gpu_upload`, `EarthGlobeMap.flush_pending_owner_gpu_upload` | GPU commit only via queue drain slot; respects `OVERLAY_GPU_UPLOAD_MAX_HZ` |
 | **Budget-aware sim catch-up** | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` | Caps `advance_dt` to 1 step when prior frame exceeded `FRAME_BUDGET_MS` (16 ms) |
 | **Incremental roads/markers** | `EarthGlobeMap.sync_roads(changed_sids)`, `refresh_connecting_markers` | Path cell growth syncs only dirty structure ids; pulse refresh touches connecting/building markers only |
 | **Precomputed border mask** | `EarthGlobeMap._border_bytes_cache`, `ownership_display.gdshader` | 2 texture fetches per fragment instead of 9 |

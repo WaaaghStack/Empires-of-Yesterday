@@ -56,6 +56,10 @@ const OUTPOST_BUILD_SEC := 5.0
 const OUTPOST_ROAD_CELLS_PER_SEC := 1.0
 ## Throttle Rust/claimable sync while a bridge is extending (avoids per-cell full-grid work).
 const BRIDGE_BACKEND_SYNC_INTERVAL_SEC := 0.2
+## Per-frame construction drain caps (OutpostConstructionQueue).
+const MAX_ROAD_SIDS_PER_FRAME := 1
+const MAX_CORRIDOR_SIDS_PER_FRAME := 1
+const MAX_MARKER_SIDS_PER_FRAME := 1
 ## Bridge deck height above globe sea level (water tiles).
 const BRIDGE_SURFACE_LIFT := 3.4
 ## Safety cap for route search (bidirectional); avoids multi-second ocean floods.

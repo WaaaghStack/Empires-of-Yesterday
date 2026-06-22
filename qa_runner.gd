@@ -43,6 +43,7 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://WorldConquestOutpostBuild.gd",
 	"res://WorldConquestResources.gd",
 	"res://WorldConquestScreen.gd",
+	"res://OutpostConstructionQueue.gd",
 ]
 
 const SCENE_PATHS: Array[String] = [
@@ -78,6 +79,8 @@ func _run_all_async() -> void:
 	_validate_world_conquest_bench()
 	_validate_world_conquest_fps_bench()
 	await _validate_perf_helpers()
+	_validate_outpost_construction_queue()
+	_validate_visual_drain_ordering()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
@@ -190,6 +193,7 @@ func _validate_world_conquest_fps_bench() -> void:
 	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
 	const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 	var bmap = EarthMapGeneratorLib.generate(44202)
 	var sim := BattleTerritorySimLib.new()
 	sim.use_simple_water_model = true
@@ -202,13 +206,17 @@ func _validate_world_conquest_fps_bench() -> void:
 	var frame_delta: float = 1.0 / 60.0
 	var frame_ms: Array[float] = []
 	var steps_done: int = 0
+	var prior_frame_ms: float = 0.0
 	while sim.sim_time < warmup_sim_sec and not sim.finished:
 		sim.advance_dt(frame_delta, WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME)
 	while sim.sim_time < target_sim_sec and not sim.finished:
+		var max_steps: int = WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME
+		if not FrameBudgetProfilerLib.budget_allows_catchup(
+			prior_frame_ms, WorldConquestConfigLib.FRAME_BUDGET_MS
+		):
+			max_steps = 1
 		var t0: int = Time.get_ticks_usec()
-		var info: Dictionary = sim.advance_dt(
-			frame_delta, WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME
-		)
+		var info: Dictionary = sim.advance_dt(frame_delta, max_steps)
 		steps_done += int(info.get("steps", 0))
 		if (
 			WorldConquestConfigLib.OVERLAY_OWNERS_ONLY
@@ -225,6 +233,7 @@ func _validate_world_conquest_fps_bench() -> void:
 				_probe += idxs.size()
 		var ms: float = float(Time.get_ticks_usec() - t0) / 1000.0
 		frame_ms.append(ms)
+		prior_frame_ms = ms
 	if frame_ms.is_empty():
 		_fail("world conquest fps bench produced no frames")
 		return
@@ -351,8 +360,104 @@ func _validate_perf_helpers() -> void:
 	screen.queue_free()
 
 
+func _validate_outpost_construction_queue() -> void:
+	_log("-- Outpost construction queue (frame-budget drain) --")
+	const QueueLib := preload("res://OutpostConstructionQueue.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	var q := QueueLib.new()
+	for i in range(10):
+		q.on_cell_advanced(200 + i)
+	var drain_calls: int = 0
+	var total_roads: int = 0
+	var saw_full_map: bool = false
+	var sim_frame: int = 0
+	while q.has_pending():
+		sim_frame += 1
+		var plan: Dictionary = q.drain_plan(sim_frame)
+		drain_calls += 1
+		total_roads += plan.get("road_sids", []).size()
+		if bool(plan.get("full_map_sync", false)):
+			saw_full_map = true
+		if drain_calls > 64:
+			break
+	if saw_full_map:
+		_fail("outpost construction queue must never request full_map_sync")
+		return
+	if drain_calls < 10:
+		_fail("outpost construction queue spread %d drain calls, expected >=10" % drain_calls)
+		return
+	if total_roads != 10:
+		_fail("outpost construction queue roads drained %d, expected 10" % total_roads)
+		return
+	if WorldConquestConfigLib.MAX_ROAD_SIDS_PER_FRAME != 1:
+		_fail("MAX_ROAD_SIDS_PER_FRAME expected 1")
+		return
+	_log("OK  outpost construction queue spread=%d roads=%d" % [drain_calls, total_roads])
+
+
+func _validate_visual_drain_ordering() -> void:
+	_log("-- Visual drain ordering (roads/overlay/gpu frame separation) --")
+	const QueueLib := preload("res://OutpostConstructionQueue.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	var q := QueueLib.new()
+	q.enqueue_road(301)
+	q.enqueue_overlay_delta(PackedInt32Array([10, 11, 12]), PackedByteArray([
+		BattleTileControlLib.OWNER_FRIENDLY,
+		BattleTileControlLib.OWNER_FRIENDLY,
+		BattleTileControlLib.OWNER_FRIENDLY,
+	]))
+	q.request_gpu_upload()
+	var road_frame: int = -1
+	var overlay_frame: int = -1
+	var gpu_frame: int = -1
+	var frame: int = 0
+	while q.has_pending() and frame < 32:
+		frame += 1
+		var plan: Dictionary = q.drain_plan(frame)
+		if plan.get("road_sids", []).size() > 0:
+			road_frame = frame
+		var o_idxs: PackedInt32Array = plan.get("overlay_indices", PackedInt32Array())
+		if o_idxs.size() > 0:
+			overlay_frame = frame
+		if bool(plan.get("gpu_upload", false)):
+			gpu_frame = frame
+	if road_frame < 0 or overlay_frame < 0 or gpu_frame < 0:
+		_fail("visual drain ordering did not schedule roads/overlay/gpu")
+		return
+	if road_frame == gpu_frame:
+		_fail("visual drain ordering roads+gpu same frame %d" % road_frame)
+		return
+	if abs(overlay_frame - gpu_frame) <= 1:
+		_fail(
+			"visual drain ordering overlay frame=%d gpu frame=%d too close"
+			% [overlay_frame, gpu_frame]
+		)
+		return
+	_log(
+		"OK  visual drain ordering road=%d overlay=%d gpu=%d sep=%d"
+		% [road_frame, overlay_frame, gpu_frame, gpu_frame - overlay_frame]
+	)
+
+
+func _write_validate_section_to_scratch(section_lines: PackedStringArray, filename: String) -> void:
+	var scratch := OS.get_environment("GROK_GOAL_SCRATCH")
+	if scratch.is_empty() or section_lines.is_empty():
+		return
+	DirAccess.make_dir_recursive_absolute(scratch)
+	var dst := scratch.path_join(filename)
+	var out := FileAccess.open(dst, FileAccess.WRITE)
+	if out:
+		for line in section_lines:
+			out.store_line(line)
+		out.close()
+
+
 func _validate_fps_fix_paths() -> void:
-	_log("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up) --")
+	var section_lines: PackedStringArray = PackedStringArray()
+	var _vlog := func(msg: String) -> void:
+		_log(msg)
+		section_lines.append(msg)
+	_vlog.call("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up, queue drain) --")
 	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
@@ -409,6 +514,9 @@ func _validate_fps_fix_paths() -> void:
 		screen.call("request_outpost_visual_refresh", true, true, next_id + i)
 		for _warm in range(8):
 			await get_tree().process_frame
+	# Drain seeded construction/visual backlog before hot-path exercise and p99 measurement.
+	for _drain in range(100):
+		await get_tree().process_frame
 	var patch_idx: int = battle_data.cell_index(home.x, home.y)
 	var test_idxs := PackedInt32Array([patch_idx])
 	var test_vals := PackedByteArray([BattleTileControlLib.OWNER_FRIENDLY])
@@ -418,21 +526,60 @@ func _validate_fps_fix_paths() -> void:
 		screen.queue_free()
 		return
 	await get_tree().process_frame
-	for st_v in battle_data.placed_structures:
-		var st: Dictionary = st_v
-		if int(st.get("id", -1)) < next_id:
-			continue
-		st["state"] = OutpostBuildLib.STATE_ACTIVE
-		st["path_built"] = float(st.get("path_len", 1))
-	for _settle in range(30):
-		await get_tree().process_frame
 	var profiler = screen.get("_frame_profiler")
 	if profiler == null:
 		_fail("fps fix validate missing _frame_profiler")
 		screen.queue_free()
 		return
+	var territory_sim = screen.get("territory_sim")
+	if territory_sim == null:
+		_fail("fps fix validate missing territory_sim")
+		screen.queue_free()
+		return
+	var enemy_home: Vector2i = screen.get("_enemy_home")
+	var dt: float = WorldConquestConfigLib.SIM_DT
+	var max_steps: int = WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME
+	if not FrameBudgetProfilerLib.budget_allows_catchup(
+		profiler.prior_frame_ms(), WorldConquestConfigLib.FRAME_BUDGET_MS
+	):
+		max_steps = 1
+	var pre_built_sum: float = 0.0
+	for st_pre in battle_data.placed_structures:
+		if int(st_pre.get("id", -1)) >= next_id:
+			pre_built_sum += float(st_pre.get("path_built", 1.0))
+	var adv: Dictionary = territory_sim.advance_dt(dt, max_steps)
+	var sim_steps: int = int(adv.get("steps", 0))
+	screen.call("_advance_outpost_construction", dt)
+	if sim_steps > 0:
+		screen.call("_enqueue_ownership_overlay_delta")
+	screen.call("_drain_outpost_construction_queue")
+	globe.sync_roads(battle_data.placed_structures, [next_id])
+	globe.refresh_markers(battle_data.placed_structures, home, enemy_home, [next_id])
+	var post_built_sum: float = 0.0
+	for st_post in battle_data.placed_structures:
+		if int(st_post.get("id", -1)) >= next_id:
+			post_built_sum += float(st_post.get("path_built", 1.0))
+	var queue = screen.get("_outpost_construction_queue")
+	var queue_pending: bool = queue != null and queue.has_pending()
+	_vlog.call(
+		"fps fix explicit hot-path sim_steps=%d path_built_sum=%.3f->%.3f queue_pending=%s"
+		% [sim_steps, pre_built_sum, post_built_sum, queue_pending]
+	)
+	if post_built_sum <= pre_built_sum:
+		_fail("fps fix explicit _advance_outpost_construction did not grow path_built")
+		screen.queue_free()
+		return
 	profiler.reset_samples()
-	for _fi in range(120):
+	screen.set("_paused", false)
+	var connecting_count: int = 0
+	for st_chk in battle_data.placed_structures:
+		if str(st_chk.get("state", "")) == OutpostBuildLib.STATE_CONNECTING:
+			connecting_count += 1
+	if connecting_count < 10:
+		_fail("fps fix validate expected 10 CONNECTING structures, got %d" % connecting_count)
+		screen.queue_free()
+		return
+	for _fi in range(180):
 		await get_tree().process_frame
 	var summary: Dictionary = profiler.summary()
 	if summary.is_empty():
@@ -440,7 +587,7 @@ func _validate_fps_fix_paths() -> void:
 		screen.queue_free()
 		return
 	var p99: float = float(summary.get("p99_ms", 999.0))
-	_log(
+	_vlog.call(
 		"FPS fix validate bootstrap=%d structures=%d p99_ms=%.3f samples=%d"
 		% [bootstrap_frames, battle_data.placed_structures.size(), p99, int(summary.get("samples", 0))]
 	)
@@ -460,8 +607,9 @@ func _validate_fps_fix_paths() -> void:
 			screen.queue_free()
 			return
 	for line in action_lines:
-		_log(str(line))
-	_log("OK  fps fix paths validate p99=%.3f tags_ok=yes" % p99)
+		_vlog.call(str(line))
+	_vlog.call("OK  fps fix paths validate p99=%.3f tags_ok=yes" % p99)
+	_write_validate_section_to_scratch(section_lines, "qa_validate_fix.log")
 	screen.queue_free()
 
 

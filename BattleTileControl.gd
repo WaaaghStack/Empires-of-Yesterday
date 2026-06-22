@@ -723,6 +723,29 @@ func sync_bridge_corridors_from_map(map_data, force_full: bool = false) -> bool:
 	return changed or nav_reconciled
 
 
+## Incremental corridor sync for specific structure ids (CONNECTING path growth).
+func sync_bridge_corridors_for_sids(map_data, sids: Array, force_full: bool = false) -> bool:
+	if map_data == null or sids.is_empty():
+		return false
+	var touched: PackedInt32Array = PackedInt32Array()
+	var sid_set: Dictionary = {}
+	for sid_v in sids:
+		sid_set[int(sid_v)] = true
+	for st in map_data.placed_structures:
+		if not st is Dictionary:
+			continue
+		var sid: int = int(st.get("id", -1))
+		if sid < 0 or not sid_set.has(sid):
+			continue
+		var kind: String = str(st.get("kind", ""))
+		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(kind):
+			continue
+		_apply_corridor_path_sync(map_data, st, force_full, touched)
+	if touched.is_empty():
+		return false
+	return _apply_claimable_cells(map_data, touched)
+
+
 ## Rebuild 1D prev/next links for all active bridge and corridor paths.
 func rebuild_bridge_pipe_topology(map_data) -> void:
 	if _tile_count <= 0:

@@ -524,10 +524,12 @@ func owner_overlay_patch_frame() -> int:
 
 
 func _overlay_patch_blocks_gpu_commit() -> bool:
-	return (
-		_owner_overlay_patch_frame >= 0
-		and Engine.get_process_frames() == _owner_overlay_patch_frame
-	)
+	if _owner_overlay_patch_frame < 0:
+		return false
+	var frame: int = Engine.get_process_frames()
+	# Defer GPU commit on the patch frame and the next frame so overlay:delta CPU work
+	# does not stack with texture upload on the same or immediately following frame.
+	return frame >= _owner_overlay_patch_frame and frame <= _owner_overlay_patch_frame + 1
 
 
 func flush_pending_owner_gpu_upload(defer_if_overlay_frame: bool = false) -> bool:
@@ -1495,4 +1497,7 @@ func _apply_camera() -> void:
 		_cam_distance * cp * cos(_yaw),
 	)
 	camera.position = offset
-	camera.look_at(Vector3.ZERO, Vector3.UP)
+	if is_inside_tree():
+		camera.look_at(Vector3.ZERO, Vector3.UP)
+	else:
+		camera.look_at_from_position(offset, Vector3.ZERO, Vector3.UP)

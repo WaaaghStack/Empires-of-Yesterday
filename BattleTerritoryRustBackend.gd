@@ -261,13 +261,14 @@ func sync_claimable_from(
 		return
 	if _sim.has_method("update_claimable_delta"):
 		var delta: Dictionary = _pack_claimable_delta(tile_control)
-		if not delta.is_empty():
-			_sim.call(
-				"update_claimable_delta",
-				delta.indices,
-				delta.claimable,
-				delta.owners,
-			)
+		if delta.is_empty():
+			return
+		_sim.call(
+			"update_claimable_delta",
+			delta.indices,
+			delta.claimable,
+			delta.owners,
+		)
 		sync_bridge_pipe_from(tile_control)
 		return
 	if _sim.has_method("update_claimable"):
