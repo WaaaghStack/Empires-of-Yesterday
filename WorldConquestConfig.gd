@@ -19,6 +19,10 @@ const INCOME_PER_TILE_PER_SEC := 0.8
 ## Discrete sim step (~14/sec); internal only — UI shows sim time.
 const SIM_DT := 1.0 / 14.0
 const SIM_MAX_STEPS_PER_FRAME := 4
+## When the prior _process frame exceeded this budget, sim catch-up is capped to 1 step.
+const FRAME_BUDGET_MS := 16.0
+## Max ownership overlay cells applied to the globe per frame (remainder queued).
+const OVERLAY_DELTA_CELLS_PER_FRAME := 48
 const OVERLAY_UPDATES_PER_SEC := 3.0
 ## Globe tint from tile ownership only — skips pressure FFI and peak scans.
 const OVERLAY_OWNERS_ONLY := true

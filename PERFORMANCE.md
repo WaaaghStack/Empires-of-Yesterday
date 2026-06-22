@@ -40,6 +40,10 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | **Incremental owner sync (Rust)** | `sync_owners_delta`, `BattleTerritoryRustBackend._apply_owners_delta_to_tile_control` | Only changed owner cells cross FFI each sim batch |
 | **Option A pressure pull** | `get_pressure_*` at overlay tick only | ~518 KB pressure FFI avoided per sim step |
 | **Incremental owner overlay (Rust live)** | `consume_owner_overlay_delta` + `apply_ownership_overlay_delta` | One batched delta upload per frame; `set_data` not per-pixel |
+| **Overlay delta cap + queue** | `WorldConquestConfig.OVERLAY_DELTA_CELLS_PER_FRAME`, `WorldConquestScreen._patch_ownership_overlay` | Spreads large Rust owner flips across frames; remainder queued in GDScript |
+| **Deferred owner GPU upload** | `EarthGlobeMap.flush_pending_owner_gpu_upload(defer_if_overlay_frame)` | Skips texture commit on the same frame as overlay CPU patch; respects `OVERLAY_GPU_UPLOAD_MAX_HZ` at flush |
+| **Budget-aware sim catch-up** | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` | Caps `advance_dt` to 1 step when prior frame exceeded `FRAME_BUDGET_MS` (16 ms) |
+| **Incremental roads/markers** | `EarthGlobeMap.sync_roads(changed_sids)`, `refresh_connecting_markers` | Path cell growth syncs only dirty structure ids; pulse refresh touches connecting/building markers only |
 | **Precomputed border mask** | `EarthGlobeMap._border_bytes_cache`, `ownership_display.gdshader` | 2 texture fetches per fragment instead of 9 |
 | **Spawner FFI cache** | `BattleTerritoryRustBackend._maybe_update_spawners` | Skips `update_spawners` when placed spawners unchanged |
 | **GPU fluid shader** | `shaders/globe/fluid_display.gdshader`, `EarthGlobeMap.apply_fluid_from_pressures_gpu` | No CPU `bake_fluid_rgba` on live path; camera-facing tex upload |

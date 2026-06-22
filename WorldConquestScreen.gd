@@ -62,6 +62,11 @@ var _enemy_home: Vector2i = Vector2i(-1, -1)
 var _orbit_drag: bool = false
 var _outpost_road_dirty: bool = false
 var _outpost_marker_dirty: bool = false
+var _outpost_road_dirty_sids: Array[int] = []
+var _outpost_marker_dirty_sids: Array[int] = []
+var _overlay_delta_queue_indices: PackedInt32Array = PackedInt32Array()
+var _overlay_delta_queue_values: PackedByteArray = PackedByteArray()
+var _defer_gpu_flush_this_frame: bool = false
 var _outpost_marker_clock: float = 0.0
 var _spawners_pending_sync: bool = false
 var _hover_check_grid: Vector2i = Vector2i(-99999, -99999)
@@ -242,8 +247,17 @@ func _process(delta: float) -> void:
 	if _frame_profiler != null:
 		_frame_profiler.begin_frame()
 	_decrement_perf_action_cooldowns(delta)
+	_defer_gpu_flush_this_frame = false
 
 	var sim_steps: int = 0
+	var sim_max_steps: int = CFG.SIM_MAX_STEPS_PER_FRAME
+	if (
+		_frame_profiler != null
+		and not FrameBudgetProfilerLib.budget_allows_catchup(
+			_frame_profiler.prior_frame_ms(), CFG.FRAME_BUDGET_MS
+		)
+	):
+		sim_max_steps = 1
 
 	# Process deferred spawner activations from previous frame's build completions.
 	# This moves the sync work (placed_spawners + Rust update_spawners) off the completion frame itself,
@@ -266,9 +280,7 @@ func _process(delta: float) -> void:
 		var sim_t: int = 0
 		if _frame_profiler != null:
 			sim_t = _frame_profiler.begin_phase("sim")
-		var info: Dictionary = territory_sim.advance_dt(
-			delta * _speed_mult, CFG.SIM_MAX_STEPS_PER_FRAME
-		)
+		var info: Dictionary = territory_sim.advance_dt(delta * _speed_mult, sim_max_steps)
 		sim_steps = int(info.get("steps", 0))
 		_last_frame_sim_steps = sim_steps
 		if _frame_profiler != null:
@@ -300,7 +312,7 @@ func _process(delta: float) -> void:
 		if _frame_profiler != null:
 			_frame_profiler.end_phase("resources", res_t)
 
-	if sim_steps > 0:
+	if sim_steps > 0 or _overlay_delta_queue_indices.size() > 0:
 		_soldier_visual_dirty = true
 		if CFG.OVERLAY_OWNERS_ONLY:
 			var overlay_t: int = 0
@@ -347,7 +359,7 @@ func _process(delta: float) -> void:
 		var gpu_t: int = 0
 		if _frame_profiler != null:
 			gpu_t = _frame_profiler.begin_phase("gpu_upload")
-		globe_map.flush_pending_owner_gpu_upload()
+		globe_map.flush_pending_owner_gpu_upload(_defer_gpu_flush_this_frame)
 		if globe_map.consume_owner_gpu_upload_committed():
 			_maybe_log_perf_action("gpu_upload", {"committed": 1}, 1.0)
 		if _frame_profiler != null:
@@ -360,11 +372,15 @@ func _end_process_profiler_frame(record_sample: bool = true) -> void:
 		_frame_profiler.end_frame(record_sample)
 
 
-func request_outpost_visual_refresh(roads: bool, markers: bool) -> void:
+func request_outpost_visual_refresh(roads: bool, markers: bool, sid: int = -1) -> void:
 	if roads:
 		_outpost_road_dirty = true
+		if sid >= 0 and not _outpost_road_dirty_sids.has(sid):
+			_outpost_road_dirty_sids.append(sid)
 	if markers:
 		_outpost_marker_dirty = true
+		if sid >= 0 and not _outpost_marker_dirty_sids.has(sid):
+			_outpost_marker_dirty_sids.append(sid)
 
 
 func _setup_territory_backend() -> void:
@@ -780,28 +796,46 @@ func _patch_ownership_overlay() -> void:
 	# Bridge/new-land owner injection is handled by forced full refresh in _sync_claimable paths.
 	if territory_sim.use_rust_for_live() and territory_sim.rust_field != null and territory_sim.rust_field.ready:
 		if territory_sim.rust_field.has_method("consume_owner_overlay_delta"):
+			var pending_idxs: PackedInt32Array = _overlay_delta_queue_indices
+			var pending_vals: PackedByteArray = _overlay_delta_queue_values
+			_overlay_delta_queue_indices = PackedInt32Array()
+			_overlay_delta_queue_values = PackedByteArray()
 			var d: Dictionary = territory_sim.rust_field.consume_owner_overlay_delta()
-			var idxs: PackedInt32Array = d.get("indices", PackedInt32Array())
-			if idxs.size() > 0:
-				var vals: PackedByteArray = d.get("values", PackedByteArray())
-				_last_overlay_delta_count = idxs.size()
-				globe_map.apply_ownership_overlay_delta(idxs, vals)
-				_maybe_log_perf_action("overlay:delta", {"cells": idxs.size()}, 1.0)
+			var new_idxs: PackedInt32Array = d.get("indices", PackedInt32Array())
+			var new_vals: PackedByteArray = d.get("values", PackedByteArray())
+			var merged_idxs: PackedInt32Array = PackedInt32Array()
+			var merged_vals: PackedByteArray = PackedByteArray()
+			merged_idxs.append_array(pending_idxs)
+			merged_vals.append_array(pending_vals)
+			merged_idxs.append_array(new_idxs)
+			merged_vals.append_array(new_vals)
+			if merged_idxs.is_empty():
 				return
-			return  # no flips in this batch; already current
+			var cap: int = CFG.OVERLAY_DELTA_CELLS_PER_FRAME
+			var apply_n: int = mini(merged_idxs.size(), cap)
+			var apply_idxs: PackedInt32Array = merged_idxs.slice(0, apply_n)
+			var apply_vals: PackedByteArray = merged_vals.slice(0, apply_n)
+			if merged_idxs.size() > apply_n:
+				_overlay_delta_queue_indices = merged_idxs.slice(apply_n, merged_idxs.size())
+				_overlay_delta_queue_values = merged_vals.slice(apply_n, merged_vals.size())
+			_last_overlay_delta_count = apply_idxs.size()
+			globe_map.apply_ownership_overlay_delta(apply_idxs, apply_vals)
+			_defer_gpu_flush_this_frame = true
+			_maybe_log_perf_action("overlay:delta", {"cells": apply_idxs.size()}, 1.0)
+			return
 	# Fallback (CPU, or delta method missing): full authoritative map from source.
 	var owners: PackedByteArray = _ownership_overlay_source()
 	if not owners.is_empty():
 		globe_map.apply_ownership_overlay(owners)
 
 
-func _refresh_markers() -> void:
+func _refresh_markers(changed_sids: Array = []) -> void:
 	if globe_map == null:
 		return
 	var markers_t: int = 0
 	if _frame_profiler != null:
 		markers_t = _frame_profiler.begin_phase("markers")
-	globe_map.refresh_markers(battle_data.placed_structures, _player_home, _enemy_home)
+	globe_map.refresh_markers(battle_data.placed_structures, _player_home, _enemy_home, changed_sids)
 	if _frame_profiler != null:
 		_frame_profiler.end_phase("markers", markers_t)
 	_maybe_log_perf_action("markers", {"structures": battle_data.placed_structures.size()}, 3.0)
@@ -851,23 +885,23 @@ func _update_resource_visuals(_delta: float) -> void:
 
 
 
-func _sync_roads() -> void:
+func _sync_roads(changed_sids: Array = []) -> void:
 	if globe_map == null:
 		return
 	var roads_t: int = 0
 	if _frame_profiler != null:
 		roads_t = _frame_profiler.begin_phase("roads")
-	globe_map.sync_roads(battle_data.placed_structures)
+	globe_map.sync_roads(battle_data.placed_structures, changed_sids)
 	if _frame_profiler != null:
 		_frame_profiler.end_phase("roads", roads_t)
 	_maybe_log_perf_action("roads", {"structures": battle_data.placed_structures.size()}, 3.0)
 
 
-func _refresh_outpost_visuals(roads: bool, markers: bool) -> void:
+func _refresh_outpost_visuals(roads: bool, markers: bool, road_sids: Array = [], marker_sids: Array = []) -> void:
 	if roads:
-		_sync_roads()
+		_sync_roads(road_sids)
 	if markers:
-		_refresh_markers()
+		_refresh_markers(marker_sids)
 
 
 func _has_building_outposts() -> bool:
@@ -897,10 +931,14 @@ func _update_outpost_visuals(delta: float) -> void:
 	if not _outpost_road_dirty and not _outpost_marker_dirty and not vulnerable:
 		return
 	if _outpost_road_dirty:
-		_refresh_outpost_visuals(true, false)
+		var road_sids: Array = _outpost_road_dirty_sids.duplicate()
+		_outpost_road_dirty_sids.clear()
+		_refresh_outpost_visuals(true, false, road_sids)
 		_outpost_road_dirty = false
 	if _outpost_marker_dirty:
-		_refresh_outpost_visuals(false, true)
+		var marker_sids: Array = _outpost_marker_dirty_sids.duplicate()
+		_outpost_marker_dirty_sids.clear()
+		_refresh_outpost_visuals(false, true, [], marker_sids)
 		_outpost_marker_dirty = false
 		return
 	if vulnerable:
@@ -909,7 +947,10 @@ func _update_outpost_visuals(delta: float) -> void:
 			globe_map.set_marker_pulse(_outpost_marker_clock)
 		if _outpost_marker_clock >= 0.25:
 			_outpost_marker_clock = 0.0
-			_refresh_markers()
+			if globe_map != null:
+				globe_map.refresh_connecting_markers(
+					battle_data.placed_structures, _player_home, _enemy_home
+				)
 
 
 func _invalidate_hover_path_cache() -> void:
@@ -1185,8 +1226,8 @@ func _advance_outpost_construction(dt: float) -> void:
 				# For corridor links (land bridges) force full owner visual so new invasion land lights up immediately without gaps.
 				# Regular outposts only claim a small local area; delta updates or the next sim step will color it cheaply.
 				_sync_bridge_corridors_to_sim(false, true, true)  # force owner visual; now cheap via Rust bytes path, ensures immediate shading on new claimed area
-				_outpost_road_dirty = true
-				_outpost_marker_dirty = true
+				var done_sid: int = int(st.get("id", -1))
+				request_outpost_visual_refresh(true, true, done_sid)
 				if is_corridor_link:
 					completed_corridor_ids.append(int(st.get("id", -1)))
 				else:
@@ -1194,7 +1235,8 @@ func _advance_outpost_construction(dt: float) -> void:
 					st["build_remaining"] = OutpostBuildLib.build_sec_for_kind(kind)
 					_extend_beachhead_at_landing(st, gx, gy)
 			elif int(floor(built)) != prev_cells:
-				_outpost_road_dirty = true
+				var path_sid: int = int(st.get("id", -1))
+				request_outpost_visual_refresh(true, false, path_sid)
 				if OutpostBuildLib.is_corridor_path_kind(kind) and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
 					_road_network_version += 1
 					if kind == OutpostBuildLib.KIND_SPAWNER:

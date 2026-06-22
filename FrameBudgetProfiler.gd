@@ -9,6 +9,7 @@ var spike_log_enabled: bool = false
 var _frame_start_usec: int = 0
 var _phase_ms: Dictionary = {}
 var _frame_times_ms: Array[float] = []
+var _last_frame_ms: float = 0.0
 
 
 func _init() -> void:
@@ -38,6 +39,7 @@ func end_frame(record_sample: bool = true) -> void:
 	if _frame_start_usec <= 0:
 		return
 	var total_ms: float = float(Time.get_ticks_usec() - _frame_start_usec) / 1000.0
+	_last_frame_ms = total_ms
 	if record_sample:
 		_frame_times_ms.append(total_ms)
 		if _frame_times_ms.size() > MAX_SAMPLES:
@@ -72,6 +74,18 @@ func min_fps() -> float:
 	if max_ms <= 0.001:
 		return 0.0
 	return 1000.0 / max_ms
+
+
+func prior_frame_ms() -> float:
+	return _last_frame_ms
+
+
+func prior_frame_over_budget(threshold_ms: float = SPIKE_MS) -> bool:
+	return _last_frame_ms > threshold_ms
+
+
+static func budget_allows_catchup(prior_frame_ms: float, threshold_ms: float = SPIKE_MS) -> bool:
+	return prior_frame_ms <= threshold_ms
 
 
 func summary() -> Dictionary:

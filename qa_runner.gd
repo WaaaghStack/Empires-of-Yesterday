@@ -78,6 +78,7 @@ func _run_all_async() -> void:
 	_validate_world_conquest_bench()
 	_validate_world_conquest_fps_bench()
 	await _validate_perf_helpers()
+	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
 	_validate_territory_rust_active_set_golden()
@@ -347,6 +348,76 @@ func _validate_perf_helpers() -> void:
 		"OK  perf helpers bootstrap_frames=%d live_frames=%d action_lines=%d cpu_p99=%.2f tags_ok=yes"
 		% [bootstrap_frames, PERF_LIVE_FRAMES, action_count, float(cpu_summary.get("p99_ms", 0.0))]
 	)
+	screen.queue_free()
+
+
+func _validate_fps_fix_paths() -> void:
+	_log("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up) --")
+	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	if not FrameBudgetProfilerLib.budget_allows_catchup(10.0, WorldConquestConfigLib.FRAME_BUDGET_MS):
+		_fail("budget_allows_catchup should allow 10ms prior frame")
+		return
+	if FrameBudgetProfilerLib.budget_allows_catchup(20.0, WorldConquestConfigLib.FRAME_BUDGET_MS):
+		_fail("budget_allows_catchup should block 20ms prior frame")
+		return
+	var globe_scene: PackedScene = load("res://WorldConquestScreen.tscn")
+	if globe_scene == null:
+		_fail("fps fix validate could not load WorldConquestScreen.tscn")
+		return
+	var screen: Control = globe_scene.instantiate()
+	add_child(screen)
+	var bootstrap_frames: int = 0
+	while bool(screen.get("_loading")) and bootstrap_frames < PERF_BOOTSTRAP_MAX_FRAMES:
+		await get_tree().process_frame
+		bootstrap_frames += 1
+	if bool(screen.get("_loading")):
+		_fail("fps fix validate bootstrap timed out")
+		screen.queue_free()
+		return
+	var globe = screen.get("globe_map")
+	var battle_data = screen.get("battle_data")
+	var territory_sim = screen.get("territory_sim")
+	if globe == null or battle_data == null or territory_sim == null:
+		_fail("fps fix validate missing globe/battle_data/territory_sim")
+		screen.queue_free()
+		return
+	if not globe.has_method("sync_roads") or not globe.has_method("flush_pending_owner_gpu_upload"):
+		_fail("EarthGlobeMap missing incremental/defer methods")
+		screen.queue_free()
+		return
+	globe.sync_roads(battle_data.placed_structures, [1])
+	globe.flush_pending_owner_gpu_upload(true)
+	if globe.flush_pending_owner_gpu_upload(false):
+		_fail("gpu flush should respect defer_if_overlay_frame")
+		screen.queue_free()
+		return
+	screen.set("_defer_gpu_flush_this_frame", true)
+	await get_tree().process_frame
+	if screen.has_method("_patch_ownership_overlay"):
+		screen.call("_patch_ownership_overlay")
+	var profiler = screen.get("_frame_profiler")
+	if profiler == null:
+		_fail("fps fix validate missing _frame_profiler")
+		screen.queue_free()
+		return
+	for _fi in range(120):
+		await get_tree().process_frame
+	var summary: Dictionary = profiler.summary()
+	if summary.is_empty():
+		_fail("fps fix validate profiler summary empty after live frames")
+		screen.queue_free()
+		return
+	var p99: float = float(summary.get("p99_ms", 999.0))
+	_log(
+		"FPS fix validate bootstrap=%d p99_ms=%.3f samples=%d"
+		% [bootstrap_frames, p99, int(summary.get("samples", 0))]
+	)
+	if p99 > 20.0:
+		_fail("fps fix validate p99 %.3f exceeds 20ms gate" % p99)
+		screen.queue_free()
+		return
+	_log("OK  fps fix paths validate p99=%.3f" % p99)
 	screen.queue_free()
 
 

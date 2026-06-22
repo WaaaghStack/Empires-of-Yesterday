@@ -88,6 +88,7 @@ var _last_mouse: Vector2 = Vector2.ZERO
 var _owner_gpu_upload_pending: bool = false
 var _last_owner_gpu_upload_usec: int = 0
 var _owner_gpu_upload_committed: bool = false
+var _marker_sid_slot: Dictionary = {}
 
 
 func setup(map_data) -> void:
@@ -508,11 +509,8 @@ func _upload_owner_gpu_textures(force: bool = false) -> void:
 	if not _gpu_ownership_ready or _owner_img_gpu == null or _owner_tex_gpu == null:
 		return
 	if not force:
-		var min_interval_usec: int = int(1_000_000.0 / WorldConquestConfigLib.OVERLAY_GPU_UPLOAD_MAX_HZ)
-		var now_usec: int = Time.get_ticks_usec()
-		if now_usec - _last_owner_gpu_upload_usec < min_interval_usec:
-			_owner_gpu_upload_pending = true
-			return
+		_owner_gpu_upload_pending = true
+		return
 	_commit_owner_gpu_textures()
 
 
@@ -520,8 +518,12 @@ func owner_gpu_upload_pending() -> bool:
 	return _owner_gpu_upload_pending
 
 
-func flush_pending_owner_gpu_upload() -> bool:
-	if not _owner_gpu_upload_pending:
+func flush_pending_owner_gpu_upload(defer_if_overlay_frame: bool = false) -> bool:
+	if defer_if_overlay_frame or not _owner_gpu_upload_pending:
+		return false
+	var min_interval_usec: int = int(1_000_000.0 / WorldConquestConfigLib.OVERLAY_GPU_UPLOAD_MAX_HZ)
+	var now_usec: int = Time.get_ticks_usec()
+	if now_usec - _last_owner_gpu_upload_usec < min_interval_usec:
 		return false
 	_commit_owner_gpu_textures()
 	return true
@@ -830,12 +832,18 @@ func set_placement_preview(
 		)
 
 
-func refresh_markers(structures: Array, home_player: Vector2i, home_enemy: Vector2i) -> void:
+func refresh_markers(
+	structures: Array, home_player: Vector2i, home_enemy: Vector2i, changed_sids: Array = []
+) -> void:
 	if _markers == null:
+		return
+	if not changed_sids.is_empty() and not _marker_sid_slot.is_empty():
+		_refresh_markers_for_sids(structures, home_player, home_enemy, changed_sids)
 		return
 	# Pooled markers: update transforms/materials in place (no node/mesh/material churn
 	# during the 4 Hz construction-pulse refresh).
 	_marker_pool_used = 0
+	_marker_sid_slot.clear()
 	_place_pooled_marker(home_player, Color(0.2, 0.55, 1.0), 2.2)
 	_place_pooled_marker(home_enemy, Color(0.95, 0.3, 0.22), 2.2)
 	var pulse: float = 0.55 + 0.45 * sin(_marker_pulse * TAU)
@@ -886,9 +894,116 @@ func refresh_markers(structures: Array, home_player: Vector2i, home_enemy: Vecto
 		if state != WorldConquestOutpostBuildLib.STATE_ACTIVE and hp_frac < 1.0:
 			col = col.lerp(Color(0.92, 0.28, 0.18), 1.0 - hp_frac)
 			scale_f *= lerpf(0.85, 1.0, hp_frac)
+		var sid: int = int(st.get("id", -1))
+		if sid >= 0:
+			_marker_sid_slot[sid] = _marker_pool_used
 		_place_pooled_marker(Vector2i(gx, gy), col, scale_f, alpha)
 	for i in range(_marker_pool_used, _marker_pool.size()):
 		_marker_pool[i].visible = false
+
+
+func refresh_connecting_markers(structures: Array, home_player: Vector2i, home_enemy: Vector2i) -> void:
+	if _markers == null:
+		return
+	if _marker_sid_slot.is_empty():
+		refresh_markers(structures, home_player, home_enemy)
+		return
+	var pulse_sids: Array[int] = []
+	for st: Dictionary in structures:
+		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
+			continue
+		var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
+		if (
+			state == WorldConquestOutpostBuildLib.STATE_CONNECTING
+			or state == WorldConquestOutpostBuildLib.STATE_BUILDING
+		):
+			var sid: int = int(st.get("id", -1))
+			if sid >= 0:
+				pulse_sids.append(sid)
+	if pulse_sids.is_empty():
+		return
+	_refresh_markers_for_sids(structures, home_player, home_enemy, pulse_sids)
+
+
+func _refresh_markers_for_sids(
+	structures: Array, home_player: Vector2i, home_enemy: Vector2i, changed_sids: Array
+) -> void:
+	var changed_set: Dictionary = {}
+	for sid_v in changed_sids:
+		changed_set[int(sid_v)] = true
+	var pulse: float = 0.55 + 0.45 * sin(_marker_pulse * TAU)
+	for st: Dictionary in structures:
+		var sid: int = int(st.get("id", -1))
+		if sid < 0 or not changed_set.has(sid):
+			continue
+		if not _marker_sid_slot.has(sid):
+			refresh_markers(structures, home_player, home_enemy)
+			return
+		var slot: int = int(_marker_sid_slot[sid])
+		if slot < 0 or slot >= _marker_pool.size():
+			continue
+		_apply_structure_marker_to_slot(st, slot, pulse)
+
+
+func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) -> void:
+	var kind: String = str(st.get("kind", ""))
+	if not WorldConquestOutpostBuildLib.is_corridor_path_kind(kind):
+		return
+	var gx: int = int(st.get("gx", 0))
+	var gy: int = int(st.get("gy", 0))
+	var team: int = int(st.get("team", 1))
+	var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
+	var col: Color
+	var scale_f: float = 1.0
+	var alpha: float = 1.0
+	var hp_frac: float = 1.0
+	if st.has("health"):
+		hp_frac = clampf(
+			float(st.get("health", WorldConquestConfigLib.OUTPOST_MAX_HEALTH))
+			/ WorldConquestConfigLib.OUTPOST_MAX_HEALTH,
+			0.0,
+			1.0,
+		)
+	match state:
+		WorldConquestOutpostBuildLib.STATE_CONNECTING:
+			if kind == WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
+				col = Color(0.35, 0.92, 0.82, pulse)
+			else:
+				col = Color(0.95, 0.62, 0.18, pulse)
+			scale_f = 1.05 + 0.12 * sin(_marker_pulse * TAU)
+			alpha = pulse
+		WorldConquestOutpostBuildLib.STATE_BUILDING:
+			if kind == WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
+				return
+			var build_sec: float = WorldConquestOutpostBuildLib.build_sec_for_kind(kind)
+			var rem: float = float(st.get("build_remaining", build_sec))
+			var prog: float = 1.0 - clampf(rem / build_sec, 0.0, 1.0)
+			if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+				col = Color(0.55, 0.38, 0.22).lerp(Color(0.85, 0.55, 0.28), prog)
+			else:
+				col = Color(0.3, 0.45, 0.62).lerp(Color(0.25, 0.65, 1.0), prog)
+			scale_f = lerpf(0.78, 1.0, prog)
+			alpha = lerpf(0.65, 1.0, prog)
+		_:
+			if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+				col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
+			else:
+				col = Color(0.25, 0.65, 1.0) if team == 1 else Color(1.0, 0.4, 0.3)
+	if state != WorldConquestOutpostBuildLib.STATE_ACTIVE and hp_frac < 1.0:
+		col = col.lerp(Color(0.92, 0.28, 0.18), 1.0 - hp_frac)
+		scale_f *= lerpf(0.85, 1.0, hp_frac)
+	var node: MeshInstance3D = _marker_pool[slot]
+	node.visible = true
+	node.position = _grid_surface_pos(Vector2i(gx, gy), 1.5)
+	node.scale = Vector3.ONE * (1.8 * scale_f)
+	var mat := node.material_override as StandardMaterial3D
+	mat.albedo_color = Color(col.r, col.g, col.b, alpha)
+	mat.emission = Color(col.r, col.g, col.b) * 0.5
+	mat.transparency = (
+		BaseMaterial3D.TRANSPARENCY_ALPHA
+		if alpha < 0.99
+		else BaseMaterial3D.TRANSPARENCY_DISABLED
+	)
 
 
 func sync_soldiers(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:
@@ -928,9 +1043,14 @@ func _place_pooled_soldier(grid: Vector2i, color: Color) -> void:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 
-func sync_roads(structures: Array) -> void:
+func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 	if _roads == null or battle_data == null:
 		return
+	var incremental: bool = not changed_sids.is_empty()
+	var changed_set: Dictionary = {}
+	if incremental:
+		for sid_v in changed_sids:
+			changed_set[int(sid_v)] = true
 	var live_ids: Dictionary = {}
 	for st: Dictionary in structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
@@ -939,15 +1059,17 @@ func sync_roads(structures: Array) -> void:
 		if sid < 0:
 			continue
 		live_ids[sid] = true
-		_sync_outpost_road(st, sid)
+		if not incremental or changed_set.has(sid):
+			_sync_outpost_road(st, sid)
 	for corridor: Dictionary in battle_data.bridge_corridors:
 		var sid: int = int(corridor.get("id", -1))
 		if sid < 0:
 			continue
 		live_ids[sid] = true
-		var pseudo: Dictionary = corridor.duplicate()
-		pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
-		_sync_outpost_road(pseudo, sid)
+		if not incremental or changed_set.has(sid):
+			var pseudo: Dictionary = corridor.duplicate()
+			pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
+			_sync_outpost_road(pseudo, sid)
 	for sid in _road_seg_count.keys():
 		if not live_ids.has(sid):
 			_clear_road(sid)
