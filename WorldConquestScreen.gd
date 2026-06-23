@@ -1234,7 +1234,6 @@ func _advance_outpost_construction(dt: float) -> void:
 	var sim_dirty: bool = false
 	var pending_claims: Array[Vector2i] = []
 	var destroyed_ids: Array[int] = []
-	var completed_corridor_ids: Array[int] = []
 	for st: Dictionary in battle_data.placed_structures:
 		var kind: String = str(st.get("kind", ""))
 		if not OutpostBuildLib.is_corridor_path_kind(kind):
@@ -1246,7 +1245,6 @@ func _advance_outpost_construction(dt: float) -> void:
 			_tick_outpost_construction_damage(st, gx, gy, dt, destroyed_ids)
 			if destroyed_ids.has(int(st.get("id", -1))):
 				continue
-		elif OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
 			var build_sec: float = OutpostBuildLib.build_sec_for_kind(kind)
 			var rem: float = float(st.get("build_remaining", build_sec))
 			rem -= dt
@@ -1274,8 +1272,6 @@ func _advance_outpost_construction(dt: float) -> void:
 					sim_dirty = true
 	for sid: int in destroyed_ids:
 		_destroy_outpost(sid)
-	for sid: int in completed_corridor_ids:
-		_complete_corridor_link_by_id(sid)
 	if sim_dirty:
 		_sync_active_spawners_to_sim(pending_claims)
 

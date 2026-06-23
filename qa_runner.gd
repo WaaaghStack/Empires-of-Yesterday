@@ -505,43 +505,106 @@ func _validate_builder_agents() -> void:
 		_fail("builder validate missing battle_data")
 		screen.queue_free()
 		return
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var w: int = battle_data.grid_width
 	var path: Array[Vector2i] = [home]
-	for step in range(4):
+	for step in range(2):
 		var cx: int = (home.x + step + 1) % w
 		path.append(Vector2i(cx, home.y))
 	var packed: PackedInt32Array = OutpostBuildLib.path_to_packed_keys(path, w)
 	var landing: Vector2i = path[path.size() - 1]
+	var path_len: int = path.size()
 	var test_sid: int = 901
 	battle_data.placed_structures.append({
 		"id": test_sid,
 		"team": BattleTileControlLib.OWNER_FRIENDLY,
 		"gx": landing.x,
 		"gy": landing.y,
-		"kind": "spawner",
+		"kind": OutpostBuildLib.KIND_SPAWNER,
 		"state": OutpostBuildLib.STATE_CONNECTING,
 		"path_built": 1.0,
-		"path_len": path.size(),
+		"path_len": path_len,
 		"path_keys": packed,
+		"health": WorldConquestConfigLib.OUTPOST_MAX_HEALTH,
 	})
 	screen.call("_enqueue_builder_job", test_sid, BattleTileControlLib.OWNER_FRIENDLY)
-	var pre_built: float = 1.0
+	var travel: float = BuilderAgentLib.cell_travel_sec()
+	var seg_count: int = maxi(path_len - 1, 1)
+	screen.call("_update_builder_agents", travel)
+	var st_mid: Dictionary = {}
 	for st in battle_data.placed_structures:
 		if int(st.get("id", -1)) == test_sid:
-			pre_built = float(st.get("path_built", 1.0))
+			st_mid = st
 			break
-	var travel: float = BuilderAgentLib.cell_travel_sec()
-	screen.call("_update_builder_agents", travel)
-	var post_built: float = pre_built
-	for st2 in battle_data.placed_structures:
-		if int(st2.get("id", -1)) == test_sid:
-			post_built = float(st2.get("path_built", 1.0))
-			break
-	if post_built <= pre_built:
-		_fail("builder validate cell arrival did not advance path_built %.3f->%.3f" % [pre_built, post_built])
+	if st_mid.is_empty():
+		_fail("builder validate test structure missing after partial travel")
 		screen.queue_free()
 		return
-	_log("OK  builder agents count=%d path_built=%.1f->%.1f" % [agents.size(), pre_built, post_built])
+	var mid_built: float = float(st_mid.get("path_built", 1.0))
+	if mid_built <= 1.0:
+		_fail("builder validate partial cell did not advance path_built (got %.1f)" % mid_built)
+		screen.queue_free()
+		return
+	screen.call("_update_builder_agents", float(seg_count - 1) * travel)
+	var st_after_road: Dictionary = {}
+	for st2 in battle_data.placed_structures:
+		if int(st2.get("id", -1)) == test_sid:
+			st_after_road = st2
+			break
+	if st_after_road.is_empty():
+		_fail("builder validate structure missing after full road build")
+		screen.queue_free()
+		return
+	var road_state: String = str(st_after_road.get("state", ""))
+	var road_built: float = float(st_after_road.get("path_built", 0.0))
+	if road_state != OutpostBuildLib.STATE_BUILDING:
+		_fail("builder validate expected BUILDING after road, got %s" % road_state)
+		screen.queue_free()
+		return
+	if int(road_built) != path_len:
+		_fail("builder validate path_built=%.1f expected %d after road" % [road_built, path_len])
+		screen.queue_free()
+		return
+	var queue = screen.get("_outpost_construction_queue")
+	if queue == null or not queue.has_pending():
+		_fail("builder validate queue should be pending after path completion")
+		screen.queue_free()
+		return
+	var build_sec: float = OutpostBuildLib.build_sec_for_kind(OutpostBuildLib.KIND_SPAWNER)
+	screen.call("_advance_outpost_construction", build_sec)
+	var st_active: Dictionary = {}
+	for st3 in battle_data.placed_structures:
+		if int(st3.get("id", -1)) == test_sid:
+			st_active = st3
+			break
+	if st_active.is_empty():
+		_fail("builder validate structure missing after build timer")
+		screen.queue_free()
+		return
+	if str(st_active.get("state", "")) != OutpostBuildLib.STATE_ACTIVE:
+		_fail("builder validate expected ACTIVE after build timer, got %s" % str(st_active.get("state", "")))
+		screen.queue_free()
+		return
+	if not bool(screen.get("_spawners_pending_sync")):
+		_fail("builder validate _spawners_pending_sync not set after ACTIVE transition")
+		screen.queue_free()
+		return
+	if queue == null or not queue.has_pending():
+		_fail("builder validate queue should be pending after on_build_completed")
+		screen.queue_free()
+		return
+	_log(
+		"OK  builder agents count=%d lifecycle CONNECTING->BUILDING(path=%d)->ACTIVE spawner_sync=yes"
+		% [agents.size(), path_len]
+	)
+	_write_validate_section_to_scratch(
+		PackedStringArray([
+			"builder lifecycle: partial path_built=%.1f" % mid_built,
+			"builder lifecycle: road state=%s path_built=%.1f" % [road_state, road_built],
+			"builder lifecycle: final state=%s spawners_pending_sync=true" % str(st_active.get("state", "")),
+		]),
+		"qa_builder_lifecycle.log",
+	)
 	screen.queue_free()
 
 
