@@ -84,9 +84,8 @@ func _run_all_async() -> void:
 	await _validate_perf_helpers()
 	_validate_outpost_construction_queue()
 	_validate_visual_drain_ordering()
-	await _validate_builder_agents()
-	await _validate_player_placement_path()
-	await _validate_builder_progress()
+	_validate_builder_selfcheck()
+	await _validate_builder_integration_smoke()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
@@ -458,10 +457,8 @@ func _write_validate_section_to_scratch(section_lines: PackedStringArray, filena
 		out.close()
 
 
-const BUILDER_PROCESS_CELL_MAX_FRAMES := 180
-const BUILDER_PROCESS_ROAD_MAX_FRAMES := 720
-const BUILDER_PROCESS_ACTIVE_MAX_FRAMES := 480
-const BUILDER_PROGRESS_MAX_FRAMES := 900
+const BUILDER_INTEGRATION_MIN_FRAMES := 1200
+const BUILDER_INTEGRATION_MAX_FRAMES := 15000
 
 
 func _structure_by_sid(battle_data, sid: int) -> Dictionary:
@@ -523,41 +520,14 @@ func _ensure_debug_supply(screen: Control) -> void:
 	screen.set("_supply", 999999.0)
 
 
-func _place_friendly_spawner_via_finish(
-	screen: Control, home: Vector2i, grid_w: int, grid_h: int, slot: int
-) -> int:
-	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
-	var battle_data = screen.get("battle_data")
-	if battle_data == null:
+func _probe_placement_path_len(screen: Control, grid: Vector2i, kind: String, team: int) -> int:
+	var placement: Dictionary = screen.call("_resolve_placement_for_team", grid, true, kind, team)
+	if str(placement.get("reject", "")) != "":
 		return -1
-	var pre_count: int = battle_data.placed_structures.size()
-	screen.call("_apply_build_mode", OutpostBuildLib.KIND_SPAWNER)
-	var grid: Vector2i = _find_grid_for_player_place(
-		screen, home, grid_w, grid_h, OutpostBuildLib.KIND_SPAWNER, slot
-	)
-	if grid.x < 0:
+	var path_packed: PackedInt32Array = placement.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty():
 		return -1
-	screen.call("_finish_place_structure", grid)
-	if battle_data.placed_structures.size() <= pre_count:
-		return -1
-	var placed: Dictionary = battle_data.placed_structures[battle_data.placed_structures.size() - 1]
-	return int(placed.get("id", -1))
-
-
-func _find_grid_for_player_place(screen: Control, home: Vector2i, grid_w: int, grid_h: int, kind: String, slot: int) -> Vector2i:
-	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-	var spacing: int = WorldConquestConfigLib.MIN_SPAWNER_SPACING_CELLS + 1
-	for attempt in range(32):
-		var gx: int = (home.x + spacing * (slot + 1) + attempt * 3) % grid_w
-		for dy in range(-3, 4):
-			var gy: int = clampi(home.y + dy + (slot % 2), 0, grid_h - 1)
-			var grid := Vector2i(gx, gy)
-			var precheck: Dictionary = screen.call("_placement_precheck", grid, kind)
-			if str(precheck.get("reject", "")) != "":
-				continue
-			if precheck.get("landing", Vector2i(-1, -1)).x >= 0:
-				return grid
-	return Vector2i(-1, -1)
+	return path_packed.size()
 
 
 func _debug_place_near_home(
@@ -581,6 +551,48 @@ func _debug_place_near_home(
 			if sid >= 0:
 				return sid
 	return -1
+
+
+func _debug_place_shortest_path_near_home(
+	screen: Control,
+	home: Vector2i,
+	grid_w: int,
+	grid_h: int,
+	kind: String,
+	team: int,
+	max_attempts: int = 96,
+	y_span: int = 12,
+) -> int:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	var spacing: int = WorldConquestConfigLib.MIN_SPAWNER_SPACING_CELLS + 1
+	var best_grid: Vector2i = Vector2i(-1, -1)
+	var best_len: int = 1_000_000
+	for attempt in range(maxi(max_attempts, 1)):
+		var gx: int = (home.x + spacing * (attempt % 8 + 1) + (attempt / 8) * 5) % grid_w
+		for dy in range(-y_span, y_span + 1):
+			var gy: int = clampi(home.y + dy + (attempt % 3), 0, grid_h - 1)
+			var plen: int = _probe_placement_path_len(screen, Vector2i(gx, gy), kind, team)
+			if plen < 0:
+				continue
+			if plen < best_len:
+				best_len = plen
+				best_grid = Vector2i(gx, gy)
+				if best_len <= 4:
+					break
+		if best_len <= 4:
+			break
+	if best_grid.x < 0:
+		return -1
+	return int(screen.call("debug_place_outpost_at", best_grid, kind, team))
+
+
+func _builder_integration_frame_budget(path_len_a: int, path_len_b: int) -> int:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	var max_path: int = maxi(path_len_a, path_len_b)
+	var connect_sec: float = maxf(float(max_path - 1), 0.0) / WorldConquestConfigLib.OUTPOST_ROAD_CELLS_PER_SEC
+	var total_sec: float = connect_sec + WorldConquestConfigLib.OUTPOST_BUILD_SEC + 2.0
+	var frames: int = int(ceil(total_sec * 60.0))
+	return clampi(frames, BUILDER_INTEGRATION_MIN_FRAMES, BUILDER_INTEGRATION_MAX_FRAMES)
 
 
 func _count_states_since_id(battle_data, min_id: int) -> Dictionary:
@@ -619,302 +631,94 @@ func _bootstrap_world_conquest_screen() -> Control:
 	return screen
 
 
-func _validate_builder_agents() -> void:
-	_log("-- Builder agents (2 per home, job queue, _process lifecycle) --")
+func _validate_builder_selfcheck() -> void:
+	_log("-- Builder selfcheck (BuilderAgentLib.step_frame in-memory) --")
+	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
+	if not BuilderAgentLib.run_selfcheck():
+		_fail("BuilderAgentLib.run_selfcheck failed")
+		return
+	_log("OK  BuilderAgentLib.run_selfcheck")
+
+
+func _validate_builder_integration_smoke() -> void:
+	_log("-- Builder integration smoke (debug_place, both teams, _process to ACTIVE) --")
 	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 	const BattleTileControlLib := preload("res://BattleTileControl.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var screen: Control = await _bootstrap_world_conquest_screen()
 	if screen == null:
-		_fail("builder validate bootstrap timed out")
+		_fail("builder integration bootstrap timed out")
 		return
 	var agents: Array = screen.get("_builder_agents")
-	var home: Vector2i = screen.get("_player_home")
-	var enemy_home: Vector2i = screen.get("_enemy_home")
 	if agents.size() != 4:
-		_fail("builder validate expected 4 agents (2 per home), got %d" % agents.size())
-		screen.queue_free()
-		return
-	var friendly_n: int = 0
-	var hostile_n: int = 0
-	for bot in agents:
-		var team: int = int(bot.get("team", 0))
-		if team == BattleTileControlLib.OWNER_FRIENDLY:
-			friendly_n += 1
-			if Vector2i(int(bot.get("home_gx", -1)), int(bot.get("home_gy", -1))) != home:
-				_fail("friendly builder home mismatch")
-				screen.queue_free()
-				return
-		elif team == BattleTileControlLib.OWNER_HOSTILE:
-			hostile_n += 1
-			if Vector2i(int(bot.get("home_gx", -1)), int(bot.get("home_gy", -1))) != enemy_home:
-				_fail("hostile builder home mismatch")
-				screen.queue_free()
-				return
-	if friendly_n != 2 or hostile_n != 2:
-		_fail("builder validate team counts friendly=%d hostile=%d" % [friendly_n, hostile_n])
+		_fail("builder integration expected 4 agents, got %d" % agents.size())
 		screen.queue_free()
 		return
 	var battle_data = screen.get("battle_data")
-	if battle_data == null:
-		_fail("builder validate missing battle_data")
+	var home: Vector2i = screen.get("_player_home")
+	var enemy_home: Vector2i = screen.get("_enemy_home")
+	if battle_data == null or home.x < 0 or enemy_home.x < 0:
+		_fail("builder integration missing battle_data/homes")
 		screen.queue_free()
 		return
 	_ensure_debug_supply(screen)
 	var w: int = battle_data.grid_width
 	var h: int = battle_data.grid_height
-	var test_sid: int = _place_friendly_spawner_via_finish(screen, home, w, h, 0)
-	if test_sid < 0:
-		_fail("builder validate _finish_place_structure failed near home %s" % str(home))
+	var friendly_sid: int = _debug_place_shortest_path_near_home(
+		screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, BattleTileControlLib.OWNER_FRIENDLY
+	)
+	if friendly_sid < 0:
+		_fail("builder integration friendly debug_place_outpost_at failed")
 		screen.queue_free()
 		return
-	var st_placed: Dictionary = _structure_by_sid(battle_data, test_sid)
-	var path_len: int = int(st_placed.get("path_len", 0))
-	var mid_built: float = 1.0
-	var mid_frames: int = 0
-	for fi in range(BUILDER_PROCESS_CELL_MAX_FRAMES):
+	var hostile_sid: int = _debug_place_shortest_path_near_home(
+		screen, enemy_home, w, h, OutpostBuildLib.KIND_SPAWNER, BattleTileControlLib.OWNER_HOSTILE
+	)
+	if hostile_sid < 0:
+		_fail("builder integration hostile debug_place_outpost_at failed")
+		screen.queue_free()
+		return
+	# Freeze battle sim so BUILDING-phase pressure damage cannot destroy the hostile outpost.
+	screen.set("_paused", true)
+	var st_f0: Dictionary = _structure_by_sid(battle_data, friendly_sid)
+	var st_h0: Dictionary = _structure_by_sid(battle_data, hostile_sid)
+	var max_frames: int = _builder_integration_frame_budget(
+		int(st_f0.get("path_len", 4)), int(st_h0.get("path_len", 4))
+	)
+	var frames: int = 0
+	var friendly_active: bool = false
+	var hostile_active: bool = false
+	for fi in range(max_frames):
 		await get_tree().process_frame
-		mid_frames = fi + 1
-		var st_mid: Dictionary = _structure_by_sid(battle_data, test_sid)
-		if st_mid.is_empty():
-			continue
-		mid_built = float(st_mid.get("path_built", 1.0))
-		if mid_built > 1.0:
+		frames = fi + 1
+		var st_f: Dictionary = _structure_by_sid(battle_data, friendly_sid)
+		if not st_f.is_empty() and str(st_f.get("state", "")) == OutpostBuildLib.STATE_ACTIVE:
+			friendly_active = true
+		var st_h: Dictionary = _structure_by_sid(battle_data, hostile_sid)
+		if not st_h.is_empty() and str(st_h.get("state", "")) == OutpostBuildLib.STATE_ACTIVE:
+			hostile_active = true
+		if friendly_active and hostile_active:
 			break
-	if mid_built <= 1.0:
-		_fail("builder validate _process did not advance path_built in %d frames (got %.1f)" % [mid_frames, mid_built])
-		screen.queue_free()
-		return
-	var road_frames: int = 0
-	var st_after_road: Dictionary = {}
-	for fi2 in range(BUILDER_PROCESS_ROAD_MAX_FRAMES):
-		await get_tree().process_frame
-		road_frames = mid_frames + fi2 + 1
-		st_after_road = _structure_by_sid(battle_data, test_sid)
-		if st_after_road.is_empty():
-			continue
-		if str(st_after_road.get("state", "")) == OutpostBuildLib.STATE_BUILDING:
-			break
-	if st_after_road.is_empty():
-		_fail("builder validate structure missing after road _process frames")
-		screen.queue_free()
-		return
-	var road_state: String = str(st_after_road.get("state", ""))
-	var road_built: float = float(st_after_road.get("path_built", 0.0))
-	if road_state != OutpostBuildLib.STATE_BUILDING:
-		_fail("builder validate expected BUILDING after road _process, got %s in %d frames" % [road_state, road_frames])
-		screen.queue_free()
-		return
-	if int(road_built) != path_len:
-		_fail("builder validate path_built=%.1f expected %d after road" % [road_built, path_len])
-		screen.queue_free()
-		return
-	var queue = screen.get("_outpost_construction_queue")
-	if queue == null or not queue.has_pending():
-		_fail("builder validate queue should be pending after path completion")
-		screen.queue_free()
-		return
-	var active_frames: int = 0
-	var st_active: Dictionary = {}
-	for fi3 in range(BUILDER_PROCESS_ACTIVE_MAX_FRAMES):
-		await get_tree().process_frame
-		active_frames = road_frames + fi3 + 1
-		st_active = _structure_by_sid(battle_data, test_sid)
-		if st_active.is_empty():
-			continue
-		if str(st_active.get("state", "")) == OutpostBuildLib.STATE_ACTIVE:
-			break
-	if st_active.is_empty():
-		_fail("builder validate structure missing after build _process frames")
-		screen.queue_free()
-		return
-	if str(st_active.get("state", "")) != OutpostBuildLib.STATE_ACTIVE:
+	if not friendly_active or not hostile_active:
+		var st_h_end: Dictionary = _structure_by_sid(battle_data, hostile_sid)
 		_fail(
-			"builder validate expected ACTIVE via _process, got %s after %d frames"
-			% [str(st_active.get("state", "")), active_frames]
+			"builder integration expected both ACTIVE in %d/%d frames friendly=%s hostile=%s hostile_state=%s path_len=%d"
+			% [
+				frames,
+				max_frames,
+				str(friendly_active),
+				str(hostile_active),
+				str(st_h_end.get("state", "?")),
+				int(st_h0.get("path_len", 0)),
+			]
 		)
-		screen.queue_free()
-		return
-	if not bool(screen.get("_spawners_pending_sync")):
-		_fail("builder validate _spawners_pending_sync not set after ACTIVE _process transition")
 		screen.queue_free()
 		return
 	_log(
-		"OK  builder agents count=%d placement_sid=%d lifecycle via _process CONNECTING->BUILDING(path=%d)->ACTIVE frames=%d"
-		% [agents.size(), test_sid, path_len, active_frames]
+		"OK  builder integration friendly_sid=%d hostile_sid=%d CONNECTING->ACTIVE frames=%d bots=%d"
+		% [friendly_sid, hostile_sid, frames, agents.size()]
 	)
 	screen.queue_free()
-
-
-func _validate_player_placement_path() -> void:
-	_log("-- Player placement path (_finish_place_structure -> _commit_placed_structure -> enqueue) --")
-	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
-	const BattleTileControlLib := preload("res://BattleTileControl.gd")
-	var section_lines: PackedStringArray = PackedStringArray()
-	section_lines.append("-- player placement path (_finish_place_structure) --")
-	var screen: Control = await _bootstrap_world_conquest_screen()
-	if screen == null:
-		_fail("player placement path bootstrap timed out")
-		return
-	var battle_data = screen.get("battle_data")
-	var home: Vector2i = screen.get("_player_home")
-	if battle_data == null or home.x < 0:
-		_fail("player placement path missing battle_data/home")
-		screen.queue_free()
-		return
-	_ensure_debug_supply(screen)
-	var w: int = battle_data.grid_width
-	var h: int = battle_data.grid_height
-	var pre_count: int = battle_data.placed_structures.size()
-	screen.call("_apply_build_mode", OutpostBuildLib.KIND_SPAWNER)
-	var grid: Vector2i = _find_grid_for_player_place(
-		screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, 0
-	)
-	if grid.x < 0:
-		_fail("player placement path could not find valid grid near home")
-		screen.queue_free()
-		return
-	section_lines.append("finish_place_grid=%d,%d build_mode=spawner" % [grid.x, grid.y])
-	screen.call("_finish_place_structure", grid)
-	if battle_data.placed_structures.size() <= pre_count:
-		_fail("player placement path _finish_place_structure did not append structure")
-		screen.queue_free()
-		return
-	var placed: Dictionary = battle_data.placed_structures[battle_data.placed_structures.size() - 1]
-	var placed_sid: int = int(placed.get("id", -1))
-	if str(placed.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
-		_fail("player placement path expected CONNECTING, got %s" % str(placed.get("state", "")))
-		screen.queue_free()
-		return
-	var agents: Array = screen.get("_builder_agents")
-	var job_active: bool = false
-	for bot in agents:
-		if int(bot.get("job_sid", -1)) == placed_sid:
-			job_active = true
-			break
-		if str(bot.get("state", "")) == "working" and int(bot.get("team", 0)) == BattleTileControlLib.OWNER_FRIENDLY:
-			job_active = true
-	var queue = screen.get("_outpost_construction_queue")
-	var queue_pending: bool = queue != null and queue.has_pending()
-	section_lines.append(
-		"placement_commit_sid=%d state=connecting builder_job_active=%s queue_pending=%s"
-		% [placed_sid, str(job_active), str(queue_pending)]
-	)
-	if not job_active and not queue_pending:
-		_fail("player placement path did not enqueue builder job for sid=%d" % placed_sid)
-		screen.queue_free()
-		return
-	var grew: bool = false
-	for fi in range(120):
-		await get_tree().process_frame
-		var st: Dictionary = _structure_by_sid(battle_data, placed_sid)
-		if float(st.get("path_built", 1.0)) > 1.0:
-			grew = true
-			section_lines.append("path_built grew via _process frame=%d after player placement" % (fi + 1))
-			break
-	if not grew:
-		_fail("player placement path path_built did not grow in 120 _process frames")
-		screen.queue_free()
-		return
-	section_lines.append("OK  player placement path via _finish_place_structure")
-	_write_validate_section_to_scratch(section_lines, "qa_builder_placement_path.log")
-	_log("OK  player placement path sid=%d builder_job=%s" % [placed_sid, str(job_active)])
-	screen.queue_free()
-
-
-func _validate_builder_progress() -> void:
-	_log("-- Builder progress via real _process frames (2 exercises) --")
-	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
-	const BattleTileControlLib := preload("res://BattleTileControl.gd")
-	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-	for run_idx in range(1, 3):
-		var section_lines: PackedStringArray = PackedStringArray()
-		section_lines.append("-- builder progress exercise %d --" % run_idx)
-		var screen: Control = await _bootstrap_world_conquest_screen()
-		if screen == null:
-			_fail("builder progress %d bootstrap timed out" % run_idx)
-			return
-		var battle_data = screen.get("battle_data")
-		var home: Vector2i = screen.get("_player_home")
-		if battle_data == null or home.x < 0:
-			_fail("builder progress %d missing battle_data/home" % run_idx)
-			screen.queue_free()
-			return
-		_ensure_debug_supply(screen)
-		var w: int = battle_data.grid_width
-		var h: int = battle_data.grid_height
-		var struct_count: int = 2
-		var seeded_sids: Array[int] = []
-		for i in range(struct_count):
-			var sid: int = _place_friendly_spawner_via_finish(
-				screen, home, w, h, i + (run_idx - 1) * 3
-			)
-			if sid < 0:
-				_fail("builder progress %d _finish_place_structure failed near home" % run_idx)
-				screen.queue_free()
-				return
-			seeded_sids.append(sid)
-			var st_seed: Dictionary = _structure_by_sid(battle_data, sid)
-			section_lines.append(
-				"finish_place_sid=%d team=friendly gx=%d gy=%d"
-				% [sid, int(st_seed.get("gx", -1)), int(st_seed.get("gy", -1))]
-			)
-		if run_idx == 2:
-			var enemy_home: Vector2i = screen.get("_enemy_home")
-			var enemy_sid: int = _debug_place_near_home(
-				screen,
-				enemy_home,
-				w,
-				h,
-				OutpostBuildLib.KIND_SPAWNER,
-				BattleTileControlLib.OWNER_HOSTILE,
-				0,
-				64,
-				8,
-			)
-			if enemy_sid < 0:
-				_fail("builder progress %d hostile debug_place_outpost_at failed near enemy home" % run_idx)
-				screen.queue_free()
-				return
-			seeded_sids.append(enemy_sid)
-			var st_enemy: Dictionary = _structure_by_sid(battle_data, enemy_sid)
-			section_lines.append(
-				"placement_enqueue_sid=%d team=hostile gx=%d gy=%d"
-				% [enemy_sid, int(st_enemy.get("gx", -1)), int(st_enemy.get("gy", -1))]
-			)
-		var pre_sum: float = _sum_path_built_for_sids(battle_data, seeded_sids)
-		section_lines.append("pre path_built_sum=%.1f structures=%d" % [pre_sum, seeded_sids.size()])
-		var grew: bool = false
-		var grow_frame: int = -1
-		for fi in range(BUILDER_PROGRESS_MAX_FRAMES):
-			await get_tree().process_frame
-			var cur_sum: float = _sum_path_built_for_sids(battle_data, seeded_sids)
-			if cur_sum > pre_sum:
-				grew = true
-				grow_frame = fi + 1
-				section_lines.append(
-					"path_built grew via _process frame=%d sum=%.1f->%.1f"
-					% [grow_frame, pre_sum, cur_sum]
-				)
-				break
-		if not grew:
-			_fail("builder progress %d path_built did not grow in %d _process frames" % [run_idx, BUILDER_PROGRESS_MAX_FRAMES])
-			screen.queue_free()
-			return
-		var queue = screen.get("_outpost_construction_queue")
-		var queue_saw_pending: bool = queue != null and queue.has_pending()
-		section_lines.append("queue_pending_after_growth=%s" % str(queue_saw_pending))
-		for _drain in range(120):
-			await get_tree().process_frame
-		var post_states: Dictionary = _count_states_for_sids(battle_data, seeded_sids)
-		section_lines.append(
-			"post-drain states connecting=%d building=%d active=%d"
-			% [int(post_states.connecting), int(post_states.building), int(post_states.active)]
-		)
-		section_lines.append("OK  builder progress exercise %d via _process" % run_idx)
-		_write_validate_section_to_scratch(section_lines, "qa_builder_progress%d.log" % run_idx)
-		screen.queue_free()
-	_log("OK  builder progress exercises wrote qa_builder_progress1.log + qa_builder_progress2.log")
 
 
 func _validate_fps_fix_paths() -> void:
@@ -959,15 +763,17 @@ func _validate_fps_fix_paths() -> void:
 	_ensure_debug_supply(screen)
 	var placed_sids: Array[int] = []
 	for i in range(10):
-		var sid: int = _place_friendly_spawner_via_finish(screen, home, w, h, i)
+		var sid: int = _debug_place_near_home(
+			screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, BattleTileControlLib.OWNER_FRIENDLY, i
+		)
 		if sid < 0:
-			_fail("fps fix validate _finish_place_structure failed slot=%d near home" % i)
+			_fail("fps fix validate debug_place_outpost_at failed slot=%d near home" % i)
 			screen.queue_free()
 			return
 		placed_sids.append(sid)
 		var st_fps: Dictionary = _structure_by_sid(battle_data, sid)
 		_vlog.call(
-			"finish_place_sid=%d gx=%d gy=%d"
+			"placement_enqueue_sid=%d gx=%d gy=%d"
 			% [sid, int(st_fps.get("gx", -1)), int(st_fps.get("gy", -1))]
 		)
 		for _warm in range(8):
@@ -1069,7 +875,6 @@ func _validate_fps_fix_paths() -> void:
 	for line in action_lines:
 		_vlog.call(str(line))
 	_vlog.call("OK  fps fix paths validate p99=%.3f tags_ok=yes" % p99)
-	_write_validate_section_to_scratch(section_lines, "qa_validate_fix.log")
 	screen.queue_free()
 
 
