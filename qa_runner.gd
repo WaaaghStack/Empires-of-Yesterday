@@ -58,11 +58,13 @@ var _failed: bool = false
 
 func _ready() -> void:
 	await _run_all_async()
-	_write_report()
 	if _failed:
+		_write_report()
 		push_error("QA FAILED — see %s" % REPORT_PATH)
 		get_tree().quit(1)
 	else:
+		_log("QA PASSED")
+		_write_report()
 		print("QA PASSED")
 		get_tree().quit(0)
 
@@ -83,6 +85,7 @@ func _run_all_async() -> void:
 	_validate_outpost_construction_queue()
 	_validate_visual_drain_ordering()
 	await _validate_builder_agents()
+	await _validate_player_placement_path()
 	await _validate_builder_progress()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
@@ -520,6 +523,22 @@ func _ensure_debug_supply(screen: Control) -> void:
 	screen.set("_supply", 999999.0)
 
 
+func _find_grid_for_player_place(screen: Control, home: Vector2i, grid_w: int, grid_h: int, kind: String, slot: int) -> Vector2i:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	var spacing: int = WorldConquestConfigLib.MIN_SPAWNER_SPACING_CELLS + 1
+	for attempt in range(32):
+		var gx: int = (home.x + spacing * (slot + 1) + attempt * 3) % grid_w
+		for dy in range(-3, 4):
+			var gy: int = clampi(home.y + dy + (slot % 2), 0, grid_h - 1)
+			var grid := Vector2i(gx, gy)
+			var precheck: Dictionary = screen.call("_placement_precheck", grid, kind)
+			if str(precheck.get("reject", "")) != "":
+				continue
+			if precheck.get("landing", Vector2i(-1, -1)).x >= 0:
+				return grid
+	return Vector2i(-1, -1)
+
+
 func _debug_place_near_home(
 	screen: Control,
 	home: Vector2i,
@@ -703,6 +722,82 @@ func _validate_builder_agents() -> void:
 		"OK  builder agents count=%d placement_sid=%d lifecycle via _process CONNECTING->BUILDING(path=%d)->ACTIVE frames=%d"
 		% [agents.size(), test_sid, path_len, active_frames]
 	)
+	screen.queue_free()
+
+
+func _validate_player_placement_path() -> void:
+	_log("-- Player placement path (_finish_place_structure -> _commit_placed_structure -> enqueue) --")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	var section_lines: PackedStringArray = PackedStringArray()
+	section_lines.append("-- player placement path (_finish_place_structure) --")
+	var screen: Control = await _bootstrap_world_conquest_screen()
+	if screen == null:
+		_fail("player placement path bootstrap timed out")
+		return
+	var battle_data = screen.get("battle_data")
+	var home: Vector2i = screen.get("_player_home")
+	if battle_data == null or home.x < 0:
+		_fail("player placement path missing battle_data/home")
+		screen.queue_free()
+		return
+	_ensure_debug_supply(screen)
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var pre_count: int = battle_data.placed_structures.size()
+	screen.call("_apply_build_mode", OutpostBuildLib.KIND_SPAWNER)
+	var grid: Vector2i = _find_grid_for_player_place(
+		screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, 0
+	)
+	if grid.x < 0:
+		_fail("player placement path could not find valid grid near home")
+		screen.queue_free()
+		return
+	section_lines.append("finish_place_grid=%d,%d build_mode=spawner" % [grid.x, grid.y])
+	screen.call("_finish_place_structure", grid)
+	if battle_data.placed_structures.size() <= pre_count:
+		_fail("player placement path _finish_place_structure did not append structure")
+		screen.queue_free()
+		return
+	var placed: Dictionary = battle_data.placed_structures[battle_data.placed_structures.size() - 1]
+	var placed_sid: int = int(placed.get("id", -1))
+	if str(placed.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
+		_fail("player placement path expected CONNECTING, got %s" % str(placed.get("state", "")))
+		screen.queue_free()
+		return
+	var agents: Array = screen.get("_builder_agents")
+	var job_active: bool = false
+	for bot in agents:
+		if int(bot.get("job_sid", -1)) == placed_sid:
+			job_active = true
+			break
+		if str(bot.get("state", "")) == "working" and int(bot.get("team", 0)) == BattleTileControlLib.OWNER_FRIENDLY:
+			job_active = true
+	var queue = screen.get("_outpost_construction_queue")
+	var queue_pending: bool = queue != null and queue.has_pending()
+	section_lines.append(
+		"placement_commit_sid=%d state=connecting builder_job_active=%s queue_pending=%s"
+		% [placed_sid, str(job_active), str(queue_pending)]
+	)
+	if not job_active and not queue_pending:
+		_fail("player placement path did not enqueue builder job for sid=%d" % placed_sid)
+		screen.queue_free()
+		return
+	var grew: bool = false
+	for fi in range(120):
+		await get_tree().process_frame
+		var st: Dictionary = _structure_by_sid(battle_data, placed_sid)
+		if float(st.get("path_built", 1.0)) > 1.0:
+			grew = true
+			section_lines.append("path_built grew via _process frame=%d after player placement" % (fi + 1))
+			break
+	if not grew:
+		_fail("player placement path path_built did not grow in 120 _process frames")
+		screen.queue_free()
+		return
+	section_lines.append("OK  player placement path via _finish_place_structure")
+	_write_validate_section_to_scratch(section_lines, "qa_builder_placement_path.log")
+	_log("OK  player placement path sid=%d builder_job=%s" % [placed_sid, str(job_active)])
 	screen.queue_free()
 
 
