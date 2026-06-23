@@ -632,22 +632,33 @@ func _bootstrap_world_conquest_screen() -> Control:
 
 
 func _validate_builder_selfcheck() -> void:
-	_log("-- Builder selfcheck (BuilderAgentLib.step_frame in-memory) --")
+	var section_lines: PackedStringArray = PackedStringArray()
+	var _vlog := func(msg: String) -> void:
+		_log(msg)
+		section_lines.append(msg)
+	_vlog.call("-- Builder selfcheck (BuilderAgentLib.step_frame in-memory) --")
 	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
 	if not BuilderAgentLib.run_selfcheck():
 		_fail("BuilderAgentLib.run_selfcheck failed")
+		_write_validate_section_to_scratch(section_lines, "qa_builder_progress1.log")
 		return
-	_log("OK  BuilderAgentLib.run_selfcheck")
+	_vlog.call("OK  BuilderAgentLib.run_selfcheck")
+	_write_validate_section_to_scratch(section_lines, "qa_builder_progress1.log")
 
 
 func _validate_builder_integration_smoke() -> void:
-	_log("-- Builder integration smoke (debug_place, both teams, _process to ACTIVE) --")
+	var section_lines: PackedStringArray = PackedStringArray()
+	var _vlog := func(msg: String) -> void:
+		_log(msg)
+		section_lines.append(msg)
+	_vlog.call("-- Builder integration smoke (debug_place, both teams, _process to ACTIVE) --")
 	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 	const BattleTileControlLib := preload("res://BattleTileControl.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var screen: Control = await _bootstrap_world_conquest_screen()
 	if screen == null:
 		_fail("builder integration bootstrap timed out")
+		_write_validate_section_to_scratch(section_lines, "qa_builder_progress2.log")
 		return
 	var agents: Array = screen.get("_builder_agents")
 	if agents.size() != 4:
@@ -712,12 +723,14 @@ func _validate_builder_integration_smoke() -> void:
 				int(st_h0.get("path_len", 0)),
 			]
 		)
+		_write_validate_section_to_scratch(section_lines, "qa_builder_progress2.log")
 		screen.queue_free()
 		return
-	_log(
+	_vlog.call(
 		"OK  builder integration friendly_sid=%d hostile_sid=%d CONNECTING->ACTIVE frames=%d bots=%d"
 		% [friendly_sid, hostile_sid, frames, agents.size()]
 	)
+	_write_validate_section_to_scratch(section_lines, "qa_builder_progress2.log")
 	screen.queue_free()
 
 
