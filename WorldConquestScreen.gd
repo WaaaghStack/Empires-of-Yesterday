@@ -495,16 +495,13 @@ func _finish_place_structure(grid: Vector2i) -> void:
 	if battle_data == null or _build_mode == "":
 		return
 	var placement: Dictionary = _resolve_placement(grid, true, _build_mode)
-	var landing: Vector2i = placement.get("landing", Vector2i(-1, -1))
 	var reject: String = str(placement.get("reject", ""))
 	if reject != "":
 		build_hint_label.text = reject
 		return
-	var path_packed: PackedInt32Array = placement.get("path_packed", PackedInt32Array())
-	if path_packed.is_empty():
+	if placement.get("path_packed", PackedInt32Array()).is_empty():
 		build_hint_label.text = "Could not place outpost here."
 		return
-	path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
 	var cost: float = _build_mode_cost()
 	if _supply < cost:
 		build_hint_label.text = "Need %s supply (have %s)." % [
@@ -513,13 +510,45 @@ func _finish_place_structure(grid: Vector2i) -> void:
 		]
 		return
 	_supply -= cost
+	var placed_sid: int = _commit_placed_structure(
+		placement, BattleTileControlLib.OWNER_FRIENDLY, _build_mode, grid
+	)
+	if placed_sid < 0:
+		build_hint_label.text = "Could not place outpost here."
+		return
+	_apply_build_mode("")
+
+
+func debug_place_outpost_at(grid: Vector2i, kind: String, team: int) -> int:
+	if battle_data == null or kind == "":
+		return -1
+	var placement: Dictionary = _resolve_placement_for_team(grid, true, kind, team)
+	if str(placement.get("reject", "")) != "":
+		return -1
+	if placement.get("path_packed", PackedInt32Array()).is_empty():
+		return -1
+	return _commit_placed_structure(placement, team, kind, grid)
+
+
+func _commit_placed_structure(
+	placement: Dictionary, team: int, kind: String, click_grid: Vector2i
+) -> int:
+	if battle_data == null:
+		return -1
+	var path_packed: PackedInt32Array = placement.get("path_packed", PackedInt32Array())
+	if path_packed.is_empty():
+		return -1
+	path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
+	var landing: Vector2i = placement.get("landing", Vector2i(-1, -1))
+	if landing.x < 0:
+		return -1
 	var src: Vector2i = placement.get("source", Vector2i(-1, -1))
 	var st: Dictionary = {
 		"id": _next_structure_id,
-		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"team": team,
 		"gx": landing.x,
 		"gy": landing.y,
-		"kind": _build_mode,
+		"kind": kind,
 		"state": OutpostBuildLib.STATE_CONNECTING,
 		"source_gx": src.x,
 		"source_gy": src.y,
@@ -527,15 +556,15 @@ func _finish_place_structure(grid: Vector2i) -> void:
 		"path_len": path_packed.size(),
 		"path_built": 1.0,
 	}
-	if _build_mode == OutpostBuildLib.KIND_SPAWNER or _build_mode == OutpostBuildLib.KIND_BARRACKS:
+	if kind == OutpostBuildLib.KIND_SPAWNER or kind == OutpostBuildLib.KIND_BARRACKS:
 		st["health"] = CFG.OUTPOST_MAX_HEALTH
-	if landing != grid:
-		st["click_gx"] = grid.x
-		st["click_gy"] = grid.y
+	if landing != click_grid:
+		st["click_gx"] = click_grid.x
+		st["click_gy"] = click_grid.y
 	battle_data.placed_structures.append(st)
 	var placed_sid: int = int(st.get("id", -1))
 	_next_structure_id += 1
-	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
+	if kind == OutpostBuildLib.KIND_SPAWNER:
 		_structure_sources_version += 1
 	_road_network_version += 1
 	_invalidate_hover_path_cache()
@@ -543,10 +572,10 @@ func _finish_place_structure(grid: Vector2i) -> void:
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
 	_resource_links_dirty = true
-	_enqueue_builder_job(placed_sid, BattleTileControlLib.OWNER_FRIENDLY)
-	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
+	_enqueue_builder_job(placed_sid, team)
+	_sync_bridge_corridors_to_sim(false, true, true)
 	_refresh_outpost_visuals(true, true)
-	_apply_build_mode("")
+	return placed_sid
 
 
 func _find_placement_route(
@@ -581,6 +610,12 @@ func _find_placement_route(
 func _resolve_placement(
 	click: Vector2i, allow_astar: bool = false, build_kind: String = OutpostBuildLib.KIND_SPAWNER
 ) -> Dictionary:
+	return _resolve_placement_for_team(click, allow_astar, build_kind, BattleTileControlLib.OWNER_FRIENDLY)
+
+
+func _resolve_placement_for_team(
+	click: Vector2i, allow_astar: bool, build_kind: String, team: int
+) -> Dictionary:
 	var empty: Dictionary = {
 		"landing": Vector2i(-1, -1),
 		"path_packed": PackedInt32Array(),
@@ -590,7 +625,7 @@ func _resolve_placement(
 	if battle_data == null:
 		empty["reject"] = "Map not ready."
 		return empty
-	var precheck: Dictionary = _placement_precheck(click, build_kind)
+	var precheck: Dictionary = _placement_precheck_for_team(click, build_kind, team)
 	var pre_reject: String = str(precheck.get("reject", ""))
 	if pre_reject != "":
 		empty["reject"] = pre_reject
@@ -629,6 +664,10 @@ func _resolve_placement(
 
 
 func _placement_precheck(click: Vector2i, build_kind: String) -> Dictionary:
+	return _placement_precheck_for_team(click, build_kind, BattleTileControlLib.OWNER_FRIENDLY)
+
+
+func _placement_precheck_for_team(click: Vector2i, build_kind: String, team: int) -> Dictionary:
 	var result: Dictionary = {
 		"landing": Vector2i(-1, -1),
 		"reject": "",
@@ -643,12 +682,15 @@ func _placement_precheck(click: Vector2i, build_kind: String) -> Dictionary:
 	if not battle_data.is_land_cell(click.x, click.y):
 		result["reject"] = "Need land (not ocean)."
 		return result
-	var territory_reject: String = _placement_territory_reject(click.x, click.y, build_kind)
+	var territory_reject: String = _placement_territory_reject_for_team(
+		click.x, click.y, team, build_kind
+	)
 	if territory_reject != "":
 		result["reject"] = territory_reject
 		return result
+	var route_home: Vector2i = _player_home if team == BattleTileControlLib.OWNER_FRIENDLY else _enemy_home
 	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		battle_data.placed_structures, _player_home, battle_data
+		battle_data.placed_structures, route_home, battle_data
 	)
 	result["sources"] = sources
 	var landing: Vector2i
@@ -694,6 +736,14 @@ func _placement_kind_reject(
 
 
 func _placement_territory_reject(gx: int, gy: int, build_kind: String = "") -> String:
+	return _placement_territory_reject_for_team(
+		gx, gy, BattleTileControlLib.OWNER_FRIENDLY, build_kind
+	)
+
+
+func _placement_territory_reject_for_team(
+	gx: int, gy: int, team: int, build_kind: String = ""
+) -> String:
 	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
 		return ""
 	if battle_data == null or territory_sim == null or territory_sim.tile_control == null:
@@ -701,8 +751,11 @@ func _placement_territory_reject(gx: int, gy: int, build_kind: String = "") -> S
 	var idx: int = battle_data.cell_index(gx, gy)
 	if idx < 0 or idx >= territory_sim.tile_control.owners.size():
 		return ""
-	if int(territory_sim.tile_control.owners[idx]) == BattleTileControlLib.OWNER_HOSTILE:
+	var owner: int = int(territory_sim.tile_control.owners[idx])
+	if team == BattleTileControlLib.OWNER_FRIENDLY and owner == BattleTileControlLib.OWNER_HOSTILE:
 		return "Cannot build on enemy-held territory."
+	if team == BattleTileControlLib.OWNER_HOSTILE and owner == BattleTileControlLib.OWNER_FRIENDLY:
+		return "Cannot build on friendly-held territory."
 	return ""
 
 
@@ -1084,39 +1137,17 @@ func _finish_place_from_route(
 		]
 		return
 	_supply -= cost
-	var src: Vector2i = route.get("source", Vector2i(-1, -1))
-	var st: Dictionary = {
-		"id": _next_structure_id,
-		"team": BattleTileControlLib.OWNER_FRIENDLY,
-		"gx": landing.x,
-		"gy": landing.y,
-		"kind": _build_mode,
-		"state": OutpostBuildLib.STATE_CONNECTING,
-		"source_gx": src.x,
-		"source_gy": src.y,
-		"path_keys": path_packed,
-		"path_len": path_packed.size(),
-		"path_built": 1.0,
+	var placement: Dictionary = {
+		"landing": landing,
+		"path_packed": path_packed,
+		"source": route.get("source", Vector2i(-1, -1)),
 	}
-	if _build_mode == OutpostBuildLib.KIND_SPAWNER or _build_mode == OutpostBuildLib.KIND_BARRACKS:
-		st["health"] = CFG.OUTPOST_MAX_HEALTH
-	if landing != grid:
-		st["click_gx"] = grid.x
-		st["click_gy"] = grid.y
-	battle_data.placed_structures.append(st)
-	var placed_sid: int = int(st.get("id", -1))
-	_next_structure_id += 1
-	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
-		_structure_sources_version += 1
-	_road_network_version += 1
-	_invalidate_hover_path_cache()
-	_clear_placement_preview()
-	_outpost_road_dirty = true
-	_outpost_marker_dirty = true
-	_resource_links_dirty = true
-	_enqueue_builder_job(placed_sid, BattleTileControlLib.OWNER_FRIENDLY)
-	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
-	_refresh_outpost_visuals(true, true)
+	var placed_sid: int = _commit_placed_structure(
+		placement, BattleTileControlLib.OWNER_FRIENDLY, _build_mode, grid
+	)
+	if placed_sid < 0:
+		build_hint_label.text = "Could not place outpost here."
+		return
 	_apply_build_mode("")
 
 
@@ -1231,8 +1262,6 @@ func _drain_outpost_construction_queue() -> void:
 func _advance_outpost_construction(dt: float) -> void:
 	if battle_data == null or dt <= 0.0 or territory_sim == null:
 		return
-	var sim_dirty: bool = false
-	var pending_claims: Array[Vector2i] = []
 	var destroyed_ids: Array[int] = []
 	for st: Dictionary in battle_data.placed_structures:
 		var kind: String = str(st.get("kind", ""))
@@ -1243,37 +1272,8 @@ func _advance_outpost_construction(dt: float) -> void:
 		var gy: int = int(st.get("gy", 0))
 		if OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
 			_tick_outpost_construction_damage(st, gx, gy, dt, destroyed_ids)
-			if destroyed_ids.has(int(st.get("id", -1))):
-				continue
-			var build_sec: float = OutpostBuildLib.build_sec_for_kind(kind)
-			var rem: float = float(st.get("build_remaining", build_sec))
-			rem -= dt
-			st["build_remaining"] = rem
-			if rem <= 0.0:
-				st["state"] = OutpostBuildLib.STATE_ACTIVE
-				st.erase("build_remaining")
-				st.erase("health")
-				st["spawn_timer"] = 0.0
-				if kind == OutpostBuildLib.KIND_SPAWNER:
-					_structure_sources_version += 1
-					_spawners_pending_sync = true
-				_road_network_version += 1
-				_invalidate_hover_path_cache()
-				if _outpost_construction_queue != null:
-					_outpost_construction_queue.on_build_completed(int(st.get("id", -1)))
-				if kind == OutpostBuildLib.KIND_SPAWNER:
-					var team = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-					var w = battle_data.grid_width
-					var idx = int(st.get("gy", 0)) * w + int(st.get("gx", 0))
-					var tctrl = territory_sim.tile_control if territory_sim != null else null
-					if tctrl != null and idx >= 0 and idx < tctrl.owners.size() and tctrl.owners[idx] != team:
-						pending_claims.append(Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0))))
-				if kind != OutpostBuildLib.KIND_SPAWNER or pending_claims.size() > 0:
-					sim_dirty = true
 	for sid: int in destroyed_ids:
 		_destroy_outpost(sid)
-	if sim_dirty:
-		_sync_active_spawners_to_sim(pending_claims)
 
 
 func _tick_soldier_economy(dt: float) -> void:
@@ -1489,6 +1489,29 @@ func _update_builder_agents(dt: float) -> void:
 		_builder_visual_dirty = true
 	for sid: int in completed_corridor_ids:
 		_complete_corridor_link_by_id(sid)
+	var tctrl = territory_sim.tile_control if territory_sim != null else null
+	var timer_result: Dictionary = BuilderAgentLib.step_building_timers(
+		dt, battle_data.placed_structures, battle_data, tctrl
+	)
+	_apply_building_timer_result(timer_result)
+
+
+func _apply_building_timer_result(result: Dictionary) -> void:
+	var activated_sids: Array = result.get("activated_sids", [])
+	if activated_sids.is_empty():
+		return
+	var activated_spawner_sids: Array = result.get("activated_spawner_sids", [])
+	if not activated_spawner_sids.is_empty():
+		_structure_sources_version += 1
+		_spawners_pending_sync = true
+	_road_network_version += 1
+	_invalidate_hover_path_cache()
+	if _outpost_construction_queue != null:
+		for sid_var in activated_sids:
+			_outpost_construction_queue.on_build_completed(int(sid_var))
+	if bool(result.get("needs_sim_sync", false)):
+		var pending_claims: Array = result.get("pending_claims", [])
+		_sync_active_spawners_to_sim(pending_claims)
 
 
 func _on_builder_cell_arrival(st: Dictionary, seg_from_idx: int) -> void:
