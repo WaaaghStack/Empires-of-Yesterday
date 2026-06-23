@@ -638,7 +638,11 @@ func _validate_builder_selfcheck() -> void:
 		section_lines.append(msg)
 	_vlog.call("-- Builder selfcheck (BuilderAgentLib.step_frame in-memory) --")
 	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
-	if not BuilderAgentLib.run_selfcheck():
+	var sc: Dictionary = BuilderAgentLib.run_selfcheck()
+	var detail: String = str(sc.get("detail", ""))
+	if not detail.is_empty():
+		_vlog.call(detail)
+	if not bool(sc.get("ok", false)):
 		_fail("BuilderAgentLib.run_selfcheck failed")
 		_write_validate_section_to_scratch(section_lines, "qa_builder_progress1.log")
 		return

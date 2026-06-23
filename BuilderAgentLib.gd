@@ -337,7 +337,7 @@ static func step_building_timers(
 	}
 
 
-static func run_selfcheck() -> bool:
+static func run_selfcheck() -> Dictionary:
 	const GRID_W := 16
 	var home := Vector2i(0, 0)
 	var bots: Array = [
@@ -374,8 +374,14 @@ static func run_selfcheck() -> bool:
 		for ev: Dictionary in frame.get("cell_arrivals", []):
 			cells += 1
 		if str(st.get("state", "")) == OutpostBuildLib.STATE_ACTIVE:
-			print("OK  builder selfcheck CONNECTING->BUILDING->ACTIVE cells=%d" % cells)
-			return true
+			var ok_line: String = (
+				"OK  builder selfcheck CONNECTING->BUILDING->ACTIVE cells=%d" % cells
+			)
+			print(ok_line)
+			return {"ok": true, "detail": ok_line}
 	var state: String = str(st.get("state", ""))
-	print("FAIL builder selfcheck stuck state=%s cells=%d steps=%d" % [state, cells, steps])
-	return false
+	var fail_line: String = (
+		"FAIL builder selfcheck stuck state=%s cells=%d steps=%d" % [state, cells, steps]
+	)
+	print(fail_line)
+	return {"ok": false, "detail": fail_line}
