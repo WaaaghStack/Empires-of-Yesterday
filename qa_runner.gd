@@ -523,6 +523,27 @@ func _ensure_debug_supply(screen: Control) -> void:
 	screen.set("_supply", 999999.0)
 
 
+func _place_friendly_spawner_via_finish(
+	screen: Control, home: Vector2i, grid_w: int, grid_h: int, slot: int
+) -> int:
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	var battle_data = screen.get("battle_data")
+	if battle_data == null:
+		return -1
+	var pre_count: int = battle_data.placed_structures.size()
+	screen.call("_apply_build_mode", OutpostBuildLib.KIND_SPAWNER)
+	var grid: Vector2i = _find_grid_for_player_place(
+		screen, home, grid_w, grid_h, OutpostBuildLib.KIND_SPAWNER, slot
+	)
+	if grid.x < 0:
+		return -1
+	screen.call("_finish_place_structure", grid)
+	if battle_data.placed_structures.size() <= pre_count:
+		return -1
+	var placed: Dictionary = battle_data.placed_structures[battle_data.placed_structures.size() - 1]
+	return int(placed.get("id", -1))
+
+
 func _find_grid_for_player_place(screen: Control, home: Vector2i, grid_w: int, grid_h: int, kind: String, slot: int) -> Vector2i:
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var spacing: int = WorldConquestConfigLib.MIN_SPAWNER_SPACING_CELLS + 1
@@ -547,12 +568,14 @@ func _debug_place_near_home(
 	kind: String,
 	team: int,
 	slot: int,
+	max_attempts: int = 32,
+	y_span: int = 3,
 ) -> int:
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var spacing: int = WorldConquestConfigLib.MIN_SPAWNER_SPACING_CELLS + 1
-	for attempt in range(32):
+	for attempt in range(maxi(max_attempts, 1)):
 		var gx: int = (home.x + spacing * (slot + 1) + attempt * 3) % grid_w
-		for dy in range(-3, 4):
+		for dy in range(-y_span, y_span + 1):
 			var gy: int = clampi(home.y + dy + (slot % 2), 0, grid_h - 1)
 			var sid: int = int(screen.call("debug_place_outpost_at", Vector2i(gx, gy), kind, team))
 			if sid >= 0:
@@ -640,11 +663,9 @@ func _validate_builder_agents() -> void:
 	_ensure_debug_supply(screen)
 	var w: int = battle_data.grid_width
 	var h: int = battle_data.grid_height
-	var test_sid: int = _debug_place_near_home(
-		screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, BattleTileControlLib.OWNER_FRIENDLY, 0
-	)
+	var test_sid: int = _place_friendly_spawner_via_finish(screen, home, w, h, 0)
 	if test_sid < 0:
-		_fail("builder validate debug_place_outpost_at failed near home %s" % str(home))
+		_fail("builder validate _finish_place_structure failed near home %s" % str(home))
 		screen.queue_free()
 		return
 	var st_placed: Dictionary = _structure_by_sid(battle_data, test_sid)
@@ -825,23 +846,17 @@ func _validate_builder_progress() -> void:
 		var struct_count: int = 2
 		var seeded_sids: Array[int] = []
 		for i in range(struct_count):
-			var sid: int = _debug_place_near_home(
-				screen,
-				home,
-				w,
-				h,
-				OutpostBuildLib.KIND_SPAWNER,
-				BattleTileControlLib.OWNER_FRIENDLY,
-				i + (run_idx - 1) * 3,
+			var sid: int = _place_friendly_spawner_via_finish(
+				screen, home, w, h, i + (run_idx - 1) * 3
 			)
 			if sid < 0:
-				_fail("builder progress %d debug_place_outpost_at failed near home" % run_idx)
+				_fail("builder progress %d _finish_place_structure failed near home" % run_idx)
 				screen.queue_free()
 				return
 			seeded_sids.append(sid)
 			var st_seed: Dictionary = _structure_by_sid(battle_data, sid)
 			section_lines.append(
-				"placement_enqueue_sid=%d team=friendly gx=%d gy=%d"
+				"finish_place_sid=%d team=friendly gx=%d gy=%d"
 				% [sid, int(st_seed.get("gx", -1)), int(st_seed.get("gy", -1))]
 			)
 		if run_idx == 2:
@@ -854,6 +869,8 @@ func _validate_builder_progress() -> void:
 				OutpostBuildLib.KIND_SPAWNER,
 				BattleTileControlLib.OWNER_HOSTILE,
 				0,
+				64,
+				8,
 			)
 			if enemy_sid < 0:
 				_fail("builder progress %d hostile debug_place_outpost_at failed near enemy home" % run_idx)
@@ -942,17 +959,15 @@ func _validate_fps_fix_paths() -> void:
 	_ensure_debug_supply(screen)
 	var placed_sids: Array[int] = []
 	for i in range(10):
-		var sid: int = _debug_place_near_home(
-			screen, home, w, h, OutpostBuildLib.KIND_SPAWNER, BattleTileControlLib.OWNER_FRIENDLY, i
-		)
+		var sid: int = _place_friendly_spawner_via_finish(screen, home, w, h, i)
 		if sid < 0:
-			_fail("fps fix validate debug_place_outpost_at failed slot=%d near home" % i)
+			_fail("fps fix validate _finish_place_structure failed slot=%d near home" % i)
 			screen.queue_free()
 			return
 		placed_sids.append(sid)
 		var st_fps: Dictionary = _structure_by_sid(battle_data, sid)
 		_vlog.call(
-			"placement_enqueue_sid=%d gx=%d gy=%d"
+			"finish_place_sid=%d gx=%d gy=%d"
 			% [sid, int(st_fps.get("gx", -1)), int(st_fps.get("gy", -1))]
 		)
 		for _warm in range(8):
