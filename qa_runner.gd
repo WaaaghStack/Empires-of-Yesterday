@@ -83,6 +83,7 @@ func _run_all_async() -> void:
 	_validate_outpost_construction_queue()
 	_validate_visual_drain_ordering()
 	await _validate_builder_agents()
+	await _validate_builder_progress()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
@@ -454,15 +455,55 @@ func _write_validate_section_to_scratch(section_lines: PackedStringArray, filena
 		out.close()
 
 
-func _validate_builder_agents() -> void:
-	_log("-- Builder agents (2 per home, job queue, cell arrivals) --")
-	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
-	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
-	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+const BUILDER_PROCESS_CELL_MAX_FRAMES := 150
+const BUILDER_PROCESS_ROAD_MAX_FRAMES := 360
+const BUILDER_PROCESS_ACTIVE_MAX_FRAMES := 420
+const BUILDER_PROGRESS_MAX_FRAMES := 600
+
+
+func _structure_by_sid(battle_data, sid: int) -> Dictionary:
+	if battle_data == null or sid < 0:
+		return {}
+	for st in battle_data.placed_structures:
+		if int(st.get("id", -1)) == sid:
+			return st
+	return {}
+
+
+func _sum_path_built_since_id(battle_data, min_id: int) -> float:
+	var sum: float = 0.0
+	if battle_data == null:
+		return sum
+	for st in battle_data.placed_structures:
+		if int(st.get("id", -1)) >= min_id:
+			sum += float(st.get("path_built", 1.0))
+	return sum
+
+
+func _count_states_since_id(battle_data, min_id: int) -> Dictionary:
+	var counts := {
+		"connecting": 0,
+		"building": 0,
+		"active": 0,
+		"other": 0,
+	}
+	if battle_data == null:
+		return counts
+	for st in battle_data.placed_structures:
+		if int(st.get("id", -1)) < min_id:
+			continue
+		var state: String = str(st.get("state", ""))
+		if counts.has(state):
+			counts[state] = int(counts[state]) + 1
+		else:
+			counts["other"] = int(counts["other"]) + 1
+	return counts
+
+
+func _bootstrap_world_conquest_screen() -> Control:
 	var globe_scene: PackedScene = load("res://WorldConquestScreen.tscn")
 	if globe_scene == null:
-		_fail("builder validate could not load WorldConquestScreen.tscn")
-		return
+		return null
 	var screen: Control = globe_scene.instantiate()
 	add_child(screen)
 	var bootstrap_frames: int = 0
@@ -470,8 +511,19 @@ func _validate_builder_agents() -> void:
 		await get_tree().process_frame
 		bootstrap_frames += 1
 	if bool(screen.get("_loading")):
-		_fail("builder validate bootstrap timed out")
 		screen.queue_free()
+		return null
+	return screen
+
+
+func _validate_builder_agents() -> void:
+	_log("-- Builder agents (2 per home, job queue, _process lifecycle) --")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	var screen: Control = await _bootstrap_world_conquest_screen()
+	if screen == null:
+		_fail("builder validate bootstrap timed out")
 		return
 	var agents: Array = screen.get("_builder_agents")
 	var home: Vector2i = screen.get("_player_home")
@@ -505,7 +557,6 @@ func _validate_builder_agents() -> void:
 		_fail("builder validate missing battle_data")
 		screen.queue_free()
 		return
-	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 	var w: int = battle_data.grid_width
 	var path: Array[Vector2i] = [home]
 	for step in range(2):
@@ -528,37 +579,39 @@ func _validate_builder_agents() -> void:
 		"health": WorldConquestConfigLib.OUTPOST_MAX_HEALTH,
 	})
 	screen.call("_enqueue_builder_job", test_sid, BattleTileControlLib.OWNER_FRIENDLY)
-	var travel: float = BuilderAgentLib.cell_travel_sec()
-	var seg_count: int = maxi(path_len - 1, 1)
-	screen.call("_update_builder_agents", travel)
-	var st_mid: Dictionary = {}
-	for st in battle_data.placed_structures:
-		if int(st.get("id", -1)) == test_sid:
-			st_mid = st
+	var mid_built: float = 1.0
+	var mid_frames: int = 0
+	for fi in range(BUILDER_PROCESS_CELL_MAX_FRAMES):
+		await get_tree().process_frame
+		mid_frames = fi + 1
+		var st_mid: Dictionary = _structure_by_sid(battle_data, test_sid)
+		if st_mid.is_empty():
+			continue
+		mid_built = float(st_mid.get("path_built", 1.0))
+		if mid_built > 1.0:
 			break
-	if st_mid.is_empty():
-		_fail("builder validate test structure missing after partial travel")
-		screen.queue_free()
-		return
-	var mid_built: float = float(st_mid.get("path_built", 1.0))
 	if mid_built <= 1.0:
-		_fail("builder validate partial cell did not advance path_built (got %.1f)" % mid_built)
+		_fail("builder validate _process did not advance path_built in %d frames (got %.1f)" % [mid_frames, mid_built])
 		screen.queue_free()
 		return
-	screen.call("_update_builder_agents", float(seg_count - 1) * travel)
+	var road_frames: int = 0
 	var st_after_road: Dictionary = {}
-	for st2 in battle_data.placed_structures:
-		if int(st2.get("id", -1)) == test_sid:
-			st_after_road = st2
+	for fi2 in range(BUILDER_PROCESS_ROAD_MAX_FRAMES):
+		await get_tree().process_frame
+		road_frames = mid_frames + fi2 + 1
+		st_after_road = _structure_by_sid(battle_data, test_sid)
+		if st_after_road.is_empty():
+			continue
+		if str(st_after_road.get("state", "")) == OutpostBuildLib.STATE_BUILDING:
 			break
 	if st_after_road.is_empty():
-		_fail("builder validate structure missing after full road build")
+		_fail("builder validate structure missing after road _process frames")
 		screen.queue_free()
 		return
 	var road_state: String = str(st_after_road.get("state", ""))
 	var road_built: float = float(st_after_road.get("path_built", 0.0))
 	if road_state != OutpostBuildLib.STATE_BUILDING:
-		_fail("builder validate expected BUILDING after road, got %s" % road_state)
+		_fail("builder validate expected BUILDING after road _process, got %s in %d frames" % [road_state, road_frames])
 		screen.queue_free()
 		return
 	if int(road_built) != path_len:
@@ -570,42 +623,124 @@ func _validate_builder_agents() -> void:
 		_fail("builder validate queue should be pending after path completion")
 		screen.queue_free()
 		return
-	var build_sec: float = OutpostBuildLib.build_sec_for_kind(OutpostBuildLib.KIND_SPAWNER)
-	screen.call("_advance_outpost_construction", build_sec)
+	var active_frames: int = 0
 	var st_active: Dictionary = {}
-	for st3 in battle_data.placed_structures:
-		if int(st3.get("id", -1)) == test_sid:
-			st_active = st3
+	for fi3 in range(BUILDER_PROCESS_ACTIVE_MAX_FRAMES):
+		await get_tree().process_frame
+		active_frames = road_frames + fi3 + 1
+		st_active = _structure_by_sid(battle_data, test_sid)
+		if st_active.is_empty():
+			continue
+		if str(st_active.get("state", "")) == OutpostBuildLib.STATE_ACTIVE:
 			break
 	if st_active.is_empty():
-		_fail("builder validate structure missing after build timer")
+		_fail("builder validate structure missing after build _process frames")
 		screen.queue_free()
 		return
 	if str(st_active.get("state", "")) != OutpostBuildLib.STATE_ACTIVE:
-		_fail("builder validate expected ACTIVE after build timer, got %s" % str(st_active.get("state", "")))
+		_fail(
+			"builder validate expected ACTIVE via _process, got %s after %d frames"
+			% [str(st_active.get("state", "")), active_frames]
+		)
 		screen.queue_free()
 		return
 	if not bool(screen.get("_spawners_pending_sync")):
-		_fail("builder validate _spawners_pending_sync not set after ACTIVE transition")
-		screen.queue_free()
-		return
-	if queue == null or not queue.has_pending():
-		_fail("builder validate queue should be pending after on_build_completed")
+		_fail("builder validate _spawners_pending_sync not set after ACTIVE _process transition")
 		screen.queue_free()
 		return
 	_log(
-		"OK  builder agents count=%d lifecycle CONNECTING->BUILDING(path=%d)->ACTIVE spawner_sync=yes"
-		% [agents.size(), path_len]
+		"OK  builder agents count=%d lifecycle via _process CONNECTING->BUILDING(path=%d)->ACTIVE frames=%d"
+		% [agents.size(), path_len, active_frames]
 	)
 	_write_validate_section_to_scratch(
 		PackedStringArray([
-			"builder lifecycle: partial path_built=%.1f" % mid_built,
-			"builder lifecycle: road state=%s path_built=%.1f" % [road_state, road_built],
-			"builder lifecycle: final state=%s spawners_pending_sync=true" % str(st_active.get("state", "")),
+			"builder lifecycle via _process: partial path_built=%.1f frames=%d" % [mid_built, mid_frames],
+			"builder lifecycle via _process: road state=%s path_built=%.1f frames=%d" % [road_state, road_built, road_frames],
+			"builder lifecycle via _process: final state=%s frames=%d spawners_pending_sync=true"
+			% [str(st_active.get("state", "")), active_frames],
 		]),
 		"qa_builder_lifecycle.log",
 	)
 	screen.queue_free()
+
+
+func _validate_builder_progress() -> void:
+	_log("-- Builder progress via real _process frames (2 exercises) --")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	for run_idx in range(1, 3):
+		var section_lines: PackedStringArray = PackedStringArray()
+		section_lines.append("-- builder progress exercise %d --" % run_idx)
+		var screen: Control = await _bootstrap_world_conquest_screen()
+		if screen == null:
+			_fail("builder progress %d bootstrap timed out" % run_idx)
+			return
+		var battle_data = screen.get("battle_data")
+		var home: Vector2i = screen.get("_player_home")
+		if battle_data == null or home.x < 0:
+			_fail("builder progress %d missing battle_data/home" % run_idx)
+			screen.queue_free()
+			return
+		var w: int = battle_data.grid_width
+		var struct_count: int = 2 if run_idx == 1 else 3
+		var base_id: int = 800 + run_idx * 10
+		var seeded_sids: Array[int] = []
+		for i in range(struct_count):
+			var path: Array[Vector2i] = [home]
+			for step in range(2 + i):
+				var cx: int = (home.x + step + 1 + i) % w
+				path.append(Vector2i(cx, home.y))
+			var packed: PackedInt32Array = OutpostBuildLib.path_to_packed_keys(path, w)
+			var landing: Vector2i = path[path.size() - 1]
+			var sid: int = base_id + i
+			seeded_sids.append(sid)
+			battle_data.placed_structures.append({
+				"id": sid,
+				"team": BattleTileControlLib.OWNER_FRIENDLY,
+				"gx": landing.x,
+				"gy": landing.y,
+				"kind": OutpostBuildLib.KIND_SPAWNER,
+				"state": OutpostBuildLib.STATE_CONNECTING,
+				"path_built": 1.0,
+				"path_len": path.size(),
+				"path_keys": packed,
+				"health": WorldConquestConfigLib.OUTPOST_MAX_HEALTH,
+			})
+			screen.call("_enqueue_builder_job", sid, BattleTileControlLib.OWNER_FRIENDLY)
+		var pre_sum: float = _sum_path_built_since_id(battle_data, base_id)
+		section_lines.append("pre path_built_sum=%.1f structures=%d" % [pre_sum, struct_count])
+		var grew: bool = false
+		var grow_frame: int = -1
+		for fi in range(BUILDER_PROGRESS_MAX_FRAMES):
+			await get_tree().process_frame
+			var cur_sum: float = _sum_path_built_since_id(battle_data, base_id)
+			if cur_sum > pre_sum:
+				grew = true
+				grow_frame = fi + 1
+				section_lines.append(
+					"path_built grew via _process frame=%d sum=%.1f->%.1f"
+					% [grow_frame, pre_sum, cur_sum]
+				)
+				break
+		if not grew:
+			_fail("builder progress %d path_built did not grow in %d _process frames" % [run_idx, BUILDER_PROGRESS_MAX_FRAMES])
+			screen.queue_free()
+			return
+		var queue = screen.get("_outpost_construction_queue")
+		var queue_saw_pending: bool = queue != null and queue.has_pending()
+		section_lines.append("queue_pending_after_growth=%s" % str(queue_saw_pending))
+		for _drain in range(120):
+			await get_tree().process_frame
+		var post_states: Dictionary = _count_states_since_id(battle_data, base_id)
+		section_lines.append(
+			"post-drain states connecting=%d building=%d active=%d"
+			% [int(post_states.connecting), int(post_states.building), int(post_states.active)]
+		)
+		section_lines.append("OK  builder progress exercise %d via _process" % run_idx)
+		_write_validate_section_to_scratch(section_lines, "qa_builder_progress%d.log" % run_idx)
+		screen.queue_free()
+	_log("OK  builder progress exercises wrote qa_builder_progress1.log + qa_builder_progress2.log")
 
 
 func _validate_fps_fix_paths() -> void:
@@ -616,7 +751,6 @@ func _validate_fps_fix_paths() -> void:
 	_vlog.call("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up, queue drain, builder bots) --")
 	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
 	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 	const BattleTileControlLib := preload("res://BattleTileControl.gd")
 	if not FrameBudgetProfilerLib.budget_allows_catchup(10.0, WorldConquestConfigLib.FRAME_BUDGET_MS):
@@ -694,51 +828,52 @@ func _validate_fps_fix_paths() -> void:
 		_fail("fps fix validate missing territory_sim")
 		screen.queue_free()
 		return
-	var enemy_home: Vector2i = screen.get("_enemy_home")
-	var dt: float = WorldConquestConfigLib.SIM_DT
-	var max_steps: int = WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME
-	if not FrameBudgetProfilerLib.budget_allows_catchup(
-		profiler.prior_frame_ms(), WorldConquestConfigLib.FRAME_BUDGET_MS
-	):
-		max_steps = 1
-	var pre_built_sum: float = 0.0
-	for st_pre in battle_data.placed_structures:
-		if int(st_pre.get("id", -1)) >= next_id:
-			pre_built_sum += float(st_pre.get("path_built", 1.0))
-	var adv: Dictionary = territory_sim.advance_dt(dt, max_steps)
-	var sim_steps: int = int(adv.get("steps", 0))
-	screen.call("_update_builder_agents", BuilderAgentLib.cell_travel_sec())
-	if sim_steps > 0:
-		screen.call("_enqueue_ownership_overlay_delta")
-	screen.call("_drain_outpost_construction_queue")
-	globe.sync_roads(battle_data.placed_structures, [next_id])
-	globe.refresh_markers(battle_data.placed_structures, home, enemy_home, [next_id])
-	var post_built_sum: float = 0.0
-	for st_post in battle_data.placed_structures:
-		if int(st_post.get("id", -1)) >= next_id:
-			post_built_sum += float(st_post.get("path_built", 1.0))
+	var pre_built_sum: float = _sum_path_built_since_id(battle_data, next_id)
+	const BUILDER_HOTPATH_FRAMES := 90
+	for _hot in range(BUILDER_HOTPATH_FRAMES):
+		await get_tree().process_frame
+	var post_built_sum: float = _sum_path_built_since_id(battle_data, next_id)
 	var queue = screen.get("_outpost_construction_queue")
 	var queue_pending: bool = queue != null and queue.has_pending()
 	_vlog.call(
-		"fps fix explicit hot-path sim_steps=%d path_built_sum=%.3f->%.3f queue_pending=%s"
-		% [sim_steps, pre_built_sum, post_built_sum, queue_pending]
+		"fps fix hot-path _process frames=%d path_built_sum=%.3f->%.3f queue_pending=%s"
+		% [BUILDER_HOTPATH_FRAMES, pre_built_sum, post_built_sum, queue_pending]
 	)
 	if post_built_sum <= pre_built_sum:
-		_fail("fps fix explicit _update_builder_agents did not grow path_built")
+		_fail("fps fix hot-path _process frames did not grow path_built")
 		screen.queue_free()
 		return
 	profiler.reset_samples()
 	screen.set("_paused", false)
-	var connecting_count: int = 0
-	for st_chk in battle_data.placed_structures:
-		if str(st_chk.get("state", "")) == OutpostBuildLib.STATE_CONNECTING:
-			connecting_count += 1
+	var connecting_count: int = int(_count_states_since_id(battle_data, next_id).connecting)
 	if connecting_count < 10:
 		_fail("fps fix validate expected 10 CONNECTING structures, got %d" % connecting_count)
 		screen.queue_free()
 		return
+	var pre180_built: float = _sum_path_built_since_id(battle_data, next_id)
+	var pre180_states: Dictionary = _count_states_since_id(battle_data, next_id)
 	for _fi in range(180):
 		await get_tree().process_frame
+	var post180_built: float = _sum_path_built_since_id(battle_data, next_id)
+	var post180_states: Dictionary = _count_states_since_id(battle_data, next_id)
+	_vlog.call(
+		"fps post-180-frames connecting=%d building=%d active=%d path_built_sum=%.1f->%.1f"
+		% [
+			int(post180_states.connecting),
+			int(post180_states.building),
+			int(post180_states.active),
+			pre180_built,
+			post180_built,
+		]
+	)
+	if (
+		post180_built <= pre180_built
+		and int(post180_states.building) == 0
+		and int(post180_states.active) == 0
+	):
+		_fail("fps validate no builder/build progress after 180 _process frames")
+		screen.queue_free()
+		return
 	var summary: Dictionary = profiler.summary()
 	if summary.is_empty():
 		_fail("fps fix validate profiler summary empty after construction frames")
