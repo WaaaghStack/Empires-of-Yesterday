@@ -22,6 +22,7 @@ var _globe_mi: MeshInstance3D
 var _fluid_mi: MeshInstance3D
 var _markers: Node3D
 var _soldiers: Node3D
+var _builders: Node3D
 var _effects: Node3D
 var _roads: Node3D
 var _deposits: Node3D
@@ -42,6 +43,9 @@ var _marker_pool_used: int = 0
 var _soldier_pool: Array[MeshInstance3D] = []
 var _soldier_pool_used: int = 0
 var _soldier_sphere_mesh: SphereMesh
+var _builder_pool: Array[MeshInstance3D] = []
+var _builder_pool_used: int = 0
+var _builder_mesh: BoxMesh
 var _marker_box_mesh: BoxMesh
 var _road_seg_count: Dictionary = {}
 var _road_nodes: Dictionary = {}
@@ -162,6 +166,11 @@ func _build_scene() -> void:
 	_soldier_sphere_mesh = SphereMesh.new()
 	_soldier_sphere_mesh.radius = 0.35
 	_soldier_sphere_mesh.height = 0.7
+	_builders = Node3D.new()
+	_builders.name = "Builders"
+	add_child(_builders)
+	_builder_mesh = BoxMesh.new()
+	_builder_mesh.size = Vector3(0.55, 0.35, 0.55)
 	_effects = Node3D.new()
 	_effects.name = "Effects"
 	add_child(_effects)
@@ -1026,6 +1035,76 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 		if alpha < 0.99
 		else BaseMaterial3D.TRANSPARENCY_DISABLED
 	)
+
+
+func grid_lerp_surface_pos(grid_a: Vector2i, grid_b: Vector2i, t: float, lift: float) -> Vector3:
+	var ta: float = clampf(t, 0.0, 1.0)
+	var pos_a: Vector3 = _grid_surface_pos(grid_a, lift)
+	var pos_b: Vector3 = _grid_surface_pos(grid_b, lift)
+	return pos_a.lerp(pos_b, ta)
+
+
+func grid_float_surface_pos(gx_f: float, gy_f: float, lift: float) -> Vector3:
+	if battle_data == null:
+		return Vector3.ZERO
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var gx: int = int(floor(gx_f)) % w
+	if gx < 0:
+		gx += w
+	var gy: int = clampi(int(floor(gy_f)), 0, h - 1)
+	var fx: float = gx_f - floor(gx_f)
+	var fy: float = gy_f - float(gy)
+	var gx2: int = (gx + 1) % w
+	var gy2: int = clampi(gy + 1, 0, h - 1)
+	var p00: Vector3 = _grid_surface_pos(Vector2i(gx, gy), lift)
+	var p10: Vector3 = _grid_surface_pos(Vector2i(gx2, gy), lift)
+	var p01: Vector3 = _grid_surface_pos(Vector2i(gx, gy2), lift)
+	var p11: Vector3 = _grid_surface_pos(Vector2i(gx2, gy2), lift)
+	var top: Vector3 = p00.lerp(p10, fx)
+	var bot: Vector3 = p01.lerp(p11, fx)
+	return top.lerp(bot, clampf(fy, 0.0, 1.0))
+
+
+func sync_builders(world_positions: Array, teams: PackedByteArray) -> void:
+	if _builders == null:
+		return
+	_builder_pool_used = 0
+	var n: int = mini(world_positions.size(), teams.size())
+	for i in range(n):
+		var pos: Vector3 = world_positions[i]
+		if pos == Vector3.ZERO:
+			continue
+		var team: int = int(teams[i])
+		var col: Color = (
+			Color(0.45, 0.95, 1.0) if team == BattleTileControlLib.OWNER_FRIENDLY
+			else Color(1.0, 0.55, 0.38)
+		)
+		_place_pooled_builder(pos, col)
+	for j in range(_builder_pool_used, _builder_pool.size()):
+		_builder_pool[j].visible = false
+
+
+func _place_pooled_builder(pos: Vector3, color: Color) -> void:
+	if _builders == null:
+		return
+	while _builder_pool.size() <= _builder_pool_used:
+		var node := MeshInstance3D.new()
+		node.mesh = _builder_mesh
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		node.material_override = StandardMaterial3D.new()
+		var mat := node.material_override as StandardMaterial3D
+		mat.emission_enabled = true
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_builders.add_child(node)
+		_builder_pool.append(node)
+	var box: MeshInstance3D = _builder_pool[_builder_pool_used]
+	_builder_pool_used += 1
+	box.visible = true
+	box.position = pos
+	var mat2 := box.material_override as StandardMaterial3D
+	mat2.albedo_color = color
+	mat2.emission = color * 0.65
 
 
 func sync_soldiers(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:

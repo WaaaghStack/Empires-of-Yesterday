@@ -11,6 +11,7 @@ const ResourceLib := preload("res://WorldConquestResources.gd")
 const RoutePlannerLib := preload("res://RoutePlannerRustBackend.gd")
 const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 const OutpostConstructionQueueLib := preload("res://OutpostConstructionQueue.gd")
+const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
 
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
@@ -85,6 +86,11 @@ var _bridges_repaired: bool = false
 var _bridge_backend_sync_pending: bool = false
 var _bridge_backend_sync_accum: float = 0.0
 var _outpost_construction_queue: OutpostConstructionQueueLib
+var _builder_agents: Array[Dictionary] = []
+var _builder_job_queue_friendly: Array[int] = []
+var _builder_job_queue_hostile: Array[int] = []
+var _builder_visual_dirty: bool = true
+var _builder_visual_clock: float = 0.0
 var _soldier_visual_dirty: bool = true
 var _soldier_visual_clock: float = 0.0
 var route_planner: RoutePlannerLib
@@ -237,6 +243,7 @@ func _setup_world_visuals() -> void:
 	_refresh_markers()
 	_refresh_resource_deposits()
 	_resource_links_dirty = true
+	_init_builder_agents()
 	_on_play_area_resized(true)
 
 
@@ -330,8 +337,10 @@ func _process(delta: float) -> void:
 			if _overlay_clock >= 1.0 / CFG.OVERLAY_UPDATES_PER_SEC:
 				_overlay_clock = 0.0
 				_update_tile_overlay(false)
+		_update_builder_agents(delta * _speed_mult)
 	_update_outpost_visuals(delta)
 	_update_resource_visuals(delta)
+	_update_builder_visuals(delta)
 	var soldier_t: int = 0
 	if _frame_profiler != null:
 		soldier_t = _frame_profiler.begin_phase("soldiers")
@@ -524,6 +533,7 @@ func _finish_place_structure(grid: Vector2i) -> void:
 		st["click_gx"] = grid.x
 		st["click_gy"] = grid.y
 	battle_data.placed_structures.append(st)
+	var placed_sid: int = int(st.get("id", -1))
 	_next_structure_id += 1
 	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
 		_structure_sources_version += 1
@@ -533,6 +543,7 @@ func _finish_place_structure(grid: Vector2i) -> void:
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
 	_resource_links_dirty = true
+	_enqueue_builder_job(placed_sid, BattleTileControlLib.OWNER_FRIENDLY)
 	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
 	_refresh_outpost_visuals(true, true)
 	_apply_build_mode("")
@@ -1093,6 +1104,7 @@ func _finish_place_from_route(
 		st["click_gx"] = grid.x
 		st["click_gy"] = grid.y
 	battle_data.placed_structures.append(st)
+	var placed_sid: int = int(st.get("id", -1))
 	_next_structure_id += 1
 	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
 		_structure_sources_version += 1
@@ -1102,6 +1114,7 @@ func _finish_place_from_route(
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
 	_resource_links_dirty = true
+	_enqueue_builder_job(placed_sid, BattleTileControlLib.OWNER_FRIENDLY)
 	_sync_bridge_corridors_to_sim(false, true, true)  # placement; force visual now cheap via bytes
 	_refresh_outpost_visuals(true, true)
 	_apply_build_mode("")
@@ -1233,37 +1246,6 @@ func _advance_outpost_construction(dt: float) -> void:
 			_tick_outpost_construction_damage(st, gx, gy, dt, destroyed_ids)
 			if destroyed_ids.has(int(st.get("id", -1))):
 				continue
-		if state == OutpostBuildLib.STATE_CONNECTING:
-			var prev_cells: int = int(floor(float(st.get("path_built", 1.0))))
-			var built: float = float(st.get("path_built", 1.0))
-			built += CFG.OUTPOST_ROAD_CELLS_PER_SEC * dt
-			st["path_built"] = built
-			var path_len: int = OutpostBuildLib.path_len_from_structure(st)
-			if path_len <= 0:
-				path_len = int(st.get("path_len", 0))
-			st["path_len"] = path_len
-			if built >= float(path_len):
-				st["path_built"] = float(path_len)
-				var is_corridor_link = kind == OutpostBuildLib.KIND_CORRIDOR_LINK
-				var done_sid: int = int(st.get("id", -1))
-				var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-				if _outpost_construction_queue != null:
-					_outpost_construction_queue.on_path_completed(
-						done_sid, gx, gy, team, is_corridor_link
-					)
-				if is_corridor_link:
-					completed_corridor_ids.append(done_sid)
-				else:
-					st["state"] = OutpostBuildLib.STATE_BUILDING
-					st["build_remaining"] = OutpostBuildLib.build_sec_for_kind(kind)
-			elif int(floor(built)) != prev_cells:
-				var path_sid: int = int(st.get("id", -1))
-				if OutpostBuildLib.is_corridor_path_kind(kind) and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
-					_road_network_version += 1
-					if kind == OutpostBuildLib.KIND_SPAWNER:
-						_resource_links_dirty = true
-				if _outpost_construction_queue != null:
-					_outpost_construction_queue.on_cell_advanced(path_sid)
 		elif OutpostBuildLib.has_build_phase(kind) and state == OutpostBuildLib.STATE_BUILDING:
 			var build_sec: float = OutpostBuildLib.build_sec_for_kind(kind)
 			var rem: float = float(st.get("build_remaining", build_sec))
@@ -1351,6 +1333,255 @@ func _tick_barracks_spawns(dt: float) -> void:
 			_friendly_resources[au_idx] -= spawn_cost
 			st["spawn_timer"] = timer - CFG.BARRACKS_SPAWN_INTERVAL_SEC
 			_soldier_visual_dirty = true
+
+
+func _init_builder_agents() -> void:
+	_builder_agents.clear()
+	_builder_job_queue_friendly.clear()
+	_builder_job_queue_hostile.clear()
+	if _player_home.x >= 0:
+		for slot in range(CFG.BUILDER_BOTS_PER_HOME):
+			_builder_agents.append(
+				BuilderAgentLib.make_bot(BattleTileControlLib.OWNER_FRIENDLY, _player_home, slot)
+			)
+	if _enemy_home.x >= 0:
+		for slot in range(CFG.BUILDER_BOTS_PER_HOME):
+			_builder_agents.append(
+				BuilderAgentLib.make_bot(BattleTileControlLib.OWNER_HOSTILE, _enemy_home, slot)
+			)
+	_builder_visual_dirty = true
+
+
+func _builder_job_queue_for_team(team: int) -> Array[int]:
+	if team == BattleTileControlLib.OWNER_HOSTILE:
+		return _builder_job_queue_hostile
+	return _builder_job_queue_friendly
+
+
+func _enqueue_builder_job(sid: int, team: int) -> void:
+	if sid < 0:
+		return
+	var q: Array[int] = _builder_job_queue_for_team(team)
+	if not q.has(sid):
+		q.append(sid)
+	_assign_builder_jobs(team)
+
+
+func _assign_builder_jobs(team_filter: int = -1) -> void:
+	for bot: Dictionary in _builder_agents:
+		if str(bot.get("state", "")) != BuilderAgentLib.STATE_IDLE:
+			continue
+		var team: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+		if team_filter >= 0 and team != team_filter:
+			continue
+		var q: Array[int] = _builder_job_queue_for_team(team)
+		while not q.is_empty():
+			var sid: int = q[0]
+			var st: Dictionary = _find_structure_by_sid(sid)
+			if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
+				q.remove_at(0)
+				continue
+			q.remove_at(0)
+			_start_builder_job(bot, sid)
+			break
+
+
+func _start_builder_job(bot: Dictionary, sid: int) -> void:
+	var st: Dictionary = _find_structure_by_sid(sid)
+	if st.is_empty():
+		return
+	bot["state"] = BuilderAgentLib.STATE_WORKING
+	bot["job_sid"] = sid
+	bot["seg_from_idx"] = BuilderAgentLib.next_seg_index(float(st.get("path_built", 1.0)))
+	bot["seg_t"] = 0.0
+	bot["return_t"] = 0.0
+	_builder_visual_dirty = true
+
+
+func _begin_builder_return(bot: Dictionary) -> void:
+	var pos: Vector2 = _builder_work_grid_pos(bot)
+	bot["return_gx_f"] = pos.x
+	bot["return_gy_f"] = pos.y
+	bot["state"] = BuilderAgentLib.STATE_RETURNING
+	bot["job_sid"] = -1
+	bot["seg_t"] = 0.0
+	bot["return_t"] = 0.0
+	_builder_visual_dirty = true
+
+
+func _find_structure_by_sid(sid: int) -> Dictionary:
+	if sid < 0 or battle_data == null:
+		return {}
+	for st: Dictionary in battle_data.placed_structures:
+		if int(st.get("id", -1)) == sid:
+			return st
+	return {}
+
+
+func _cancel_builder_job_for_sid(sid: int) -> void:
+	if sid < 0:
+		return
+	_builder_job_queue_friendly.erase(sid)
+	_builder_job_queue_hostile.erase(sid)
+	for bot: Dictionary in _builder_agents:
+		if int(bot.get("job_sid", -1)) == sid:
+			_begin_builder_return(bot)
+
+
+func _update_builder_agents(dt: float) -> void:
+	if battle_data == null or dt <= 0.0 or _builder_agents.is_empty():
+		return
+	var travel_sec: float = BuilderAgentLib.cell_travel_sec()
+	var completed_corridor_ids: Array[int] = []
+	for bot: Dictionary in _builder_agents:
+		var state: String = str(bot.get("state", ""))
+		if state == BuilderAgentLib.STATE_IDLE:
+			bot["orbit_angle"] = float(bot.get("orbit_angle", 0.0)) + CFG.BUILDER_ORBIT_SPEED * dt
+			continue
+		if state == BuilderAgentLib.STATE_RETURNING:
+			var ret_t: float = float(bot.get("return_t", 0.0)) + dt / maxf(CFG.BUILDER_RETURN_SEC, 0.001)
+			bot["return_t"] = ret_t
+			if ret_t >= 1.0:
+				bot["state"] = BuilderAgentLib.STATE_IDLE
+				bot["return_t"] = 0.0
+				_assign_builder_jobs(int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY)))
+			_builder_visual_dirty = true
+			continue
+		if state != BuilderAgentLib.STATE_WORKING:
+			continue
+		var job_sid: int = int(bot.get("job_sid", -1))
+		var st: Dictionary = _find_structure_by_sid(job_sid)
+		if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
+			_begin_builder_return(bot)
+			_assign_builder_jobs(int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY)))
+			continue
+		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+		var seg_idx: int = int(bot.get("seg_from_idx", 0))
+		if packed.size() < 2 or seg_idx >= packed.size() - 1:
+			_on_builder_path_completed(st, completed_corridor_ids)
+			_begin_builder_return(bot)
+			_assign_builder_jobs(int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY)))
+			continue
+		var seg_t: float = float(bot.get("seg_t", 0.0)) + dt / maxf(travel_sec, 0.001)
+		var job_finished: bool = false
+		while seg_t >= 1.0:
+			seg_t -= 1.0
+			_on_builder_cell_arrival(st, seg_idx)
+			var path_len: int = OutpostBuildLib.path_len_from_structure(st)
+			if path_len <= 0:
+				path_len = int(st.get("path_len", 0))
+			st["path_len"] = path_len
+			var built: float = float(st.get("path_built", 1.0))
+			if built >= float(path_len):
+				_on_builder_path_completed(st, completed_corridor_ids)
+				_begin_builder_return(bot)
+				_assign_builder_jobs(int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY)))
+				job_finished = true
+				break
+			seg_idx += 1
+			if seg_idx >= packed.size() - 1:
+				_on_builder_path_completed(st, completed_corridor_ids)
+				_begin_builder_return(bot)
+				_assign_builder_jobs(int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY)))
+				job_finished = true
+				break
+		if job_finished:
+			_builder_visual_dirty = true
+			continue
+		bot["seg_from_idx"] = seg_idx
+		bot["seg_t"] = seg_t
+		_builder_visual_dirty = true
+	for sid: int in completed_corridor_ids:
+		_complete_corridor_link_by_id(sid)
+
+
+func _on_builder_cell_arrival(st: Dictionary, seg_from_idx: int) -> void:
+	st["path_built"] = BuilderAgentLib.path_built_after_seg(seg_from_idx)
+	var kind: String = str(st.get("kind", ""))
+	var path_sid: int = int(st.get("id", -1))
+	if OutpostBuildLib.is_corridor_path_kind(kind) and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
+		_road_network_version += 1
+		if kind == OutpostBuildLib.KIND_SPAWNER:
+			_resource_links_dirty = true
+	if _outpost_construction_queue != null:
+		_outpost_construction_queue.on_cell_advanced(path_sid)
+
+
+func _on_builder_path_completed(st: Dictionary, completed_corridor_ids: Array[int]) -> void:
+	var path_len: int = OutpostBuildLib.path_len_from_structure(st)
+	if path_len <= 0:
+		path_len = int(st.get("path_len", 0))
+	st["path_len"] = path_len
+	st["path_built"] = float(path_len)
+	var kind: String = str(st.get("kind", ""))
+	var is_corridor_link: bool = kind == OutpostBuildLib.KIND_CORRIDOR_LINK
+	var done_sid: int = int(st.get("id", -1))
+	var gx: int = int(st.get("gx", 0))
+	var gy: int = int(st.get("gy", 0))
+	var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+	if _outpost_construction_queue != null:
+		_outpost_construction_queue.on_path_completed(done_sid, gx, gy, team, is_corridor_link)
+	if is_corridor_link:
+		completed_corridor_ids.append(done_sid)
+	else:
+		st["state"] = OutpostBuildLib.STATE_BUILDING
+		st["build_remaining"] = OutpostBuildLib.build_sec_for_kind(kind)
+
+
+func _builder_home_grid(bot: Dictionary) -> Vector2i:
+	return Vector2i(int(bot.get("home_gx", 0)), int(bot.get("home_gy", 0)))
+
+
+func _builder_work_grid_pos(bot: Dictionary) -> Vector2:
+	var state: String = str(bot.get("state", ""))
+	var home: Vector2i = _builder_home_grid(bot)
+	if state == BuilderAgentLib.STATE_IDLE:
+		return BuilderAgentLib.orbit_grid(home, float(bot.get("orbit_angle", 0.0)))
+	if state == BuilderAgentLib.STATE_RETURNING:
+		var ret_t: float = clampf(float(bot.get("return_t", 0.0)), 0.0, 1.0)
+		var orbit: Vector2 = BuilderAgentLib.orbit_grid(home, float(bot.get("orbit_angle", 0.0)))
+		var from_g: Vector2 = Vector2(
+			float(bot.get("return_gx_f", orbit.x)),
+			float(bot.get("return_gy_f", orbit.y)),
+		)
+		return from_g.lerp(orbit, ret_t)
+	var st: Dictionary = _find_structure_by_sid(int(bot.get("job_sid", -1)))
+	if st.is_empty() or battle_data == null:
+		return BuilderAgentLib.orbit_grid(home, float(bot.get("orbit_angle", 0.0)))
+	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+	var w: int = battle_data.grid_width
+	var seg_idx: int = int(bot.get("seg_from_idx", 0))
+	if packed.size() < 2 or seg_idx >= packed.size() - 1:
+		var landing: Vector2i = Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0)))
+		return Vector2(float(landing.x), float(landing.y))
+	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], w)
+	var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], w)
+	var t: float = clampf(float(bot.get("seg_t", 0.0)), 0.0, 1.0)
+	return Vector2(float(from_cell.x), float(from_cell.y)).lerp(
+		Vector2(float(to_cell.x), float(to_cell.y)), t
+	)
+
+
+func _update_builder_visuals(delta: float) -> void:
+	if globe_map == null or _builder_agents.is_empty():
+		return
+	_builder_visual_clock += delta
+	var refresh_sec: float = 1.0 / CFG.SOLDIER_VISUAL_UPDATES_PER_SEC
+	if not _builder_visual_dirty and _builder_visual_clock < refresh_sec:
+		return
+	_builder_visual_clock = 0.0
+	_builder_visual_dirty = false
+	var positions: Array = []
+	var teams := PackedByteArray()
+	teams.resize(_builder_agents.size())
+	for i in range(_builder_agents.size()):
+		var bot: Dictionary = _builder_agents[i]
+		var grid_pos: Vector2 = _builder_work_grid_pos(bot)
+		positions.append(
+			globe_map.grid_float_surface_pos(grid_pos.x, grid_pos.y, CFG.BUILDER_SURFACE_LIFT)
+		)
+		teams[i] = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+	globe_map.sync_builders(positions, teams)
 
 
 func _update_soldier_visuals(delta: float) -> void:
@@ -1441,6 +1672,7 @@ func _destroy_outpost(sid: int) -> void:
 		break
 	if grid.x < 0:
 		return
+	_cancel_builder_job_for_sid(sid)
 	if was_barracks and territory_sim != null:
 		territory_sim.notify_barracks_destroyed(sid)
 		_soldier_visual_dirty = true

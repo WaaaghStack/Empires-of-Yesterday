@@ -44,6 +44,7 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://WorldConquestResources.gd",
 	"res://WorldConquestScreen.gd",
 	"res://OutpostConstructionQueue.gd",
+	"res://BuilderAgentLib.gd",
 ]
 
 const SCENE_PATHS: Array[String] = [
@@ -81,6 +82,7 @@ func _run_all_async() -> void:
 	await _validate_perf_helpers()
 	_validate_outpost_construction_queue()
 	_validate_visual_drain_ordering()
+	await _validate_builder_agents()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
@@ -452,14 +454,106 @@ func _write_validate_section_to_scratch(section_lines: PackedStringArray, filena
 		out.close()
 
 
+func _validate_builder_agents() -> void:
+	_log("-- Builder agents (2 per home, job queue, cell arrivals) --")
+	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	var globe_scene: PackedScene = load("res://WorldConquestScreen.tscn")
+	if globe_scene == null:
+		_fail("builder validate could not load WorldConquestScreen.tscn")
+		return
+	var screen: Control = globe_scene.instantiate()
+	add_child(screen)
+	var bootstrap_frames: int = 0
+	while bool(screen.get("_loading")) and bootstrap_frames < PERF_BOOTSTRAP_MAX_FRAMES:
+		await get_tree().process_frame
+		bootstrap_frames += 1
+	if bool(screen.get("_loading")):
+		_fail("builder validate bootstrap timed out")
+		screen.queue_free()
+		return
+	var agents: Array = screen.get("_builder_agents")
+	var home: Vector2i = screen.get("_player_home")
+	var enemy_home: Vector2i = screen.get("_enemy_home")
+	if agents.size() != 4:
+		_fail("builder validate expected 4 agents (2 per home), got %d" % agents.size())
+		screen.queue_free()
+		return
+	var friendly_n: int = 0
+	var hostile_n: int = 0
+	for bot in agents:
+		var team: int = int(bot.get("team", 0))
+		if team == BattleTileControlLib.OWNER_FRIENDLY:
+			friendly_n += 1
+			if Vector2i(int(bot.get("home_gx", -1)), int(bot.get("home_gy", -1))) != home:
+				_fail("friendly builder home mismatch")
+				screen.queue_free()
+				return
+		elif team == BattleTileControlLib.OWNER_HOSTILE:
+			hostile_n += 1
+			if Vector2i(int(bot.get("home_gx", -1)), int(bot.get("home_gy", -1))) != enemy_home:
+				_fail("hostile builder home mismatch")
+				screen.queue_free()
+				return
+	if friendly_n != 2 or hostile_n != 2:
+		_fail("builder validate team counts friendly=%d hostile=%d" % [friendly_n, hostile_n])
+		screen.queue_free()
+		return
+	var battle_data = screen.get("battle_data")
+	if battle_data == null:
+		_fail("builder validate missing battle_data")
+		screen.queue_free()
+		return
+	var w: int = battle_data.grid_width
+	var path: Array[Vector2i] = [home]
+	for step in range(4):
+		var cx: int = (home.x + step + 1) % w
+		path.append(Vector2i(cx, home.y))
+	var packed: PackedInt32Array = OutpostBuildLib.path_to_packed_keys(path, w)
+	var landing: Vector2i = path[path.size() - 1]
+	var test_sid: int = 901
+	battle_data.placed_structures.append({
+		"id": test_sid,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": landing.x,
+		"gy": landing.y,
+		"kind": "spawner",
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"path_built": 1.0,
+		"path_len": path.size(),
+		"path_keys": packed,
+	})
+	screen.call("_enqueue_builder_job", test_sid, BattleTileControlLib.OWNER_FRIENDLY)
+	var pre_built: float = 1.0
+	for st in battle_data.placed_structures:
+		if int(st.get("id", -1)) == test_sid:
+			pre_built = float(st.get("path_built", 1.0))
+			break
+	var travel: float = BuilderAgentLib.cell_travel_sec()
+	screen.call("_update_builder_agents", travel)
+	var post_built: float = pre_built
+	for st2 in battle_data.placed_structures:
+		if int(st2.get("id", -1)) == test_sid:
+			post_built = float(st2.get("path_built", 1.0))
+			break
+	if post_built <= pre_built:
+		_fail("builder validate cell arrival did not advance path_built %.3f->%.3f" % [pre_built, post_built])
+		screen.queue_free()
+		return
+	_log("OK  builder agents count=%d path_built=%.1f->%.1f" % [agents.size(), pre_built, post_built])
+	screen.queue_free()
+
+
 func _validate_fps_fix_paths() -> void:
 	var section_lines: PackedStringArray = PackedStringArray()
 	var _vlog := func(msg: String) -> void:
 		_log(msg)
 		section_lines.append(msg)
-	_vlog.call("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up, queue drain) --")
+	_vlog.call("-- FPS fix paths (defer gpu, delta cap, incremental visuals, catch-up, queue drain, builder bots) --")
 	const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
 	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 	const BattleTileControlLib := preload("res://BattleTileControl.gd")
 	if not FrameBudgetProfilerLib.budget_allows_catchup(10.0, WorldConquestConfigLib.FRAME_BUDGET_MS):
@@ -512,6 +606,7 @@ func _validate_fps_fix_paths() -> void:
 			"path_keys": packed,
 		})
 		screen.call("request_outpost_visual_refresh", true, true, next_id + i)
+		screen.call("_enqueue_builder_job", next_id + i, BattleTileControlLib.OWNER_FRIENDLY)
 		for _warm in range(8):
 			await get_tree().process_frame
 	# Drain seeded construction/visual backlog before hot-path exercise and p99 measurement.
@@ -549,7 +644,7 @@ func _validate_fps_fix_paths() -> void:
 			pre_built_sum += float(st_pre.get("path_built", 1.0))
 	var adv: Dictionary = territory_sim.advance_dt(dt, max_steps)
 	var sim_steps: int = int(adv.get("steps", 0))
-	screen.call("_advance_outpost_construction", dt)
+	screen.call("_update_builder_agents", BuilderAgentLib.cell_travel_sec())
 	if sim_steps > 0:
 		screen.call("_enqueue_ownership_overlay_delta")
 	screen.call("_drain_outpost_construction_queue")
@@ -566,7 +661,7 @@ func _validate_fps_fix_paths() -> void:
 		% [sim_steps, pre_built_sum, post_built_sum, queue_pending]
 	)
 	if post_built_sum <= pre_built_sum:
-		_fail("fps fix explicit _advance_outpost_construction did not grow path_built")
+		_fail("fps fix explicit _update_builder_agents did not grow path_built")
 		screen.queue_free()
 		return
 	profiler.reset_samples()

@@ -54,6 +54,12 @@ const MIN_SPAWNER_SPACING_CELLS := 6
 ## Outpost must link by road from HQ or nearest active outpost, then finish construction.
 const OUTPOST_BUILD_SEC := 5.0
 const OUTPOST_ROAD_CELLS_PER_SEC := 1.0
+## Flying builder bots per home base (player + enemy); future scaling hooks here.
+const BUILDER_BOTS_PER_HOME := 2
+const BUILDER_SURFACE_LIFT := 2.85
+const BUILDER_ORBIT_RADIUS_CELLS := 3.5
+const BUILDER_ORBIT_SPEED := 0.55
+const BUILDER_RETURN_SEC := 0.45
 ## Throttle Rust/claimable sync while a bridge is extending (avoids per-cell full-grid work).
 const BRIDGE_BACKEND_SYNC_INTERVAL_SEC := 0.2
 ## Per-frame construction drain caps (OutpostConstructionQueue).
