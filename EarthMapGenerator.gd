@@ -77,6 +77,7 @@ static func _load_or_build_land_bits(w: int, h: int, seed_val: int) -> PackedByt
 				for gy in range(h):
 					for gx in range(w):
 						bits[gy * w + gx] = 1 if img.get_pixel(gx, gy).r > 0.5 else 0
+				_apply_seed_coast_jitter(bits, w, h, seed_val)
 				return bits
 	var proc: Image = _procedural_earth_land(w, h, seed_val)
 	for i in range(total):
@@ -98,6 +99,16 @@ static func _load_or_build_elevation_norm(
 				for gy in range(h):
 					for gx in range(w):
 						elev[gy * w + gx] = img.get_pixel(gx, gy).r
+				var elev_rng := RandomNumberGenerator.new()
+				elev_rng.seed = seed_val ^ 0x5A17E4
+				for gy in range(h):
+					for gx in range(w):
+						var idx: int = gy * w + gx
+						if land_bits[idx] == 0:
+							continue
+						elev[idx] = clampf(
+							elev[idx] + elev_rng.randf_range(-0.06, 0.08), 0.0, 1.0
+						)
 				return elev
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_val ^ 0x5A17E4
@@ -112,6 +123,61 @@ static func _load_or_build_elevation_norm(
 			base += rng.randf_range(-0.08, 0.12)
 			elev[idx] = clampf(base, 0.0, 1.0)
 	return elev
+
+
+static func _apply_seed_coast_jitter(
+	land_bits: PackedByteArray, w: int, h: int, seed_val: int
+) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val ^ 0x1A7D
+	for gy in range(h):
+		for gx in range(w):
+			var idx: int = gy * w + gx
+			if not _is_coast_adjacent(land_bits, w, h, gx, gy):
+				continue
+			if rng.randf() >= 0.07:
+				continue
+			land_bits[idx] = 0 if land_bits[idx] > 0 else 1
+	_sanitize_land_mask(land_bits, w, h)
+
+
+static func _is_coast_adjacent(
+	land_bits: PackedByteArray, w: int, h: int, gx: int, gy: int
+) -> bool:
+	var land: bool = land_bits[gy * w + gx] > 0
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			if dx == 0 and dy == 0:
+				continue
+			var nx: int = gx + dx
+			var ny: int = gy + dy
+			if nx < 0 or ny < 0 or nx >= w or ny >= h:
+				return true
+			var neighbor_land: bool = land_bits[ny * w + nx] > 0
+			if neighbor_land != land:
+				return true
+	return false
+
+
+static func _sanitize_land_mask(land_bits: PackedByteArray, w: int, h: int) -> void:
+	for gy in range(h):
+		for gx in range(w):
+			var idx: int = gy * w + gx
+			if land_bits[idx] == 0:
+				continue
+			var land_n: int = 0
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					if dx == 0 and dy == 0:
+						continue
+					var nx: int = gx + dx
+					var ny: int = gy + dy
+					if nx < 0 or ny < 0 or nx >= w or ny >= h:
+						continue
+					if land_bits[ny * w + nx] > 0:
+						land_n += 1
+			if land_n <= 1:
+				land_bits[idx] = 0
 
 
 static func _build_coast_bits(land_bits: PackedByteArray, w: int, h: int) -> PackedByteArray:

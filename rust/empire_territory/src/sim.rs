@@ -1,6 +1,7 @@
 //! Simple-water territory propagation kernel (ports BattleTileControl.gd).
 
 pub const FLOW_CONDUCTIVITY: f32 = 0.32;
+pub const BRIDGE_PIPE_SUCTION_RATE: f32 = 0.22;
 pub const MIN_FLOW_DELTA: f32 = 0.1;
 pub const MAX_OUTFLOW_FRAC: f32 = 0.5;
 pub const MIN_CLAIM_PRESSURE: f32 = 0.04;
@@ -368,9 +369,63 @@ impl TerritoryKernel {
 
     fn spread_pressure_gradient(&mut self) {
         self.gradient_flow_pass_into(true);
+        self.bridge_pipe_suction_pass(true);
         std::mem::swap(&mut self.pressure_friendly, &mut self.pf_next);
         self.gradient_flow_pass_into(false);
+        self.bridge_pipe_suction_pass(false);
         std::mem::swap(&mut self.pressure_hostile, &mut self.ph_next);
+    }
+
+    fn bridge_pipe_suction_pass(&mut self, friendly: bool) {
+        if BRIDGE_PIPE_SUCTION_RATE <= 0.0 {
+            return;
+        }
+        let dst = if friendly {
+            &mut self.pf_next
+        } else {
+            &mut self.ph_next
+        };
+        let claimable = &self.claimable_mask;
+        let prev = &self.bridge_pipe_prev;
+        let next = &self.bridge_pipe_next;
+        let bw = &self.bridge_water_mask;
+        let cl = &self.corridor_land_mask;
+        let rate = BRIDGE_PIPE_SUCTION_RATE;
+        let tile_count = self.tile_count;
+        for idx in 0..tile_count {
+            if claimable[idx] == 0 {
+                continue;
+            }
+            let on_pipe = bw.get(idx).copied().unwrap_or(0) > 0
+                || cl.get(idx).copied().unwrap_or(0) > 0;
+            if !on_pipe {
+                continue;
+            }
+            let prev_i = prev.get(idx).copied().unwrap_or(-1);
+            let next_i = next.get(idx).copied().unwrap_or(-1);
+            if prev_i >= 0 {
+                let pi = prev_i as usize;
+                if pi < tile_count && claimable[pi] != 0 && dst[pi] > dst[idx] {
+                    let pull = (dst[pi] - dst[idx]) * rate;
+                    let cap = pull.min(dst[pi] * 0.18);
+                    if cap > 0.001 {
+                        dst[pi] -= cap;
+                        dst[idx] += cap;
+                    }
+                }
+            }
+            if next_i >= 0 {
+                let ni = next_i as usize;
+                if ni < tile_count && claimable[ni] != 0 && dst[idx] > dst[ni] {
+                    let push = (dst[idx] - dst[ni]) * rate;
+                    let cap_n = push.min(dst[idx] * 0.18);
+                    if cap_n > 0.001 {
+                        dst[idx] -= cap_n;
+                        dst[ni] += cap_n;
+                    }
+                }
+            }
+        }
     }
 
     fn gradient_flow_pass_into(&mut self, friendly: bool) {
@@ -518,20 +573,30 @@ impl TerritoryKernel {
         out
     }
 
-    /// Option A — 2D conduit: bridge tiles use cardinal neighbors like land.
+    /// Bridge/corridor tiles prefer pipe topology; land uses cardinal neighbors.
     fn flow_neighbor_indices(
         w: i32,
         h: i32,
         idx: usize,
         claimable: &[u8],
         wrap_longitude: bool,
-        _bridge_pipe_prev: &[i32],
-        _bridge_pipe_next: &[i32],
-        _bridge_water_mask: &[u8],
-        _corridor_land_mask: &[u8],
+        bridge_pipe_prev: &[i32],
+        bridge_pipe_next: &[i32],
+        bridge_water_mask: &[u8],
+        corridor_land_mask: &[u8],
         scratch: &mut Vec<usize>,
     ) {
         scratch.clear();
+        let on_pipe = bridge_water_mask.get(idx).copied().unwrap_or(0) > 0
+            || corridor_land_mask.get(idx).copied().unwrap_or(0) > 0;
+        if on_pipe {
+            let pipe = Self::pipe_neighbor_indices(idx, claimable, bridge_pipe_prev, bridge_pipe_next);
+            for pi in pipe {
+                if pi != usize::MAX && !scratch.iter().any(|&x| x == pi) {
+                    scratch.push(pi);
+                }
+            }
+        }
         let gx = (idx as i32) % w;
         let gy = (idx as i32) / w;
         for (dx, dy) in CARDINAL {

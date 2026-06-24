@@ -421,10 +421,12 @@ func _spread_pressure_gradient(map_data) -> void:
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	_gradient_flow_pass_into(map_data, w, h, pressure_friendly, _pressure_friendly_next)
+	_bridge_pipe_suction_pass(_pressure_friendly_next)
 	var tmp_f: PackedFloat32Array = pressure_friendly
 	pressure_friendly = _pressure_friendly_next
 	_pressure_friendly_next = tmp_f
 	_gradient_flow_pass_into(map_data, w, h, pressure_hostile, _pressure_hostile_next)
+	_bridge_pipe_suction_pass(_pressure_hostile_next)
 	var tmp_h: PackedFloat32Array = pressure_hostile
 	pressure_hostile = _pressure_hostile_next
 	_pressure_hostile_next = tmp_h
@@ -815,9 +817,42 @@ func _is_corridor_land_index(idx: int) -> bool:
 	return false
 
 
-## Option A — 2D conduit: bridge/corridor tiles use the same cardinal flow as land.
-func _gradient_flow_neighbor_indices(map_data, gx: int, gy: int, _idx: int) -> PackedInt32Array:
+## Bridge/corridor tiles prefer pipe topology; land uses cardinal neighbors.
+func _gradient_flow_neighbor_indices(map_data, gx: int, gy: int, idx: int) -> PackedInt32Array:
+	if _is_bridge_water_index(idx) or _is_corridor_land_index(idx):
+		var pipe: PackedInt32Array = _bridge_pipe_neighbor_indices(idx)
+		if not pipe.is_empty():
+			var merged: PackedInt32Array = pipe.duplicate()
+			for ni: int in _cardinal_neighbor_indices(map_data, gx, gy):
+				if not merged.has(ni):
+					merged.append(ni)
+			return merged
 	return _cardinal_neighbor_indices(map_data, gx, gy)
+
+
+func _bridge_pipe_suction_pass(dst: PackedFloat32Array) -> void:
+	var rate: float = WorldConquestConfigLib.BRIDGE_PIPE_SUCTION_RATE
+	if rate <= 0.0 or _tile_count <= 0:
+		return
+	for idx in range(_tile_count):
+		if claimable_mask[idx] == 0:
+			continue
+		if not _is_bridge_water_index(idx) and not _is_corridor_land_index(idx):
+			continue
+		var prev_i: int = _bridge_pipe_prev[idx] if idx < _bridge_pipe_prev.size() else -1
+		var next_i: int = _bridge_pipe_next[idx] if idx < _bridge_pipe_next.size() else -1
+		if prev_i >= 0 and claimable_mask[prev_i] != 0 and dst[prev_i] > dst[idx]:
+			var pull: float = (dst[prev_i] - dst[idx]) * rate
+			var cap: float = minf(pull, dst[prev_i] * 0.18)
+			if cap > 0.001:
+				dst[prev_i] -= cap
+				dst[idx] += cap
+		if next_i >= 0 and claimable_mask[next_i] != 0 and dst[idx] > dst[next_i]:
+			var push: float = (dst[idx] - dst[next_i]) * rate
+			var cap_n: float = minf(push, dst[idx] * 0.18)
+			if cap_n > 0.001:
+				dst[idx] -= cap_n
+				dst[next_i] += cap_n
 
 
 ## Kick-start pressure along a completed bridge path (home end strongest).

@@ -13,7 +13,8 @@ const ROAD_COLOR := Color(0.52, 0.52, 0.54)
 const BRIDGE_COLOR := Color(0.62, 0.64, 0.68)
 const ROAD_THICKNESS := 0.32
 const BRIDGE_THICKNESS := 0.42
-const ROAD_SURFACE_LIFT := 0.9
+const ROAD_SURFACE_LIFT := 2.75
+const ROAD_RENDER_PRIORITY := 8
 
 @onready var camera: Camera3D = $Camera3D
 
@@ -185,6 +186,7 @@ func _build_scene() -> void:
 			var seg := MeshInstance3D.new()
 			seg.mesh = _shared_road_box
 			seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			seg.sorting_offset = 2.0
 			seg.visible = false
 			_roads.add_child(seg)
 			_road_seg_pool.append(seg)
@@ -219,11 +221,15 @@ func _build_scene() -> void:
 	_road_material.roughness = 0.95
 	_road_material.metallic = 0.0
 	_road_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_road_material.no_depth_test = true
+	_road_material.render_priority = ROAD_RENDER_PRIORITY
 	_bridge_material = StandardMaterial3D.new()
 	_bridge_material.albedo_color = BRIDGE_COLOR
 	_bridge_material.roughness = 0.85
 	_bridge_material.metallic = 0.05
 	_bridge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_bridge_material.no_depth_test = true
+	_bridge_material.render_priority = ROAD_RENDER_PRIORITY
 	_resource_link_material = StandardMaterial3D.new()
 	_resource_link_material.albedo_color = Color(0.72, 0.68, 0.38, 0.85)
 	_resource_link_material.emission_enabled = true
@@ -1455,6 +1461,7 @@ func _add_road_line_segment(a: Vector2i, b: Vector2i, sid: int) -> void:
 		seg = MeshInstance3D.new()
 		seg.mesh = _shared_road_box
 		seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		seg.sorting_offset = 2.0
 		_roads.add_child(seg)
 	else:
 		seg = _road_seg_pool.pop_back()

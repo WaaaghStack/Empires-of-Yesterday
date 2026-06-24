@@ -99,7 +99,9 @@ const SOLDIER_AURA_PRESSURE := 0.12
 const SOLDIER_SHOOT_ERODE_PER_SEC := 6.0
 const SOLDIER_UPKEEP_DEFICIT_DPS := 2.5
 ## Pressure flow multiplier on built bridge water cells (vs land).
-const BRIDGE_PRESSURE_FLOW_MULT := 0.92
+const BRIDGE_PRESSURE_FLOW_MULT := 2.8
+## Low-level suction along bridge pipe topology (prev→cell→next) per gradient pass.
+const BRIDGE_PIPE_SUCTION_RATE := 0.22
 
 ## Win: all claimable land, or enemy cumulative power reaches zero.
 const CONQUEST_LAND_FRAC := 1.0

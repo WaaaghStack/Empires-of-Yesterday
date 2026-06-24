@@ -85,6 +85,9 @@ func _run_all_async() -> void:
 	_validate_outpost_construction_queue()
 	_validate_visual_drain_ordering()
 	_validate_builder_selfcheck()
+	_validate_builder_chain_selfcheck()
+	_validate_world_seed_variety()
+	_validate_bridge_pipe_suction()
 	await _validate_builder_integration_smoke()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
@@ -648,6 +651,142 @@ func _validate_builder_selfcheck() -> void:
 		return
 	_vlog.call("OK  BuilderAgentLib.run_selfcheck")
 	_write_validate_section_to_scratch(section_lines, "qa_builder_progress1.log")
+
+
+func _validate_builder_chain_selfcheck() -> void:
+	_log("-- Builder chain selfcheck (no home return between queued jobs) --")
+	const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
+	var sc: Dictionary = BuilderAgentLib.run_chain_selfcheck()
+	var detail: String = str(sc.get("detail", ""))
+	if not detail.is_empty():
+		_log(detail)
+	if not bool(sc.get("ok", false)):
+		_fail("BuilderAgentLib.run_chain_selfcheck failed")
+		return
+	_log("OK  BuilderAgentLib.run_chain_selfcheck")
+
+
+func _validate_world_seed_variety() -> void:
+	_log("-- World seed variety (distinct maps per seed) --")
+	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
+	var map_a = EarthMapGeneratorLib.generate(111)
+	var map_b = EarthMapGeneratorLib.generate(222)
+	if map_a.player_home_grid == map_b.player_home_grid and map_a.enemy_home_grid == map_b.enemy_home_grid:
+		_fail("world seed variety homes identical for seeds 111 vs 222")
+		return
+	var checksum_a: int = 0
+	var checksum_b: int = 0
+	for i in range(map_a.terrain_cells.size()):
+		checksum_a = (checksum_a + int(map_a.terrain_cells[i]) * 31) & 0x7FFFFFFF
+		checksum_b = (checksum_b + int(map_b.terrain_cells[i]) * 31) & 0x7FFFFFFF
+	if checksum_a == checksum_b:
+		_fail("world seed variety terrain checksum identical for seeds 111 vs 222")
+		return
+	_log(
+		"OK  world seed variety home_a=%s home_b=%s checksum_a=%d checksum_b=%d"
+		% [map_a.player_home_grid, map_b.player_home_grid, checksum_a, checksum_b]
+	)
+
+
+func _validate_bridge_pipe_suction() -> void:
+	_log("-- Bridge pipe suction (corridor pressure via real map route) --")
+	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	var map_data = null
+	var home: Vector2i = Vector2i(-1, -1)
+	var coastal: Vector2i = Vector2i(-1, -1)
+	var path_packed: PackedInt32Array = PackedInt32Array()
+	var sources: Array[Vector2i] = []
+	for try_seed in [424242, 44201, 44202, 99123]:
+		map_data = EarthMapGeneratorLib.generate(try_seed)
+		OutpostBuildLib.prepare_land_components(map_data)
+		home = map_data.player_home_grid
+		sources = [home]
+		var inland: Vector2i = _bridge_qa_find_inland_foreign(map_data, home, sources)
+		if inland.x < 0:
+			continue
+		coastal = OutpostBuildLib.snap_to_nearest_coast(map_data, inland)
+		if coastal.x < 0:
+			continue
+		var route: Dictionary = OutpostBuildLib.nearest_corridor_path_to_target(
+			map_data, coastal, sources
+		)
+		path_packed = route.get("path_packed", PackedInt32Array())
+		if not path_packed.is_empty():
+			break
+	if path_packed.is_empty() or map_data == null:
+		_fail("bridge pipe suction no corridor route on sample seeds")
+		return
+	var built_cells: int = _bridge_qa_water_prefix_end(map_data, path_packed)
+	if built_cells < 0:
+		_fail("bridge pipe suction route has no water cells")
+		return
+	built_cells = mini(built_cells + 2, path_packed.size())
+	map_data.placed_structures.append({
+		"id": 1,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": coastal.x,
+		"gy": coastal.y,
+		"kind": OutpostBuildLib.KIND_SPAWNER,
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"source_gx": home.x,
+		"source_gy": home.y,
+		"path_keys": path_packed,
+		"path_len": path_packed.size(),
+		"path_built": float(built_cells),
+	})
+	var sim := BattleTerritorySimLib.new()
+	sim.use_simple_water_model = true
+	sim.set_resolve_context("world_conquest")
+	sim.setup(map_data, 200, 200, null, {}, true)
+	sim.set_live_backend(false)
+	var tc := sim.tile_control
+	tc.sync_bridge_corridors_from_map(map_data, true)
+	var fw_start: int = maxi(1, built_cells - 2)
+	for i in range(fw_start):
+		tc.pressure_friendly[path_packed[i]] = 40.0
+	for _round in range(12):
+		sim.advance_round()
+	var water_p: float = 0.0
+	for i in range(1, built_cells):
+		var key: int = path_packed[i]
+		var gx: int = key % map_data.grid_width
+		var gy: int = key / map_data.grid_width
+		if OutpostBuildLib.is_water_cell(map_data, gx, gy):
+			water_p += tc.pressure_friendly[key]
+	if water_p < 0.5:
+		_fail("bridge pipe suction corridor pressure too low (%.3f)" % water_p)
+		return
+	_log("OK  bridge pipe suction corridor_p=%.3f" % water_p)
+
+
+func _bridge_qa_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	var w: int = map_data.grid_width
+	for i in range(path_packed.size()):
+		var gx: int = path_packed[i] % w
+		var gy: int = path_packed[i] / w
+		if OutpostBuildLib.is_water_cell(map_data, gx, gy):
+			return i + 1
+	return -1
+
+
+func _bridge_qa_find_inland_foreign(map_data, home: Vector2i, sources: Array) -> Vector2i:
+	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	for gy in range(h):
+		for gx in range(w):
+			if not map_data.is_land_cell(gx, gy):
+				continue
+			if not OutpostBuildLib.needs_bridge_route(map_data, Vector2i(gx, gy), sources):
+				continue
+			if OutpostBuildLib.is_coastal_cell(map_data, gx, gy):
+				continue
+			return Vector2i(gx, gy)
+	return Vector2i(-1, -1)
 
 
 func _validate_builder_integration_smoke() -> void:

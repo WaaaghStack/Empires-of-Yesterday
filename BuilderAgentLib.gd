@@ -143,6 +143,26 @@ static func begin_builder_return(bot: Dictionary, structures: Array, grid_w: int
 	bot["return_t"] = 0.0
 
 
+## After a job ends: start the next queued CONNECTING job from the bot's current
+## position, or begin the return-to-orbit lerp only when the team queue is empty.
+static func try_assign_next_job(
+	bot: Dictionary, queues: Dictionary, structures: Array, grid_w: int
+) -> bool:
+	var team: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+	var q: Array = job_queue_for_team(queues, team)
+	while not q.is_empty():
+		var sid: int = int(q[0])
+		var st: Dictionary = find_structure(structures, sid)
+		if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
+			q.remove_at(0)
+			continue
+		q.remove_at(0)
+		start_builder_job(bot, sid, structures)
+		return true
+	begin_builder_return(bot, structures, grid_w)
+	return false
+
+
 static func on_cell_arrival(st: Dictionary, seg_from_idx: int) -> Dictionary:
 	st["path_built"] = path_built_after_seg(seg_from_idx)
 	return {
@@ -215,10 +235,10 @@ static func step_frame(
 		var job_sid: int = int(bot.get("job_sid", -1))
 		var st: Dictionary = find_structure(structures, job_sid)
 		if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
-			begin_builder_return(bot, structures, grid_w)
 			var team_bad: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-			if not result["reassign_teams"].has(team_bad):
-				result["reassign_teams"].append(team_bad)
+			if not try_assign_next_job(bot, queues, structures, grid_w):
+				if not result["reassign_teams"].has(team_bad):
+					result["reassign_teams"].append(team_bad)
 			result["visual_dirty"] = true
 			continue
 		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
@@ -228,10 +248,10 @@ static func step_frame(
 			result["path_completions"].append(done_early)
 			if bool(done_early.get("is_corridor_link", false)):
 				result["completed_corridor_sids"].append(int(done_early.get("sid", -1)))
-			begin_builder_return(bot, structures, grid_w)
 			var team_done: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-			if not result["reassign_teams"].has(team_done):
-				result["reassign_teams"].append(team_done)
+			if not try_assign_next_job(bot, queues, structures, grid_w):
+				if not result["reassign_teams"].has(team_done):
+					result["reassign_teams"].append(team_done)
 			result["visual_dirty"] = true
 			continue
 		var seg_t: float = float(bot.get("seg_t", 0.0)) + dt / maxf(travel_sec, 0.001)
@@ -249,10 +269,10 @@ static func step_frame(
 				result["path_completions"].append(done_full)
 				if bool(done_full.get("is_corridor_link", false)):
 					result["completed_corridor_sids"].append(int(done_full.get("sid", -1)))
-				begin_builder_return(bot, structures, grid_w)
 				var team_full: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-				if not result["reassign_teams"].has(team_full):
-					result["reassign_teams"].append(team_full)
+				if not try_assign_next_job(bot, queues, structures, grid_w):
+					if not result["reassign_teams"].has(team_full):
+						result["reassign_teams"].append(team_full)
 				job_finished = true
 				break
 			seg_idx += 1
@@ -261,10 +281,10 @@ static func step_frame(
 				result["path_completions"].append(done_seg)
 				if bool(done_seg.get("is_corridor_link", false)):
 					result["completed_corridor_sids"].append(int(done_seg.get("sid", -1)))
-				begin_builder_return(bot, structures, grid_w)
 				var team_seg: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-				if not result["reassign_teams"].has(team_seg):
-					result["reassign_teams"].append(team_seg)
+				if not try_assign_next_job(bot, queues, structures, grid_w):
+					if not result["reassign_teams"].has(team_seg):
+						result["reassign_teams"].append(team_seg)
 				job_finished = true
 				break
 		if job_finished:
@@ -385,3 +405,72 @@ static func run_selfcheck() -> Dictionary:
 	)
 	print(fail_line)
 	return {"ok": false, "detail": fail_line}
+
+
+static func run_chain_selfcheck() -> Dictionary:
+	const GRID_W := 16
+	var home := Vector2i(0, 0)
+	var bot: Dictionary = make_bot(BattleTileControlLib.OWNER_FRIENDLY, home, 0)
+	var bots: Array = [bot]
+	var st1: Dictionary = {
+		"id": 1,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": 2,
+		"gy": 0,
+		"kind": OutpostBuildLib.KIND_SPAWNER,
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"path_keys": PackedInt32Array([0, 1, 2]),
+		"path_len": 3,
+		"path_built": 1.0,
+	}
+	var st2: Dictionary = {
+		"id": 2,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": 5,
+		"gy": 0,
+		"kind": OutpostBuildLib.KIND_SPAWNER,
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"path_keys": PackedInt32Array([0, 1, 2, 3, 4, 5]),
+		"path_len": 6,
+		"path_built": 1.0,
+	}
+	var structures: Array = [st1, st2]
+	var queues: Dictionary = {"friendly": [1, 2], "hostile": []}
+	var fake_map = BattleMapDataLib.new()
+	fake_map.grid_width = GRID_W
+	assign_builder_jobs(bots, queues, structures)
+	var steps: int = 0
+	var saw_returning: bool = false
+	var jobs_done: int = 0
+	while steps < SELFCHECK_MAX_STEPS:
+		steps += 1
+		var frame: Dictionary = step_frame(
+			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null
+		)
+		if str(bot.get("state", "")) == STATE_RETURNING:
+			var still_connecting: int = 0
+			for st_chk: Dictionary in structures:
+				if str(st_chk.get("state", "")) == OutpostBuildLib.STATE_CONNECTING:
+					still_connecting += 1
+			if still_connecting > 0:
+				saw_returning = true
+		for ev: Dictionary in frame.get("path_completions", []):
+			var sid_done: int = int(ev.get("sid", -1))
+			if sid_done == 1 or sid_done == 2:
+				jobs_done += 1
+		if (
+			str(st1.get("state", "")) != OutpostBuildLib.STATE_CONNECTING
+			and str(st2.get("state", "")) != OutpostBuildLib.STATE_CONNECTING
+		):
+			break
+	if saw_returning:
+		var fail_ret: String = "FAIL builder chain selfcheck bot returned home mid-queue"
+		print(fail_ret)
+		return {"ok": false, "detail": fail_ret}
+	if jobs_done < 2:
+		var fail_jobs: String = "FAIL builder chain selfcheck jobs_done=%d" % jobs_done
+		print(fail_jobs)
+		return {"ok": false, "detail": fail_jobs}
+	var ok_line: String = "OK  builder chain selfcheck no-return jobs=%d steps=%d" % [jobs_done, steps]
+	print(ok_line)
+	return {"ok": true, "detail": ok_line}
