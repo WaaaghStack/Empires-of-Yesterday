@@ -106,18 +106,43 @@ static func start_builder_job(bot: Dictionary, sid: int, structures: Array) -> v
 	bot.erase("chain_active")
 
 
+## Assign CONNECTING work from the bot's physical grid position (orbit, chain, or
+## prior job end). Does not call start_builder_job — seg indices come from pos.
 static func start_builder_job_chained(
 	bot: Dictionary, sid: int, structures: Array, grid_w: int
 ) -> void:
 	var from_pos: Vector2 = work_grid_pos(bot, structures, grid_w)
-	start_builder_job(bot, sid, structures)
 	var st: Dictionary = find_structure(structures, sid)
-	if st.is_empty() or grid_w <= 0:
+	if st.is_empty():
 		return
+	_apply_bot_job_from_position(bot, sid, st, from_pos, grid_w, true)
+
+
+static func _apply_bot_job_from_position(
+	bot: Dictionary,
+	sid: int,
+	st: Dictionary,
+	from_pos: Vector2,
+	grid_w: int,
+	allow_chain: bool,
+) -> void:
+	bot["state"] = STATE_WORKING
+	bot["job_sid"] = sid
+	bot["return_t"] = 0.0
+	bot.erase("chain_active")
 	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
-	var seg_idx: int = int(bot.get("seg_from_idx", 0))
-	if packed.size() < 2 or seg_idx >= packed.size() - 1:
+	var path_built: float = float(st.get("path_built", 1.0))
+	var work_seg: int = next_seg_index(path_built)
+	if packed.size() < 2 or work_seg >= packed.size() - 1 or grid_w <= 0:
+		bot["seg_from_idx"] = work_seg
+		bot["seg_t"] = 0.0
 		return
+	var snap: Dictionary = _snap_pos_to_work_path(packed, grid_w, from_pos, work_seg)
+	bot["seg_from_idx"] = int(snap.get("seg_from_idx", work_seg))
+	bot["seg_t"] = float(snap.get("seg_t", 0.0))
+	if not allow_chain:
+		return
+	var seg_idx: int = int(bot.get("seg_from_idx", work_seg))
 	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
 	var target := Vector2(float(from_cell.x), float(from_cell.y))
 	if from_pos.distance_squared_to(target) > 0.01:
@@ -127,6 +152,34 @@ static func start_builder_job_chained(
 		bot["chain_ty_f"] = target.y
 		bot["chain_t"] = 0.0
 		bot["chain_active"] = true
+		bot["seg_t"] = 0.0
+
+
+static func _snap_pos_to_work_path(
+	packed: PackedInt32Array, grid_w: int, pos: Vector2, work_seg: int
+) -> Dictionary:
+	if packed.size() < 2 or work_seg >= packed.size() - 1:
+		return {"seg_from_idx": work_seg, "seg_t": 0.0}
+	var best_seg: int = work_seg
+	var best_t: float = 0.0
+	var best_d2: float = INF
+	for seg_idx in range(work_seg, packed.size() - 1):
+		var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
+		var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w)
+		var a := Vector2(float(from_cell.x), float(from_cell.y))
+		var b := Vector2(float(to_cell.x), float(to_cell.y))
+		var ab: Vector2 = b - a
+		var ab_len2: float = ab.length_squared()
+		var t: float = 0.0
+		if ab_len2 > 0.0001:
+			t = clampf((pos - a).dot(ab) / ab_len2, 0.0, 1.0)
+		var proj: Vector2 = a.lerp(b, t)
+		var d2: float = pos.distance_squared_to(proj)
+		if d2 < best_d2:
+			best_d2 = d2
+			best_seg = seg_idx
+			best_t = t
+	return {"seg_from_idx": best_seg, "seg_t": best_t}
 
 
 static func work_grid_pos(bot: Dictionary, structures: Array, grid_w: int) -> Vector2:
@@ -483,6 +536,7 @@ static func run_chain_selfcheck() -> Dictionary:
 	var saw_returning: bool = false
 	var saw_chain: bool = false
 	var jobs_done: int = 0
+	var chain_assign_ok: bool = false
 	var prev_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
@@ -509,7 +563,14 @@ static func run_chain_selfcheck() -> Dictionary:
 		prev_pos = cur_pos
 		for ev: Dictionary in frame.get("path_completions", []):
 			var sid_done: int = int(ev.get("sid", -1))
-			if sid_done == 1 or sid_done == 2:
+			if sid_done == 1:
+				jobs_done += 1
+				var job2_sid: int = int(bot.get("job_sid", -1))
+				if job2_sid == 2:
+					var end_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
+					if end_pos.distance_squared_to(Vector2(2.0, 0.0)) < 4.0:
+						chain_assign_ok = true
+			elif sid_done == 2:
 				jobs_done += 1
 		if (
 			str(st1.get("state", "")) != OutpostBuildLib.STATE_CONNECTING
@@ -528,6 +589,12 @@ static func run_chain_selfcheck() -> Dictionary:
 		var fail_chain: String = "FAIL builder chain selfcheck never used chain transit"
 		print(fail_chain)
 		return {"ok": false, "detail": fail_chain}
+	if not chain_assign_ok:
+		var fail_assign: String = (
+			"FAIL builder chain selfcheck job2 not assigned from job1 end position"
+		)
+		print(fail_assign)
+		return {"ok": false, "detail": fail_assign}
 	var ok_line: String = (
 		"OK  builder chain selfcheck no-return chain=yes jobs=%d steps=%d"
 		% [jobs_done, steps]

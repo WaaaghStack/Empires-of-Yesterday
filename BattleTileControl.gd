@@ -127,6 +127,7 @@ var _hostile_spawn_rate: float = 1.0
 
 var use_simple_water_model: bool = false
 var use_longitude_wrap: bool = false
+var bridge_live_suction_enabled: bool = true
 var perf = null
 
 const ACTIVE_PRESSURE_EPS := 0.05
@@ -849,6 +850,8 @@ func _gradient_flow_neighbor_indices(map_data, gx: int, gy: int, idx: int) -> Pa
 
 
 func _suction_feed_bridge_pipes_live() -> void:
+	if not bridge_live_suction_enabled:
+		return
 	var rate: float = WorldConquestConfigLib.BRIDGE_PIPE_SUCTION_RATE * 1.5
 	var passes: int = maxi(1, WorldConquestConfigLib.BRIDGE_PIPE_LIVE_SUCTION_PASSES)
 	if rate <= 0.0 or _tile_count <= 0:

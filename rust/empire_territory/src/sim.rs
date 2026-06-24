@@ -56,6 +56,7 @@ pub struct TerritoryKernel {
     pub use_active_set: bool,
     pub use_adaptive_double_pass: bool,
     pub wrap_longitude: bool,
+    pub bridge_live_suction_enabled: bool,
     bridge_pipe_prev: Vec<i32>,
     bridge_pipe_next: Vec<i32>,
     bridge_path_packs: Vec<Vec<i32>>,
@@ -126,6 +127,7 @@ impl TerritoryKernel {
             use_active_set,
             use_adaptive_double_pass,
             wrap_longitude,
+            bridge_live_suction_enabled: true,
             bridge_pipe_prev: vec![-1; tile_count],
             bridge_pipe_next: vec![-1; tile_count],
             bridge_path_packs: Vec::new(),
@@ -408,8 +410,15 @@ impl TerritoryKernel {
         self.sync_ownership_from_pressures();
     }
 
+    pub fn set_bridge_live_suction_enabled(&mut self, enabled: bool) {
+        self.bridge_live_suction_enabled = enabled;
+    }
+
     fn suction_feed_bridge_pipes_live(&mut self, friendly: bool) {
-        if BRIDGE_PIPE_SUCTION_RATE <= 0.0 || self.bridge_path_packs.is_empty() {
+        if !self.bridge_live_suction_enabled
+            || BRIDGE_PIPE_SUCTION_RATE <= 0.0
+            || self.bridge_path_packs.is_empty()
+        {
             return;
         }
         let rate = BRIDGE_PIPE_SUCTION_RATE * 1.5;

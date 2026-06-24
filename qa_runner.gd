@@ -747,19 +747,37 @@ func _validate_bridge_pipe_suction() -> void:
 	sim.set_live_backend(false)
 	var tc := sim.tile_control
 	tc.sync_bridge_corridors_from_map(map_data, true)
+	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
 	tc.extend_beachhead_from_landing(
 		map_data, coastal.x, coastal.y, BattleTileControlLib.OWNER_FRIENDLY
 	)
-	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
+	_log(
+		"OK  bridge natural flow source player_home=%s home_inject_only"
+		% home
+	)
 	tc.pressure_friendly.fill(0.0)
 	tc.pressure_hostile.fill(0.0)
-	for _round in range(30):
+	tc.bridge_live_suction_enabled = false
+	for _pre in range(30):
 		sim.advance_round()
-	var landing_p: float = tc.pressure_friendly[landing_key]
-	if landing_p < 0.5:
-		_fail("bridge pipe suction natural landing pressure too low (%.3f)" % landing_p)
+	var pre_p: float = tc.pressure_friendly[landing_key]
+	tc.pressure_friendly.fill(0.0)
+	tc.pressure_hostile.fill(0.0)
+	tc.bridge_live_suction_enabled = true
+	for _post in range(30):
+		sim.advance_round()
+	var post_p: float = tc.pressure_friendly[landing_key]
+	var delta: float = post_p - pre_p
+	if post_p < 0.5 or delta <= 0.001:
+		_fail(
+			"bridge pipe suction natural landing pre=%.3f post=%.3f delta=%.3f"
+			% [pre_p, post_p, delta]
+		)
 		return
-	_log("OK  bridge pipe suction natural landing_p=%.3f" % landing_p)
+	_log(
+		"OK  bridge pipe suction natural landing pre=%.3f post=%.3f delta=%.3f"
+		% [pre_p, post_p, delta]
+	)
 
 
 func _bridge_qa_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:

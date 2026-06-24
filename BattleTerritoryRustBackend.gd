@@ -99,6 +99,10 @@ func step_round(tile_control: BattleTileControlLib) -> void:
 	if not ready or _sim == null or tile_control == null:
 		return
 	_maybe_update_spawners(tile_control._placed_spawners)
+	if _sim.has_method("set_bridge_live_suction_enabled"):
+		_sim.call(
+			"set_bridge_live_suction_enabled", tile_control.bridge_live_suction_enabled
+		)
 	_sim.call("advance_round")
 	_apply_owners_delta_to_tile_control(tile_control)
 
@@ -115,6 +119,10 @@ func step_rounds(tile_control: BattleTileControlLib, count: int) -> void:
 	if not ready or _sim == null or tile_control == null or count <= 0:
 		return
 	_maybe_update_spawners(tile_control._placed_spawners)
+	if _sim.has_method("set_bridge_live_suction_enabled"):
+		_sim.call(
+			"set_bridge_live_suction_enabled", tile_control.bridge_live_suction_enabled
+		)
 	_sim.call("advance_rounds", count)
 	_apply_owners_delta_to_tile_control(tile_control)
 

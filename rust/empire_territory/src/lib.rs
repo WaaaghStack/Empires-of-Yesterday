@@ -274,6 +274,14 @@ impl TerritorySim {
     }
 
     #[func]
+    fn set_bridge_live_suction_enabled(&mut self, enabled: bool) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        kernel.set_bridge_live_suction_enabled(enabled);
+    }
+
+    #[func]
     fn update_bridge_paths(&mut self, paths: Array<Variant>) {
         let Some(kernel) = self.kernel.as_mut() else {
             return;
