@@ -103,6 +103,30 @@ static func start_builder_job(bot: Dictionary, sid: int, structures: Array) -> v
 	bot["seg_from_idx"] = next_seg_index(float(st.get("path_built", 1.0)))
 	bot["seg_t"] = 0.0
 	bot["return_t"] = 0.0
+	bot.erase("chain_active")
+
+
+static func start_builder_job_chained(
+	bot: Dictionary, sid: int, structures: Array, grid_w: int
+) -> void:
+	var from_pos: Vector2 = work_grid_pos(bot, structures, grid_w)
+	start_builder_job(bot, sid, structures)
+	var st: Dictionary = find_structure(structures, sid)
+	if st.is_empty() or grid_w <= 0:
+		return
+	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+	var seg_idx: int = int(bot.get("seg_from_idx", 0))
+	if packed.size() < 2 or seg_idx >= packed.size() - 1:
+		return
+	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
+	var target := Vector2(float(from_cell.x), float(from_cell.y))
+	if from_pos.distance_squared_to(target) > 0.01:
+		bot["chain_gx_f"] = from_pos.x
+		bot["chain_gy_f"] = from_pos.y
+		bot["chain_tx_f"] = target.x
+		bot["chain_ty_f"] = target.y
+		bot["chain_t"] = 0.0
+		bot["chain_active"] = true
 
 
 static func work_grid_pos(bot: Dictionary, structures: Array, grid_w: int) -> Vector2:
@@ -118,6 +142,15 @@ static func work_grid_pos(bot: Dictionary, structures: Array, grid_w: int) -> Ve
 			float(bot.get("return_gy_f", orbit.y)),
 		)
 		return from_g.lerp(orbit, ret_t)
+	if bool(bot.get("chain_active", false)):
+		var chain_t: float = clampf(float(bot.get("chain_t", 0.0)), 0.0, 1.0)
+		var chain_from := Vector2(
+			float(bot.get("chain_gx_f", 0.0)), float(bot.get("chain_gy_f", 0.0))
+		)
+		var chain_to := Vector2(
+			float(bot.get("chain_tx_f", chain_from.x)), float(bot.get("chain_ty_f", chain_from.y))
+		)
+		return chain_from.lerp(chain_to, chain_t)
 	var st: Dictionary = find_structure(structures, int(bot.get("job_sid", -1)))
 	if st.is_empty() or grid_w <= 0:
 		return orbit_grid(home, float(bot.get("orbit_angle", 0.0)))
@@ -157,7 +190,7 @@ static func try_assign_next_job(
 			q.remove_at(0)
 			continue
 		q.remove_at(0)
-		start_builder_job(bot, sid, structures)
+		start_builder_job_chained(bot, sid, structures, grid_w)
 		return true
 	begin_builder_return(bot, structures, grid_w)
 	return false
@@ -232,6 +265,13 @@ static func step_frame(
 			continue
 		if state != STATE_WORKING:
 			continue
+		if bool(bot.get("chain_active", false)):
+			var chain_t: float = float(bot.get("chain_t", 0.0)) + dt / maxf(travel_sec, 0.001)
+			bot["chain_t"] = chain_t
+			result["visual_dirty"] = true
+			if chain_t < 1.0:
+				continue
+			bot.erase("chain_active")
 		var job_sid: int = int(bot.get("job_sid", -1))
 		var st: Dictionary = find_structure(structures, job_sid)
 		if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
@@ -441,7 +481,9 @@ static func run_chain_selfcheck() -> Dictionary:
 	assign_builder_jobs(bots, queues, structures)
 	var steps: int = 0
 	var saw_returning: bool = false
+	var saw_chain: bool = false
 	var jobs_done: int = 0
+	var prev_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
 		var frame: Dictionary = step_frame(
@@ -454,6 +496,17 @@ static func run_chain_selfcheck() -> Dictionary:
 					still_connecting += 1
 			if still_connecting > 0:
 				saw_returning = true
+		if bool(bot.get("chain_active", false)):
+			saw_chain = true
+		var cur_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
+		if cur_pos.distance_squared_to(prev_pos) > 36.0:
+			var jump_fail: String = (
+				"FAIL builder chain selfcheck pos jump %.1f cells"
+				% sqrt(cur_pos.distance_squared_to(prev_pos))
+			)
+			print(jump_fail)
+			return {"ok": false, "detail": jump_fail}
+		prev_pos = cur_pos
 		for ev: Dictionary in frame.get("path_completions", []):
 			var sid_done: int = int(ev.get("sid", -1))
 			if sid_done == 1 or sid_done == 2:
@@ -471,6 +524,13 @@ static func run_chain_selfcheck() -> Dictionary:
 		var fail_jobs: String = "FAIL builder chain selfcheck jobs_done=%d" % jobs_done
 		print(fail_jobs)
 		return {"ok": false, "detail": fail_jobs}
-	var ok_line: String = "OK  builder chain selfcheck no-return jobs=%d steps=%d" % [jobs_done, steps]
+	if not saw_chain:
+		var fail_chain: String = "FAIL builder chain selfcheck never used chain transit"
+		print(fail_chain)
+		return {"ok": false, "detail": fail_chain}
+	var ok_line: String = (
+		"OK  builder chain selfcheck no-return chain=yes jobs=%d steps=%d"
+		% [jobs_done, steps]
+	)
 	print(ok_line)
 	return {"ok": true, "detail": ok_line}

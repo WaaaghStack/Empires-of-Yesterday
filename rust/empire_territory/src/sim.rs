@@ -1,7 +1,8 @@
 //! Simple-water territory propagation kernel (ports BattleTileControl.gd).
 
 pub const FLOW_CONDUCTIVITY: f32 = 0.32;
-pub const BRIDGE_PIPE_SUCTION_RATE: f32 = 0.22;
+pub const BRIDGE_PIPE_SUCTION_RATE: f32 = 0.35;
+pub const BRIDGE_PIPE_LIVE_SUCTION_PASSES: i32 = 32;
 pub const MIN_FLOW_DELTA: f32 = 0.1;
 pub const MAX_OUTFLOW_FRAC: f32 = 0.5;
 pub const MIN_CLAIM_PRESSURE: f32 = 0.04;
@@ -57,6 +58,7 @@ pub struct TerritoryKernel {
     pub wrap_longitude: bool,
     bridge_pipe_prev: Vec<i32>,
     bridge_pipe_next: Vec<i32>,
+    bridge_path_packs: Vec<Vec<i32>>,
     bridge_water_mask: Vec<u8>,
     corridor_land_mask: Vec<u8>,
     active_indices: Vec<usize>,
@@ -126,6 +128,7 @@ impl TerritoryKernel {
             wrap_longitude,
             bridge_pipe_prev: vec![-1; tile_count],
             bridge_pipe_next: vec![-1; tile_count],
+            bridge_path_packs: Vec::new(),
             bridge_water_mask: vec![0; tile_count],
             corridor_land_mask: vec![0; tile_count],
             active_indices: Vec::new(),
@@ -176,8 +179,12 @@ impl TerritoryKernel {
         self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
         self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
         self.inject_placed_spawners();
+        self.suction_feed_bridge_pipes_live(true);
+        self.suction_feed_bridge_pipes_live(false);
 
         self.run_gradient_cancel_sync_pass();
+        self.suction_feed_bridge_pipes_live(true);
+        self.suction_feed_bridge_pipes_live(false);
         let frontier_delta = (self.friendly_tiles - self.prev_friendly_tiles).unsigned_abs()
             + (self.hostile_tiles - self.prev_hostile_tiles).unsigned_abs();
         if self.use_adaptive_double_pass && frontier_delta > ADAPTIVE_FRONTIER_EPS as u32 {
@@ -298,6 +305,40 @@ impl TerritoryKernel {
         }
     }
 
+    pub fn update_bridge_paths(&mut self, paths: Vec<Vec<i32>>) {
+        self.bridge_path_packs = paths;
+    }
+
+    fn suction_transfer_along_pipe(
+        pressures: &mut [f32],
+        claimable: &[u8],
+        from_k: i32,
+        to_k: i32,
+        rate: f32,
+        tile_count: usize,
+    ) {
+        if from_k < 0 || to_k < 0 {
+            return;
+        }
+        let fi = from_k as usize;
+        let ti = to_k as usize;
+        if fi >= tile_count || ti >= tile_count {
+            return;
+        }
+        if claimable[fi] == 0 || claimable[ti] == 0 {
+            return;
+        }
+        if pressures[fi] <= pressures[ti] {
+            return;
+        }
+        let pull = (pressures[fi] - pressures[ti]) * rate;
+        let cap = pull.min(pressures[fi] * 0.75);
+        if cap > 0.001 {
+            pressures[fi] -= cap;
+            pressures[ti] += cap;
+        }
+    }
+
     fn recount_ownership_tiles(&mut self) {
         self.friendly_tiles = 0;
         self.hostile_tiles = 0;
@@ -367,6 +408,49 @@ impl TerritoryKernel {
         self.sync_ownership_from_pressures();
     }
 
+    fn suction_feed_bridge_pipes_live(&mut self, friendly: bool) {
+        if BRIDGE_PIPE_SUCTION_RATE <= 0.0 || self.bridge_path_packs.is_empty() {
+            return;
+        }
+        let rate = BRIDGE_PIPE_SUCTION_RATE * 1.5;
+        let passes = BRIDGE_PIPE_LIVE_SUCTION_PASSES.max(1);
+        let tile_count = self.tile_count;
+        let claimable = &self.claimable_mask;
+        let paths = self.bridge_path_packs.clone();
+        let pressures = if friendly {
+            &mut self.pressure_friendly
+        } else {
+            &mut self.pressure_hostile
+        };
+        for _ in 0..passes {
+            for packed in &paths {
+                if packed.len() < 2 {
+                    continue;
+                }
+                for i in 1..packed.len() {
+                    Self::suction_transfer_along_pipe(
+                        pressures,
+                        claimable,
+                        packed[i - 1],
+                        packed[i],
+                        rate,
+                        tile_count,
+                    );
+                }
+                for i in (0..packed.len().saturating_sub(1)).rev() {
+                    Self::suction_transfer_along_pipe(
+                        pressures,
+                        claimable,
+                        packed[i],
+                        packed[i + 1],
+                        rate,
+                        tile_count,
+                    );
+                }
+            }
+        }
+    }
+
     fn spread_pressure_gradient(&mut self) {
         self.gradient_flow_pass_into(true);
         self.bridge_pipe_suction_pass(true);
@@ -396,9 +480,7 @@ impl TerritoryKernel {
             if claimable[idx] == 0 {
                 continue;
             }
-            let on_pipe = bw.get(idx).copied().unwrap_or(0) > 0
-                || cl.get(idx).copied().unwrap_or(0) > 0;
-            if !on_pipe {
+            if !Self::is_bridge_pipe_cell(idx, prev, next, bw, cl) {
                 continue;
             }
             let prev_i = prev.get(idx).copied().unwrap_or(-1);
@@ -541,6 +623,22 @@ impl TerritoryKernel {
         Self::wrap_nx(nx, w, wrap_longitude)
     }
 
+    fn is_bridge_pipe_cell(
+        idx: usize,
+        bridge_pipe_prev: &[i32],
+        bridge_pipe_next: &[i32],
+        bridge_water_mask: &[u8],
+        corridor_land_mask: &[u8],
+    ) -> bool {
+        if bridge_water_mask.get(idx).copied().unwrap_or(0) > 0
+            || corridor_land_mask.get(idx).copied().unwrap_or(0) > 0
+        {
+            return true;
+        }
+        bridge_pipe_prev.get(idx).copied().unwrap_or(-1) >= 0
+            || bridge_pipe_next.get(idx).copied().unwrap_or(-1) >= 0
+    }
+
     fn pipe_neighbor_indices(
         idx: usize,
         claimable: &[u8],
@@ -566,6 +664,7 @@ impl TerritoryKernel {
                 if ni < claimable.len() && claimable[ni] != 0 {
                     if n == 0 || out[0] != ni {
                         out[n] = ni;
+                        n += 1;
                     }
                 }
             }
@@ -587,14 +686,22 @@ impl TerritoryKernel {
         scratch: &mut Vec<usize>,
     ) {
         scratch.clear();
-        let on_pipe = bridge_water_mask.get(idx).copied().unwrap_or(0) > 0
-            || corridor_land_mask.get(idx).copied().unwrap_or(0) > 0;
+        let on_pipe = Self::is_bridge_pipe_cell(
+            idx,
+            bridge_pipe_prev,
+            bridge_pipe_next,
+            bridge_water_mask,
+            corridor_land_mask,
+        );
         if on_pipe {
             let pipe = Self::pipe_neighbor_indices(idx, claimable, bridge_pipe_prev, bridge_pipe_next);
             for pi in pipe {
                 if pi != usize::MAX && !scratch.iter().any(|&x| x == pi) {
                     scratch.push(pi);
                 }
+            }
+            if !scratch.is_empty() {
+                return;
             }
         }
         let gx = (idx as i32) % w;
@@ -976,6 +1083,9 @@ impl TerritoryKernel {
         indices: &[i32],
         claimable: &[u8],
         owners: &[u8],
+        elevation: &[f32],
+        terrain_flow_mult: &[f32],
+        claim_ratio_mult: &[f32],
     ) {
         for (i, &idx_i) in indices.iter().enumerate() {
             if idx_i < 0 {
@@ -990,7 +1100,17 @@ impl TerritoryKernel {
                 if self.claimable_mask[ui] != new_claimable {
                     self.claimable_mask[ui] = new_claimable;
                     self.bump_nav_dirty(ui);
+                    self.mark_active_dirty(ui);
                 }
+            }
+            if i < elevation.len() {
+                self.elevation[ui] = elevation[i];
+            }
+            if i < terrain_flow_mult.len() {
+                self.terrain_flow_mult[ui] = terrain_flow_mult[i];
+            }
+            if i < claim_ratio_mult.len() {
+                self.claim_ratio_mult[ui] = claim_ratio_mult[i];
             }
             if i < owners.len() {
                 let new_owner = owners[i];
@@ -1002,6 +1122,9 @@ impl TerritoryKernel {
             }
         }
         self.frontier_changed = true;
+        if self.use_active_set {
+            self.rebuild_active_indices();
+        }
     }
 
     pub fn take_owner_dirty(&mut self) -> (Vec<i32>, Vec<u8>) {

@@ -719,24 +719,27 @@ func _validate_bridge_pipe_suction() -> void:
 	if path_packed.is_empty() or map_data == null:
 		_fail("bridge pipe suction no corridor route on sample seeds")
 		return
-	var built_cells: int = _bridge_qa_water_prefix_end(map_data, path_packed)
-	if built_cells < 0:
-		_fail("bridge pipe suction route has no water cells")
-		return
-	built_cells = mini(built_cells + 2, path_packed.size())
+	map_data.bridge_corridors = []
+	map_data.placed_structures = []
 	map_data.placed_structures.append({
 		"id": 1,
 		"team": BattleTileControlLib.OWNER_FRIENDLY,
 		"gx": coastal.x,
 		"gy": coastal.y,
-		"kind": OutpostBuildLib.KIND_SPAWNER,
+		"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
 		"state": OutpostBuildLib.STATE_CONNECTING,
-		"source_gx": home.x,
-		"source_gy": home.y,
 		"path_keys": path_packed,
 		"path_len": path_packed.size(),
-		"path_built": float(built_cells),
+		"path_built": float(path_packed.size()),
 	})
+	map_data.bridge_corridors.append({
+		"id": 1,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": coastal.x,
+		"gy": coastal.y,
+		"path_keys": path_packed,
+	})
+	map_data.placed_structures.clear()
 	var sim := BattleTerritorySimLib.new()
 	sim.use_simple_water_model = true
 	sim.set_resolve_context("world_conquest")
@@ -744,22 +747,19 @@ func _validate_bridge_pipe_suction() -> void:
 	sim.set_live_backend(false)
 	var tc := sim.tile_control
 	tc.sync_bridge_corridors_from_map(map_data, true)
-	var fw_start: int = maxi(1, built_cells - 2)
-	for i in range(fw_start):
-		tc.pressure_friendly[path_packed[i]] = 40.0
-	for _round in range(12):
+	tc.extend_beachhead_from_landing(
+		map_data, coastal.x, coastal.y, BattleTileControlLib.OWNER_FRIENDLY
+	)
+	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
+	tc.pressure_friendly.fill(0.0)
+	tc.pressure_hostile.fill(0.0)
+	for _round in range(30):
 		sim.advance_round()
-	var water_p: float = 0.0
-	for i in range(1, built_cells):
-		var key: int = path_packed[i]
-		var gx: int = key % map_data.grid_width
-		var gy: int = key / map_data.grid_width
-		if OutpostBuildLib.is_water_cell(map_data, gx, gy):
-			water_p += tc.pressure_friendly[key]
-	if water_p < 0.5:
-		_fail("bridge pipe suction corridor pressure too low (%.3f)" % water_p)
+	var landing_p: float = tc.pressure_friendly[landing_key]
+	if landing_p < 0.5:
+		_fail("bridge pipe suction natural landing pressure too low (%.3f)" % landing_p)
 		return
-	_log("OK  bridge pipe suction corridor_p=%.3f" % water_p)
+	_log("OK  bridge pipe suction natural landing_p=%.3f" % landing_p)
 
 
 func _bridge_qa_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:

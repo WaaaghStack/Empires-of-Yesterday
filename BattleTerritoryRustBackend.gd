@@ -250,6 +250,8 @@ func sync_bridge_pipe_from(tile_control: BattleTileControlLib) -> void:
 		tile_control.bridge_water_mask_packed(),
 		tile_control.corridor_land_mask_packed(),
 	)
+	if _sim.has_method("update_bridge_paths"):
+		_sim.call("update_bridge_paths", tile_control.bridge_pipe_path_packs())
 
 
 func sync_claimable_from(
@@ -268,6 +270,9 @@ func sync_claimable_from(
 			delta.indices,
 			delta.claimable,
 			delta.owners,
+			delta.elevation,
+			delta.flow_mult,
+			delta.claim_mult,
 		)
 		sync_bridge_pipe_from(tile_control)
 		return
@@ -295,13 +300,29 @@ func _pack_claimable_delta(tile_control: BattleTileControlLib) -> Dictionary:
 		return {}
 	var claimable := PackedByteArray()
 	var owners := PackedByteArray()
+	var elevation := PackedFloat32Array()
+	var flow_mult := PackedFloat32Array()
+	var claim_mult := PackedFloat32Array()
 	claimable.resize(indices.size())
 	owners.resize(indices.size())
+	elevation.resize(indices.size())
+	flow_mult.resize(indices.size())
+	claim_mult.resize(indices.size())
 	for i in range(indices.size()):
 		var idx: int = indices[i]
 		claimable[i] = tile_control.claimable_mask[idx]
 		owners[i] = tile_control.owners[idx]
-	return {"indices": indices, "claimable": claimable, "owners": owners}
+		elevation[i] = tile_control._elevation[idx]
+		flow_mult[i] = tile_control._terrain_flow_mult[idx]
+		claim_mult[i] = tile_control._claim_ratio_mult[idx]
+	return {
+		"indices": indices,
+		"claimable": claimable,
+		"owners": owners,
+		"elevation": elevation,
+		"flow_mult": flow_mult,
+		"claim_mult": claim_mult,
+	}
 
 
 static func encode_pressure_v2(pressure: PackedFloat32Array) -> PackedByteArray:

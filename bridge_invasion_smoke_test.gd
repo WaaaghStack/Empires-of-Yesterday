@@ -219,6 +219,22 @@ func _run() -> void:
 	_log(lines, "OK persisted land bridge corridor (%d claimable cells)" % persisted_claimable)
 
 	tc.extend_beachhead_from_landing(map_data, coastal.x, coastal.y, BattleTileControlLib.OWNER_FRIENDLY)
+	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
+	tc.pressure_friendly.fill(0.0)
+	tc.pressure_hostile.fill(0.0)
+	for _nat in range(30):
+		sim.advance_round()
+	var cpu_natural_landing: float = tc.pressure_friendly[landing_key]
+	if cpu_natural_landing < 0.5:
+		_log(
+			lines,
+			"FAIL cpu natural land bridge landing pressure=%s"
+			% cpu_natural_landing
+		)
+		_write(lines)
+		return
+	_log(lines, "OK cpu natural land bridge landing pressure=%s" % cpu_natural_landing)
+
 	if inland.x < 0:
 		_log(lines, "SKIP inland outpost routing (no inland foreign sample)")
 	else:
@@ -258,15 +274,19 @@ func _run() -> void:
 			var rtc := rust_sim.tile_control
 			rtc.sync_bridge_corridors_from_map(rust_map, true)
 			rust_sim.rust_field.sync_claimable_from(rtc, rust_map, true)
+			rust_sim.rust_field.sync_bridge_pipe_from(rtc)
 			rtc.extend_beachhead_from_landing(
 				rust_map, coastal.x, coastal.y, BattleTileControlLib.OWNER_FRIENDLY
 			)
 			rust_sim.rust_field.sync_claimable_from(rtc, rust_map, true)
-			var landing_key: int = rust_map.cell_index(coastal.x, coastal.y)
-			for _j in range(20):
+			rust_sim.rust_field.sync_bridge_pipe_from(rtc)
+			var rust_landing_key: int = rust_map.cell_index(coastal.x, coastal.y)
+			for _j in range(30):
 				rust_sim.advance_round()
 			var rust_pf: PackedFloat32Array = rust_sim.rust_field.get_pressure_friendly()
-			var landing_p: float = rust_pf[landing_key] if landing_key < rust_pf.size() else 0.0
+			var landing_p: float = (
+				rust_pf[rust_landing_key] if rust_landing_key < rust_pf.size() else 0.0
+			)
 			if landing_p < 0.5:
 				_log(lines, "FAIL rust land bridge landing pressure=%s (natural flow)" % landing_p)
 				_write(lines)

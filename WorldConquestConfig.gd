@@ -101,7 +101,9 @@ const SOLDIER_UPKEEP_DEFICIT_DPS := 2.5
 ## Pressure flow multiplier on built bridge water cells (vs land).
 const BRIDGE_PRESSURE_FLOW_MULT := 2.8
 ## Low-level suction along bridge pipe topology (prev→cell→next) per gradient pass.
-const BRIDGE_PIPE_SUCTION_RATE := 0.22
+const BRIDGE_PIPE_SUCTION_RATE := 0.35
+## Live inject-phase sweeps along bridge pipes (long crossings need multiple per round).
+const BRIDGE_PIPE_LIVE_SUCTION_PASSES := 32
 
 ## Win: all claimable land, or enemy cumulative power reaches zero.
 const CONQUEST_LAND_FRAC := 1.0

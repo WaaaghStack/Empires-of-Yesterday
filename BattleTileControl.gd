@@ -116,6 +116,7 @@ var _hostile_corridor_land: PackedByteArray = PackedByteArray()
 ## 1D bridge pipe links (path[i-1], path[i+1]) for corridor pressure flow.
 var _bridge_pipe_prev: PackedInt32Array = PackedInt32Array()
 var _bridge_pipe_next: PackedInt32Array = PackedInt32Array()
+var _bridge_pipe_path_packs: Array = []
 var _bridge_water_mask_cache: PackedByteArray = PackedByteArray()
 var _corridor_land_mask_cache: PackedByteArray = PackedByteArray()
 var _bridge_flow_masks_dirty: bool = true
@@ -349,6 +350,7 @@ func _propagate_simple_water(map_data) -> void:
 	_inject_home_base_tile(map_data, map_data.player_spawn_zone, _friendly_spawn_rate, true)
 	_inject_home_base_tile(map_data, map_data.enemy_spawn_zone, _hostile_spawn_rate, false)
 	_inject_placed_spawners(map_data)
+	_suction_feed_bridge_pipes_live()
 	if perf != null:
 		perf.end_phase("inject", t_inj)
 
@@ -356,6 +358,7 @@ func _propagate_simple_water(map_data) -> void:
 	if perf != null:
 		t_grad = perf.begin_phase("gradient")
 	_run_gradient_cancel_sync_pass(map_data)
+	_suction_feed_bridge_pipes_live()
 	var frontier_delta: int = (
 		absi(friendly_tiles - _prev_friendly_tiles) + absi(hostile_tiles - _prev_hostile_tiles)
 	)
@@ -717,11 +720,11 @@ func sync_bridge_corridors_from_map(map_data, force_full: bool = false) -> bool:
 		if corridor is Dictionary:
 			_apply_persisted_corridor_sync(map_data, corridor, force_full, touched)
 	var nav_reconciled: bool = _reconcile_corridor_land_nav_masks(map_data)
+	if force_full:
+		rebuild_bridge_pipe_topology(map_data)
 	if touched.is_empty():
 		return nav_reconciled
 	var changed: bool = _apply_claimable_cells(map_data, touched)
-	if force_full:
-		rebuild_bridge_pipe_topology(map_data)
 	return changed or nav_reconciled
 
 
@@ -754,11 +757,14 @@ func rebuild_bridge_pipe_topology(map_data) -> void:
 		return
 	_bridge_pipe_prev.fill(-1)
 	_bridge_pipe_next.fill(-1)
+	_bridge_pipe_path_packs.clear()
 	if map_data == null:
 		return
 	for corridor: Dictionary in map_data.bridge_corridors:
 		var packed: PackedInt32Array = corridor.get("path_keys", PackedInt32Array())
 		_register_bridge_pipe_path(packed, packed.size())
+		if packed.size() >= 2:
+			_bridge_pipe_path_packs.append(packed)
 	for st: Dictionary in map_data.placed_structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
 			continue
@@ -776,7 +782,13 @@ func rebuild_bridge_pipe_topology(map_data) -> void:
 		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
 		var built: int = _built_bridge_cells_from_structure(st)
 		_register_bridge_pipe_path(packed, built)
+		if built >= 2:
+			_bridge_pipe_path_packs.append(packed.slice(0, built))
 	_bridge_flow_masks_dirty = true
+
+
+func bridge_pipe_path_packs() -> Array:
+	return _bridge_pipe_path_packs
 
 
 func _register_bridge_pipe_path(packed: PackedInt32Array, built_cells: int) -> void:
@@ -817,17 +829,69 @@ func _is_corridor_land_index(idx: int) -> bool:
 	return false
 
 
+func _is_bridge_pipe_cell_index(idx: int) -> bool:
+	if idx < 0 or idx >= _tile_count:
+		return false
+	if _is_bridge_water_index(idx) or _is_corridor_land_index(idx):
+		return true
+	var prev_i: int = _bridge_pipe_prev[idx] if idx < _bridge_pipe_prev.size() else -1
+	var next_i: int = _bridge_pipe_next[idx] if idx < _bridge_pipe_next.size() else -1
+	return prev_i >= 0 or next_i >= 0
+
+
 ## Bridge/corridor tiles prefer pipe topology; land uses cardinal neighbors.
 func _gradient_flow_neighbor_indices(map_data, gx: int, gy: int, idx: int) -> PackedInt32Array:
-	if _is_bridge_water_index(idx) or _is_corridor_land_index(idx):
+	if _is_bridge_pipe_cell_index(idx):
 		var pipe: PackedInt32Array = _bridge_pipe_neighbor_indices(idx)
 		if not pipe.is_empty():
-			var merged: PackedInt32Array = pipe.duplicate()
-			for ni: int in _cardinal_neighbor_indices(map_data, gx, gy):
-				if not merged.has(ni):
-					merged.append(ni)
-			return merged
+			return pipe
 	return _cardinal_neighbor_indices(map_data, gx, gy)
+
+
+func _suction_feed_bridge_pipes_live() -> void:
+	var rate: float = WorldConquestConfigLib.BRIDGE_PIPE_SUCTION_RATE * 1.5
+	var passes: int = maxi(1, WorldConquestConfigLib.BRIDGE_PIPE_LIVE_SUCTION_PASSES)
+	if rate <= 0.0 or _tile_count <= 0:
+		return
+	_suction_feed_bridge_paths_direct(pressure_friendly, rate, passes)
+	_suction_feed_bridge_paths_direct(pressure_hostile, rate, passes)
+
+
+func _suction_transfer_along_pipe(
+	src: PackedFloat32Array, from_k: int, to_k: int, rate: float
+) -> void:
+	if (
+		from_k < 0 or to_k < 0
+		or from_k >= _tile_count or to_k >= _tile_count
+		or claimable_mask[from_k] == 0 or claimable_mask[to_k] == 0
+	):
+		return
+	if src[from_k] <= src[to_k]:
+		return
+	var pull: float = (src[from_k] - src[to_k]) * rate
+	var cap: float = minf(pull, src[from_k] * 0.75)
+	if cap <= 0.001:
+		return
+	src[from_k] -= cap
+	src[to_k] += cap
+
+
+func _suction_feed_bridge_paths_direct(
+	src: PackedFloat32Array, rate: float, passes: int
+) -> void:
+	if _bridge_pipe_path_packs.is_empty():
+		return
+	for _pass in range(passes):
+		for packed_v in _bridge_pipe_path_packs:
+			if not packed_v is PackedInt32Array:
+				continue
+			var packed: PackedInt32Array = packed_v
+			if packed.size() < 2:
+				continue
+			for i in range(1, packed.size()):
+				_suction_transfer_along_pipe(src, packed[i - 1], packed[i], rate)
+			for i in range(packed.size() - 2, -1, -1):
+				_suction_transfer_along_pipe(src, packed[i], packed[i + 1], rate)
 
 
 func _bridge_pipe_suction_pass(dst: PackedFloat32Array) -> void:
@@ -837,7 +901,7 @@ func _bridge_pipe_suction_pass(dst: PackedFloat32Array) -> void:
 	for idx in range(_tile_count):
 		if claimable_mask[idx] == 0:
 			continue
-		if not _is_bridge_water_index(idx) and not _is_corridor_land_index(idx):
+		if not _is_bridge_pipe_cell_index(idx):
 			continue
 		var prev_i: int = _bridge_pipe_prev[idx] if idx < _bridge_pipe_prev.size() else -1
 		var next_i: int = _bridge_pipe_next[idx] if idx < _bridge_pipe_next.size() else -1
@@ -1044,6 +1108,13 @@ func _sync_corridor_path_cells(
 	var src_idx: int = packed[0]
 	if src_idx < 0 or src_idx >= land_reach.size() or land_reach[src_idx] == 0:
 		return
+	# Path source must use pipe gradient neighbors (sync loop starts at index 1).
+	if synced_cells <= 1 and src_idx < corridor_land.size():
+		var src_gx: int = src_idx % map_data.grid_width
+		var src_gy: int = src_idx / map_data.grid_width
+		if map_data.is_land_cell(src_gx, src_gy) and corridor_land[src_idx] == 0:
+			corridor_land[src_idx] = 1
+			_touch_bridge_flow_mask_cell(src_idx)
 	if synced_cells >= built_cells:
 		return
 	var chain_ok: bool = true

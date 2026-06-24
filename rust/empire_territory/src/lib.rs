@@ -228,6 +228,9 @@ impl TerritorySim {
         indices: PackedInt32Array,
         claimable: PackedByteArray,
         owners: PackedByteArray,
+        elevation: PackedFloat32Array,
+        flow_mult: PackedFloat32Array,
+        claim_mult: PackedFloat32Array,
     ) {
         let Some(kernel) = self.kernel.as_mut() else {
             return;
@@ -239,6 +242,9 @@ impl TerritorySim {
             &idx_vec,
             &packed_byte_to_vec(&claimable),
             &packed_byte_to_vec(&owners),
+            &packed_f32_to_vec(&elevation),
+            &packed_f32_to_vec(&flow_mult),
+            &packed_f32_to_vec(&claim_mult),
         );
     }
 
@@ -265,6 +271,28 @@ impl TerritorySim {
             packed_byte_to_vec(&bridge_water_mask),
             packed_byte_to_vec(&corridor_land_mask),
         );
+    }
+
+    #[func]
+    fn update_bridge_paths(&mut self, paths: Array<Variant>) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        let mut packs: Vec<Vec<i32>> = Vec::new();
+        for i in 0..paths.len() {
+            let Some(v) = paths.get(i) else {
+                continue;
+            };
+            if let Ok(packed) = v.try_to::<PackedInt32Array>() {
+                let vec: Vec<i32> = (0..packed.len())
+                    .map(|j| packed.get(j).unwrap_or(-1))
+                    .collect();
+                if vec.len() >= 2 {
+                    packs.push(vec);
+                }
+            }
+        }
+        kernel.update_bridge_paths(packs);
     }
 
     #[func]
