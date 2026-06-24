@@ -748,36 +748,24 @@ func _validate_bridge_pipe_suction() -> void:
 	var tc := sim.tile_control
 	tc.sync_bridge_corridors_from_map(map_data, true)
 	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
-	tc.extend_beachhead_from_landing(
-		map_data, coastal.x, coastal.y, BattleTileControlLib.OWNER_FRIENDLY
+	const BridgeFlowMeasureLib := preload("res://BridgeFlowMeasure.gd")
+	if not BridgeFlowMeasureLib.run_pipe_unit_selfcheck():
+		_fail("bridge pipe unit suction selfcheck")
+		return
+	_log("OK  bridge pipe unit suction selfcheck")
+	var source_key: int = (
+		path_packed[0] if path_packed.size() > 0 else map_data.cell_index(home.x, home.y)
 	)
-	_log(
-		"OK  bridge natural flow source player_home=%s home_inject_only"
-		% home
+	var flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
+		sim, tc, map_data, path_packed, landing_key, source_key, 30, "cpu"
 	)
-	tc.pressure_friendly.fill(0.0)
-	tc.pressure_hostile.fill(0.0)
-	tc.bridge_live_suction_enabled = false
-	for _pre in range(30):
-		sim.advance_round()
-	var pre_p: float = tc.pressure_friendly[landing_key]
-	tc.pressure_friendly.fill(0.0)
-	tc.pressure_hostile.fill(0.0)
-	tc.bridge_live_suction_enabled = true
-	for _post in range(30):
-		sim.advance_round()
-	var post_p: float = tc.pressure_friendly[landing_key]
-	var delta: float = post_p - pre_p
-	if post_p < 0.5 or delta <= 0.001:
+	_log("OK  %s" % BridgeFlowMeasureLib.format_result(flow))
+	if not bool(flow.get("pass", false)):
 		_fail(
 			"bridge pipe suction natural landing pre=%.3f post=%.3f delta=%.3f"
-			% [pre_p, post_p, delta]
+			% [float(flow.get("pre", 0.0)), float(flow.get("post", 0.0)), float(flow.get("delta", 0.0))]
 		)
 		return
-	_log(
-		"OK  bridge pipe suction natural landing pre=%.3f post=%.3f delta=%.3f"
-		% [pre_p, post_p, delta]
-	)
 
 
 func _bridge_qa_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:

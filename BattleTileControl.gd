@@ -128,6 +128,7 @@ var _hostile_spawn_rate: float = 1.0
 var use_simple_water_model: bool = false
 var use_longitude_wrap: bool = false
 var bridge_live_suction_enabled: bool = true
+var home_inject_enabled: bool = true
 var perf = null
 
 const ACTIVE_PRESSURE_EPS := 0.05
@@ -348,8 +349,9 @@ func _propagate_simple_water(map_data) -> void:
 	var t_inj: int = 0
 	if perf != null:
 		t_inj = perf.begin_phase("inject")
-	_inject_home_base_tile(map_data, map_data.player_spawn_zone, _friendly_spawn_rate, true)
-	_inject_home_base_tile(map_data, map_data.enemy_spawn_zone, _hostile_spawn_rate, false)
+	if home_inject_enabled:
+		_inject_home_base_tile(map_data, map_data.player_spawn_zone, _friendly_spawn_rate, true)
+		_inject_home_base_tile(map_data, map_data.enemy_spawn_zone, _hostile_spawn_rate, false)
 	_inject_placed_spawners(map_data)
 	_suction_feed_bridge_pipes_live()
 	if perf != null:
@@ -847,6 +849,10 @@ func _gradient_flow_neighbor_indices(map_data, gx: int, gy: int, idx: int) -> Pa
 		if not pipe.is_empty():
 			return pipe
 	return _cardinal_neighbor_indices(map_data, gx, gy)
+
+
+func apply_bridge_pipe_suction_live() -> void:
+	_suction_feed_bridge_pipes_live()
 
 
 func _suction_feed_bridge_pipes_live() -> void:

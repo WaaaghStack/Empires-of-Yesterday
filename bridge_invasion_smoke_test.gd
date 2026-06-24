@@ -9,6 +9,7 @@ const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend.gd")
+const BridgeFlowMeasureLib := preload("res://BridgeFlowMeasure.gd")
 
 
 func _init() -> void:
@@ -218,10 +219,24 @@ func _run() -> void:
 		return
 	_log(lines, "OK persisted land bridge corridor (%d claimable cells)" % persisted_claimable)
 
+	if not BridgeFlowMeasureLib.run_pipe_unit_selfcheck():
+		_log(lines, "FAIL bridge pipe unit suction selfcheck")
+		_write(lines)
+		return
+	_log(lines, "OK bridge pipe unit suction selfcheck")
+
 	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
-	if not _assert_natural_landing_flow(
-		lines, sim, tc, map_data, landing_key, home, 30, "cpu"
-	):
+	var source_key: int = path_packed[0] if path_packed.size() > 0 else map_data.cell_index(home.x, home.y)
+	var cpu_flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
+		sim, tc, map_data, path_packed, landing_key, source_key, 30, "cpu"
+	)
+	_log(lines, "OK %s" % BridgeFlowMeasureLib.format_result(cpu_flow))
+	if not bool(cpu_flow.get("pass", false)):
+		_log(
+			lines,
+			"FAIL cpu natural land bridge landing (pre=%.3f post=%.3f)"
+			% [float(cpu_flow.get("pre", 0.0)), float(cpu_flow.get("post", 0.0))]
+		)
 		_write(lines)
 		return
 
@@ -268,16 +283,28 @@ func _run() -> void:
 			rust_sim.rust_field.sync_claimable_from(rtc, rust_map, true)
 			rust_sim.rust_field.sync_bridge_pipe_from(rtc)
 			var rust_landing_key: int = rust_map.cell_index(coastal.x, coastal.y)
-			if not _assert_natural_landing_flow(
-				lines,
+			var rust_source_key: int = (
+				rust_path[0]
+				if rust_path.size() > 0
+				else rust_map.cell_index(rust_map.player_home_grid.x, rust_map.player_home_grid.y)
+			)
+			var rust_flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
 				rust_sim,
 				rtc,
 				rust_map,
+				rust_path,
 				rust_landing_key,
-				rust_map.player_home_grid,
+				rust_source_key,
 				30,
 				"rust",
-			):
+			)
+			_log(lines, "OK %s" % BridgeFlowMeasureLib.format_result(rust_flow))
+			if not bool(rust_flow.get("pass", false)):
+				_log(
+					lines,
+					"FAIL rust natural land bridge landing (pre=%.3f post=%.3f)"
+					% [float(rust_flow.get("pre", 0.0)), float(rust_flow.get("post", 0.0))]
+				)
 				_write(lines)
 				return
 		else:
@@ -287,71 +314,6 @@ func _run() -> void:
 
 	_log(lines, "PASS bridge invasion smoke (backends=%s)" % ",".join(backends_tested))
 	_write(lines)
-
-
-func _assert_natural_landing_flow(
-	lines: PackedStringArray,
-	sim: BattleTerritorySimLib,
-	tc: BattleTileControlLib,
-	map_data,
-	landing_key: int,
-	home: Vector2i,
-	rounds: int,
-	label: String,
-) -> bool:
-	var coastal_gx: int = landing_key % map_data.grid_width
-	var coastal_gy: int = landing_key / map_data.grid_width
-	tc.extend_beachhead_from_landing(
-		map_data, coastal_gx, coastal_gy, BattleTileControlLib.OWNER_FRIENDLY
-	)
-	_log(
-		lines,
-		"OK %s natural flow source player_home=%s home_inject_only (no corridor inject)"
-		% [label, home]
-	)
-	_zero_sim_pressures(sim, tc)
-	tc.bridge_live_suction_enabled = false
-	for _pre in range(rounds):
-		sim.advance_round()
-	var pre_p: float = _landing_pressure_from_sim(sim, tc, landing_key)
-	_zero_sim_pressures(sim, tc)
-	tc.bridge_live_suction_enabled = true
-	for _post in range(rounds):
-		sim.advance_round()
-	var post_p: float = _landing_pressure_from_sim(sim, tc, landing_key)
-	var delta: float = post_p - pre_p
-	_log(
-		lines,
-		"OK %s bridge natural landing pre_suction=%.3f post_suction=%.3f delta=%.3f"
-		% [label, pre_p, post_p, delta]
-	)
-	if post_p < 0.5 or delta <= 0.001:
-		_log(
-			lines,
-			"FAIL %s natural land bridge landing (pre=%.3f post=%.3f)"
-			% [label, pre_p, post_p]
-		)
-		return false
-	return true
-
-
-func _zero_sim_pressures(sim: BattleTerritorySimLib, tc: BattleTileControlLib) -> void:
-	tc.pressure_friendly.fill(0.0)
-	tc.pressure_hostile.fill(0.0)
-	if sim.rust_field != null and sim.rust_field.ready:
-		sim.rust_field.sync_pressures_from(tc)
-
-
-func _landing_pressure_from_sim(
-	sim: BattleTerritorySimLib, tc: BattleTileControlLib, landing_key: int
-) -> float:
-	if sim.rust_field != null and sim.rust_field.ready:
-		var rust_pf: PackedFloat32Array = sim.rust_field.get_pressure_friendly()
-		if landing_key >= 0 and landing_key < rust_pf.size():
-			return rust_pf[landing_key]
-	if landing_key >= 0 and landing_key < tc.pressure_friendly.size():
-		return tc.pressure_friendly[landing_key]
-	return 0.0
 
 
 func _log(lines: PackedStringArray, msg: String) -> void:

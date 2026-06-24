@@ -103,6 +103,8 @@ func step_round(tile_control: BattleTileControlLib) -> void:
 		_sim.call(
 			"set_bridge_live_suction_enabled", tile_control.bridge_live_suction_enabled
 		)
+	if _sim.has_method("set_home_inject_enabled"):
+		_sim.call("set_home_inject_enabled", tile_control.home_inject_enabled)
 	_sim.call("advance_round")
 	_apply_owners_delta_to_tile_control(tile_control)
 
@@ -123,6 +125,8 @@ func step_rounds(tile_control: BattleTileControlLib, count: int) -> void:
 		_sim.call(
 			"set_bridge_live_suction_enabled", tile_control.bridge_live_suction_enabled
 		)
+	if _sim.has_method("set_home_inject_enabled"):
+		_sim.call("set_home_inject_enabled", tile_control.home_inject_enabled)
 	_sim.call("advance_rounds", count)
 	_apply_owners_delta_to_tile_control(tile_control)
 

@@ -57,6 +57,7 @@ pub struct TerritoryKernel {
     pub use_adaptive_double_pass: bool,
     pub wrap_longitude: bool,
     pub bridge_live_suction_enabled: bool,
+    pub home_inject_enabled: bool,
     bridge_pipe_prev: Vec<i32>,
     bridge_pipe_next: Vec<i32>,
     bridge_path_packs: Vec<Vec<i32>>,
@@ -128,6 +129,7 @@ impl TerritoryKernel {
             use_adaptive_double_pass,
             wrap_longitude,
             bridge_live_suction_enabled: true,
+            home_inject_enabled: true,
             bridge_pipe_prev: vec![-1; tile_count],
             bridge_pipe_next: vec![-1; tile_count],
             bridge_path_packs: Vec::new(),
@@ -178,8 +180,10 @@ impl TerritoryKernel {
         self.prev_friendly_tiles = self.friendly_tiles;
         self.prev_hostile_tiles = self.hostile_tiles;
 
-        self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
-        self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
+        if self.home_inject_enabled {
+            self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
+            self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
+        }
         self.inject_placed_spawners();
         self.suction_feed_bridge_pipes_live(true);
         self.suction_feed_bridge_pipes_live(false);
@@ -412,6 +416,10 @@ impl TerritoryKernel {
 
     pub fn set_bridge_live_suction_enabled(&mut self, enabled: bool) {
         self.bridge_live_suction_enabled = enabled;
+    }
+
+    pub fn set_home_inject_enabled(&mut self, enabled: bool) {
+        self.home_inject_enabled = enabled;
     }
 
     fn suction_feed_bridge_pipes_live(&mut self, friendly: bool) {

@@ -282,6 +282,14 @@ impl TerritorySim {
     }
 
     #[func]
+    fn set_home_inject_enabled(&mut self, enabled: bool) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        kernel.set_home_inject_enabled(enabled);
+    }
+
+    #[func]
     fn update_bridge_paths(&mut self, paths: Array<Variant>) {
         let Some(kernel) = self.kernel.as_mut() else {
             return;
