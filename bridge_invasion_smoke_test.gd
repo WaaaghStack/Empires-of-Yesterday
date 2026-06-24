@@ -185,28 +185,7 @@ func _run() -> void:
 			_log(lines, "FAIL connecting survival hp=%s" % hp_after)
 
 	# Land bridge: full path persists as bridge_corridors without a building phase.
-	map_data.bridge_corridors = []
-	map_data.placed_structures.clear()
-	map_data.placed_structures.append({
-		"id": 3,
-		"team": BattleTileControlLib.OWNER_FRIENDLY,
-		"gx": coastal.x,
-		"gy": coastal.y,
-		"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
-		"state": OutpostBuildLib.STATE_CONNECTING,
-		"path_keys": path_packed,
-		"path_len": path_packed.size(),
-		"path_built": float(path_packed.size()),
-	})
-	var corridor_st: Dictionary = map_data.placed_structures[0]
-	map_data.bridge_corridors.append({
-		"id": int(corridor_st.get("id", 3)),
-		"team": int(corridor_st.get("team", BattleTileControlLib.OWNER_FRIENDLY)),
-		"gx": coastal.x,
-		"gy": coastal.y,
-		"path_keys": path_packed,
-	})
-	map_data.placed_structures.clear()
+	_install_persisted_land_bridge(map_data, coastal, path_packed, 3)
 	tc.sync_bridge_corridors_from_map(map_data, true)
 	var persisted_claimable: int = 0
 	for i in range(path_packed.size()):
@@ -271,18 +250,15 @@ func _run() -> void:
 		if rust_sim.enable_rust_live():
 			backends_tested.append("rust")
 			_log(lines, "Territory backend: rust (natural landing section)")
-			rust_map.bridge_corridors.append({
-				"id": 9,
-				"team": BattleTileControlLib.OWNER_FRIENDLY,
-				"gx": coastal.x,
-				"gy": coastal.y,
-				"path_keys": rust_path,
-			})
+			var rust_coastal: Vector2i = OutpostBuildLib.snap_to_nearest_coast(rust_map, inland)
+			if rust_coastal.x < 0:
+				rust_coastal = coastal
+			_install_persisted_land_bridge(rust_map, rust_coastal, rust_path, 9)
 			var rtc := rust_sim.tile_control
 			rtc.sync_bridge_corridors_from_map(rust_map, true)
 			rust_sim.rust_field.sync_claimable_from(rtc, rust_map, true)
 			rust_sim.rust_field.sync_bridge_pipe_from(rtc)
-			var rust_landing_key: int = rust_map.cell_index(coastal.x, coastal.y)
+			var rust_landing_key: int = rust_map.cell_index(rust_coastal.x, rust_coastal.y)
 			var rust_source_key: int = (
 				rust_path[0]
 				if rust_path.size() > 0
@@ -337,6 +313,38 @@ func _first_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:
 		if OutpostBuildLib.is_water_cell(map_data, gx, gy):
 			return i + 1
 	return -1
+
+
+func _install_persisted_land_bridge(
+	map_data,
+	coastal: Vector2i,
+	path_packed: PackedInt32Array,
+	corridor_id: int,
+) -> void:
+	map_data.bridge_corridors = []
+	map_data.placed_structures.clear()
+	map_data.placed_structures.append({
+		"id": corridor_id,
+		"team": BattleTileControlLib.OWNER_FRIENDLY,
+		"gx": coastal.x,
+		"gy": coastal.y,
+		"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
+		"state": OutpostBuildLib.STATE_CONNECTING,
+		"path_keys": path_packed,
+		"path_len": path_packed.size(),
+		"path_built": float(path_packed.size()),
+		"source_gx": map_data.player_home_grid.x,
+		"source_gy": map_data.player_home_grid.y,
+	})
+	var corridor_st: Dictionary = map_data.placed_structures[0]
+	map_data.bridge_corridors.append({
+		"id": int(corridor_st.get("id", corridor_id)),
+		"team": int(corridor_st.get("team", BattleTileControlLib.OWNER_FRIENDLY)),
+		"gx": coastal.x,
+		"gy": coastal.y,
+		"path_keys": path_packed,
+	})
+	map_data.placed_structures.clear()
 
 
 func _find_inland_foreign(
