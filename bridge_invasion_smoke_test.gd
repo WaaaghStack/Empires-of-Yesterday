@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Headless: coast snap, bridge corridors, connecting-phase survival.
+## Headless: coast snap, bridge corridors, connecting-phase survival, BridgeFlowMeasure.
 ## godot --headless --path . -s res://bridge_invasion_smoke_test.gd
 
 const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")

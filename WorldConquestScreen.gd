@@ -12,6 +12,7 @@ const RoutePlannerLib := preload("res://RoutePlannerRustBackend.gd")
 const FrameBudgetProfilerLib := preload("res://FrameBudgetProfiler.gd")
 const OutpostConstructionQueueLib := preload("res://OutpostConstructionQueue.gd")
 const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
+const EnemyStrategyLib := preload("res://EnemyStrategy.gd")
 
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
@@ -49,6 +50,10 @@ var _claimable_tiles: int = 0
 var _friendly_tiles: int = 0
 var _hostile_tiles: int = 0
 var _supply: float = 0.0
+var _enemy_supply: float = 0.0
+var _enemy_ai_clock: float = 0.0
+var _enemy_ai_difficulty: int = CFG.ENEMY_AI_DEFAULT_DIFFICULTY
+var _enemy_ai_action_queue: Array[Dictionary] = []
 var _sim_time: float = 0.0
 var _paused: bool = false
 var _speed_mult: float = 1.0
@@ -141,6 +146,7 @@ func _ready() -> void:
 		tile_probe_label.visible = false
 	end_overlay.visible = false
 	_supply = float(CFG.STARTING_SUPPLY)
+	_enemy_supply = float(CFG.STARTING_SUPPLY)
 	ResourceLib.reset()
 	_friendly_resources = [0.0, 0.0, 0.0]
 	_hostile_resources = [0.0, 0.0, 0.0]
@@ -285,6 +291,7 @@ func _process(delta: float) -> void:
 
 	if not _paused and not territory_sim.finished:
 		_supply += float(_friendly_tiles) * CFG.INCOME_PER_TILE_PER_SEC * delta
+		_enemy_supply += float(_hostile_tiles) * CFG.INCOME_PER_TILE_PER_SEC * delta
 		var sim_t: int = 0
 		if _frame_profiler != null:
 			sim_t = _frame_profiler.begin_phase("sim")
@@ -318,6 +325,12 @@ func _process(delta: float) -> void:
 		_tick_resources(delta * _speed_mult)
 		if _frame_profiler != null:
 			_frame_profiler.end_phase("resources", res_t)
+		var enemy_ai_t: int = 0
+		if _frame_profiler != null:
+			enemy_ai_t = _frame_profiler.begin_phase("enemy_ai")
+		_tick_enemy_strategy(delta * _speed_mult)
+		if _frame_profiler != null:
+			_frame_profiler.end_phase("enemy_ai", enemy_ai_t)
 
 	if sim_steps > 0:
 		_soldier_visual_dirty = true
@@ -584,6 +597,7 @@ func _find_placement_route(
 	build_kind: String,
 	sources: Array[Vector2i],
 	allow_astar: bool,
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Dictionary:
 	var empty: Dictionary = {
 		"path_packed": PackedInt32Array(),
@@ -595,6 +609,10 @@ func _find_placement_route(
 	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
 		return OutpostBuildLib.nearest_corridor_path_to_target(
 			battle_data, landing, sources, allow_astar
+		)
+	if team != BattleTileControlLib.OWNER_FRIENDLY:
+		return OutpostBuildLib.nearest_path_to_target(
+			battle_data, landing, sources, _structure_sources_version, allow_astar
 		)
 	if route_planner != null and route_planner.ready:
 		var rust_res: Dictionary = route_planner.find_route_sync(
@@ -634,7 +652,7 @@ func _resolve_placement_for_team(
 	var landing: Vector2i = precheck.get("landing", Vector2i(-1, -1))
 	var sources: Array[Vector2i] = precheck.get("sources", [])
 	var route: Dictionary = _find_placement_route(
-		landing, build_kind, sources, allow_astar
+		landing, build_kind, sources, allow_astar, team
 	)
 	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
 	if path_packed.is_empty():
@@ -691,7 +709,7 @@ func _placement_precheck_for_team(click: Vector2i, build_kind: String, team: int
 		return result
 	var route_home: Vector2i = _player_home if team == BattleTileControlLib.OWNER_FRIENDLY else _enemy_home
 	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		battle_data.placed_structures, route_home, battle_data
+		battle_data.placed_structures, route_home, battle_data, team
 	)
 	result["sources"] = sources
 	var landing: Vector2i
@@ -703,7 +721,7 @@ func _placement_precheck_for_team(click: Vector2i, build_kind: String, team: int
 	else:
 		var snap_inland: bool = build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK
 		landing = OutpostBuildLib.resolve_invasion_target(
-			battle_data, click, sources, snap_inland
+			battle_data, click, sources, snap_inland, team
 		)
 		if landing.x < 0:
 			result["reject"] = "No coastal landing on this landmass."
@@ -1330,6 +1348,97 @@ func _tick_barracks_spawns(dt: float) -> void:
 			_friendly_resources[au_idx] -= spawn_cost
 			st["spawn_timer"] = timer - CFG.BARRACKS_SPAWN_INTERVAL_SEC
 			_soldier_visual_dirty = true
+
+
+func _tick_enemy_strategy(dt: float) -> void:
+	if not CFG.ENEMY_AI_ENABLED or battle_data == null or territory_sim == null or dt <= 0.0:
+		return
+	_drain_enemy_ai_queue()
+	_enemy_ai_clock += dt
+	if _enemy_ai_clock < CFG.ENEMY_AI_PLAN_INTERVAL_SEC:
+		return
+	_enemy_ai_clock = 0.0
+	if _count_hostile_connecting() >= CFG.ENEMY_AI_MAX_CONCURRENT_BUILDS:
+		return
+	if _enemy_ai_action_queue.size() >= CFG.ENEMY_AI_MAX_ACTIONS_PER_PLAN:
+		return
+	var snapshot: Dictionary = _build_enemy_ai_snapshot()
+	var planned: Array[Dictionary] = EnemyStrategyLib.plan_actions(snapshot)
+	for action: Dictionary in planned:
+		_enemy_ai_action_queue.append(action)
+
+
+func _drain_enemy_ai_queue() -> void:
+	var budget: int = CFG.ENEMY_AI_ACTIONS_PER_FRAME
+	while budget > 0 and not _enemy_ai_action_queue.is_empty():
+		budget -= 1
+		var action: Dictionary = _enemy_ai_action_queue.pop_front()
+		var kind: String = str(action.get("kind", OutpostBuildLib.KIND_SPAWNER))
+		var target: Vector2i = action.get("target", Vector2i(-1, -1))
+		if target.x < 0:
+			continue
+		var cost: float = _build_kind_cost(kind)
+		if _enemy_supply < cost:
+			continue
+		if _count_hostile_connecting() >= CFG.ENEMY_AI_MAX_CONCURRENT_BUILDS:
+			_enemy_ai_action_queue.push_front(action)
+			return
+		var sid: int = debug_place_outpost_at(
+			target, kind, BattleTileControlLib.OWNER_HOSTILE
+		)
+		if sid >= 0:
+			_enemy_supply -= cost
+			_maybe_log_perf_action(
+				"enemy_ai",
+				{"kind": kind, "gx": target.x, "gy": target.y, "sid": sid},
+				1.5,
+			)
+		else:
+			# Drop failed intent — planner will re-evaluate on next interval.
+			pass
+
+
+func _build_enemy_ai_snapshot() -> Dictionary:
+	var tc = territory_sim.tile_control if territory_sim != null else null
+	return {
+		"map_data": battle_data,
+		"structures": battle_data.placed_structures if battle_data != null else [],
+		"owners": tc.owners if tc != null else PackedByteArray(),
+		"enemy_home": _enemy_home,
+		"player_home": _player_home,
+		"friendly_tiles": _friendly_tiles,
+		"hostile_tiles": _hostile_tiles,
+		"claimable_tiles": _claimable_tiles,
+		"enemy_supply": _enemy_supply,
+		"difficulty": _enemy_ai_difficulty,
+		"connecting_hostile": _count_hostile_connecting(),
+	}
+
+
+func _count_hostile_connecting() -> int:
+	if battle_data == null:
+		return 0
+	var n: int = 0
+	for st: Dictionary in battle_data.placed_structures:
+		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != BattleTileControlLib.OWNER_HOSTILE:
+			continue
+		if str(st.get("state", "")) == OutpostBuildLib.STATE_CONNECTING:
+			n += 1
+	return n
+
+
+func _build_kind_cost(kind: String) -> float:
+	if kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return float(CFG.CORRIDOR_LINK_COST_SUPPLY)
+	if kind == OutpostBuildLib.KIND_BARRACKS:
+		return float(CFG.BARRACKS_COST_SUPPLY)
+	return float(CFG.SPAWNER_COST_SUPPLY)
+
+
+func set_enemy_ai_difficulty(difficulty: int) -> void:
+	_enemy_ai_difficulty = clampi(
+		difficulty, EnemyStrategyLib.Difficulty.BEGINNER, EnemyStrategyLib.Difficulty.EXPERT
+	)
 
 
 func _init_builder_agents() -> void:

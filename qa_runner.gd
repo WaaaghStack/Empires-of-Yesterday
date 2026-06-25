@@ -45,6 +45,7 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://WorldConquestScreen.gd",
 	"res://OutpostConstructionQueue.gd",
 	"res://BuilderAgentLib.gd",
+	"res://EnemyStrategy.gd",
 ]
 
 const SCENE_PATHS: Array[String] = [
@@ -86,6 +87,8 @@ func _run_all_async() -> void:
 	_validate_visual_drain_ordering()
 	_validate_builder_selfcheck()
 	_validate_builder_chain_selfcheck()
+	_validate_enemy_strategy_selfcheck()
+	await _validate_enemy_ai_integration_smoke()
 	_validate_world_seed_variety()
 	_validate_bridge_pipe_suction()
 	await _validate_builder_integration_smoke()
@@ -664,6 +667,50 @@ func _validate_builder_chain_selfcheck() -> void:
 		_fail("BuilderAgentLib.run_chain_selfcheck failed")
 		return
 	_log("OK  BuilderAgentLib.run_chain_selfcheck")
+
+
+func _validate_enemy_strategy_selfcheck() -> void:
+	_log("-- Enemy strategy selfcheck (plan_actions on Earth snapshot) --")
+	const EnemyStrategy := preload("res://EnemyStrategy.gd")
+	var sc: Dictionary = EnemyStrategy.run_selfcheck()
+	var detail: String = str(sc.get("detail", ""))
+	if not detail.is_empty():
+		_log(detail)
+	if not bool(sc.get("ok", false)):
+		_fail("EnemyStrategy.run_selfcheck failed")
+		return
+	_log("OK  EnemyStrategy.run_selfcheck")
+
+
+func _validate_enemy_ai_integration_smoke() -> void:
+	_log("-- Enemy AI integration (live screen, hostile placement over time) --")
+	const BattleTileControlLib := preload("res://BattleTileControl.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const EnemyStrategy := preload("res://EnemyStrategy.gd")
+	var screen: Control = await _bootstrap_world_conquest_screen()
+	if screen == null:
+		_fail("enemy AI integration bootstrap timed out")
+		return
+	screen.set("_enemy_supply", float(WorldConquestConfigLib.STARTING_SUPPLY))
+	screen.set_enemy_ai_difficulty(EnemyStrategy.Difficulty.MEDIUM)
+	var battle_data = screen.get("battle_data")
+	if battle_data == null:
+		_fail("enemy AI integration missing battle_data")
+		screen.queue_free()
+		return
+	var max_frames: int = 720
+	for fi in range(max_frames):
+		screen._process(WorldConquestConfigLib.SIM_DT)
+		var hostile_count: int = 0
+		for st: Dictionary in battle_data.placed_structures:
+			if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) == BattleTileControlLib.OWNER_HOSTILE:
+				hostile_count += 1
+		if hostile_count > 0:
+			_log("OK  enemy AI placed hostile structures=%d frames=%d" % [hostile_count, fi + 1])
+			screen.queue_free()
+			return
+	_fail("enemy AI integration no hostile structures after %d frames" % max_frames)
+	screen.queue_free()
 
 
 func _validate_world_seed_variety() -> void:

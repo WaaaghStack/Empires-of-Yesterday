@@ -122,7 +122,9 @@ static func pack_infra_mask_only(map_data, structures: Array) -> PackedByteArray
 	return infra_mask
 
 
-static func operational_sources(structures: Array, home: Vector2i, map_data = null) -> Array[Vector2i]:
+static func operational_sources(
+	structures: Array, home: Vector2i, map_data = null, team: int = BattleTileControlLib.OWNER_FRIENDLY
+) -> Array[Vector2i]:
 	var out: Array[Vector2i] = []
 	var seen: Dictionary = {}
 	var key: String = ""
@@ -130,6 +132,8 @@ static func operational_sources(structures: Array, home: Vector2i, map_data = nu
 		out.append(home)
 		seen["%d,%d" % [home.x, home.y]] = true
 	for st: Dictionary in structures:
+		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+			continue
 		if str(st.get("kind", "")) != "spawner":
 			continue
 		if str(st.get("state", STATE_ACTIVE)) != STATE_ACTIVE:
@@ -142,7 +146,7 @@ static func operational_sources(structures: Array, home: Vector2i, map_data = nu
 		out.append(pt)
 	if map_data != null:
 		for corridor: Dictionary in map_data.bridge_corridors:
-			if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != BattleTileControlLib.OWNER_FRIENDLY:
+			if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
 				continue
 			var bx: int = int(corridor.get("gx", -1))
 			var by: int = int(corridor.get("gy", -1))
@@ -374,14 +378,19 @@ static func is_valid_bridge_path(map_data, packed: PackedInt32Array) -> bool:
 	return saw_water and phase == 2
 
 
-static func needs_bridge_route(map_data, target: Vector2i, sources: Array[Vector2i]) -> bool:
+static func needs_bridge_route(
+	map_data,
+	target: Vector2i,
+	sources: Array[Vector2i],
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
+) -> bool:
 	if map_data == null or target.x < 0:
 		return false
 	if _land_comp_seed != int(map_data.map_seed) or _land_comp.is_empty():
 		prepare_land_components(map_data)
 	if _on_shared_landmass(map_data, target, sources):
 		return false
-	if _reachable_via_bridges(map_data, target, sources):
+	if _reachable_via_bridges(map_data, target, sources, team):
 		return false
 	return true
 
@@ -414,15 +423,16 @@ static func road_cells_for_team(map_data, structures: Array, team: int) -> Dicti
 
 
 static func _reachable_via_bridges(
-	map_data, target: Vector2i, sources: Array[Vector2i]
+	map_data,
+	target: Vector2i,
+	sources: Array[Vector2i],
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> bool:
 	var route: Dictionary = _bfs_infrastructure_route_packed(
 		map_data,
 		target,
 		sources,
-		_bridge_mask_for_team(
-			map_data, BattleTileControlLib.OWNER_FRIENDLY, _structures_for_map(map_data)
-		),
+		_bridge_mask_for_team(map_data, team, _structures_for_map(map_data)),
 	)
 	return not route.path_packed.is_empty()
 
@@ -690,6 +700,7 @@ static func resolve_invasion_target(
 	click: Vector2i,
 	sources: Array[Vector2i],
 	snap_inland_to_coast: bool = false,
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Vector2i:
 	if map_data == null or click.x < 0:
 		return Vector2i(-1, -1)
@@ -697,7 +708,7 @@ static func resolve_invasion_target(
 		if is_coastal_cell(map_data, click.x, click.y):
 			return click
 		return snap_to_nearest_coast(map_data, click, true)
-	if not needs_bridge_route(map_data, click, sources):
+	if not needs_bridge_route(map_data, click, sources, team):
 		return click
 	return snap_to_nearest_coast(map_data, click)
 

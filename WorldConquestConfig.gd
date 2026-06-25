@@ -142,3 +142,19 @@ const RESOURCE_LINK_CELLS_PER_SEC := 1.2
 const RESOURCE_HAUL_CELLS_PER_SEC := 2.5
 ## Cap simultaneous haul pulse draw instances (economy still credits all yields).
 const RESOURCE_MAX_VISUAL_PULSES := 36
+
+## Hostile opponent AI — throttled planner + spread execution (no per-frame full-map scans).
+const ENEMY_AI_ENABLED := true
+const ENEMY_AI_PLAN_INTERVAL_SEC := 1.25
+const ENEMY_AI_ACTIONS_PER_FRAME := 1
+const ENEMY_AI_MAX_ACTIONS_PER_PLAN := 3
+const ENEMY_AI_MAX_CONCURRENT_BUILDS := 2
+const ENEMY_AI_MAX_CANDIDATES := 20
+const ENEMY_AI_FRONTIER_SAMPLE_STRIDE := 4
+const ENEMY_AI_DEFAULT_DIFFICULTY := 1
+const ENEMY_AI_VISION_BEGINNER := 18
+const ENEMY_AI_VISION_MEDIUM := 28
+const ENEMY_AI_VISION_EXPERT := 40
+const ENEMY_AI_BRIDGE_CHANCE_BEGINNER := 0.08
+const ENEMY_AI_BRIDGE_CHANCE_MEDIUM := 0.28
+const ENEMY_AI_BRIDGE_CHANCE_EXPERT := 0.48
