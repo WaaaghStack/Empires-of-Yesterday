@@ -38,7 +38,6 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | Incremental ownership / conquest counts | `BattleTileControl.gd`, `BattleTerritorySim.gd` | No full-grid recount per round |
 | **Frame-budgeted construction queue** | `OutpostConstructionQueue.gd`, `WorldConquestScreen._drain_outpost_construction_queue` | `_advance_outpost_construction` only enqueues; drain processes ≤1 road/corridor/marker sid per frame via `sync_bridge_corridors_for_sids` (no full-map sync) |
 | Bridge → backend claimable sync throttled | `WorldConquestConfig.BRIDGE_BACKEND_SYNC_INTERVAL_SEC` (0.2 s) | Legacy interval; construction drain replaces time-based flush for CONNECTING growth |
-| **Skip redundant bridge-pipe FFI** | `BattleTerritoryRustBackend.sync_claimable_from` | `sync_bridge_pipe_from` runs only when claimable delta indices are non-empty |
 | **Fast owner visual on backend sync** | `WorldConquestScreen._apply_owner_visual_from_backends` | Uses Rust `get_owner_display_r8` bytes path instead of 65k GDScript overlay loop |
 | **Incremental owner sync (Rust)** | `sync_owners_delta`, `BattleTerritoryRustBackend._apply_owners_delta_to_tile_control` | Only changed owner cells cross FFI each sim batch |
 | **Option A pressure pull** | `get_pressure_*` at overlay tick only | ~518 KB pressure FFI avoided per sim step |

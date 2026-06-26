@@ -8,6 +8,7 @@ const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
 const WorldConquestOutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const WorldConquestResourcesLib := preload("res://WorldConquestResources.gd")
+const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
 
 const ROAD_COLOR := Color(0.52, 0.52, 0.54)
 const BRIDGE_COLOR := Color(0.62, 0.64, 0.68)
@@ -15,10 +16,13 @@ const ROAD_THICKNESS := 0.32
 const BRIDGE_THICKNESS := 0.42
 const ROAD_SURFACE_LIFT := 2.75
 const ROAD_RENDER_PRIORITY := 8
+const RESOURCE_RENDER_PRIORITY := 6
+const MARKER_RENDER_PRIORITY := 7
 
 @onready var camera: Camera3D = $Camera3D
 
 var battle_data = null
+var _world_map_id: String = WorldMapCatalogLib.DEFAULT_MAP_ID
 var _globe_mi: MeshInstance3D
 var _fluid_mi: MeshInstance3D
 var _markers: Node3D
@@ -48,8 +52,11 @@ var _builder_pool: Array[MeshInstance3D] = []
 var _builder_pool_used: int = 0
 var _builder_mesh: BoxMesh
 var _marker_box_mesh: BoxMesh
-var _road_seg_count: Dictionary = {}
-var _road_nodes: Dictionary = {}
+var _road_land_mm: MultiMeshInstance3D
+var _road_bridge_mm: MultiMeshInstance3D
+var _road_cache_land: Dictionary = {}
+var _road_cache_bridge: Dictionary = {}
+var _road_cached_seg_total: Dictionary = {}
 var _path_cache: Dictionary = {} # sid -> PackedInt32Array
 var _preview: Node3D
 var _preview_route: Node3D
@@ -79,7 +86,6 @@ var _border_bytes_cache: PackedByteArray = PackedByteArray()
 var _border_tex_gpu: ImageTexture
 var _border_img_gpu: Image
 var _surface_lut: PackedVector3Array = PackedVector3Array()
-var _road_seg_pool: Array[MeshInstance3D] = []
 var _link_seg_pool: Array[MeshInstance3D] = []
 var _shared_road_box: BoxMesh
 var _shared_link_box: BoxMesh
@@ -97,8 +103,9 @@ var _owner_overlay_patch_frame: int = -1
 var _marker_sid_slot: Dictionary = {}
 
 
-func setup(map_data) -> void:
+func setup(map_data, map_id: String = WorldMapCatalogLib.DEFAULT_MAP_ID) -> void:
 	battle_data = map_data
+	_world_map_id = WorldMapCatalogLib.resolve_map_id(map_id)
 	_land_mask = BattleTerritoryRustBackendLib.land_mask_from_map(map_data)
 	_build_surface_lut()
 	if camera == null:
@@ -113,7 +120,7 @@ func _build_scene() -> void:
 			c.queue_free()
 	_globe_mi = MeshInstance3D.new()
 	_globe_mi.name = "Globe"
-	_globe_mi.mesh = EarthGlobeMeshLib.build_globe(battle_data)
+	_globe_mi.mesh = EarthGlobeMeshLib.build_globe(battle_data, _world_map_id)
 	_globe_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var tmat := StandardMaterial3D.new()
 	tmat.vertex_color_use_as_albedo = true
@@ -123,9 +130,9 @@ func _build_scene() -> void:
 	add_child(_globe_mi)
 	_fluid_mi = MeshInstance3D.new()
 	_fluid_mi.name = "Fluid"
-	_fluid_mi.mesh = EarthGlobeMeshLib.build_fluid_globe(battle_data)
+	_fluid_mi.mesh = EarthGlobeMeshLib.build_fluid_globe(battle_data, _world_map_id)
 	_fluid_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_fluid_mi.sorting_offset = 4.0
+	_fluid_mi.sorting_offset = 0.0
 	var w: int = battle_data.grid_width
 	var h: int = battle_data.grid_height
 	_fluid_img = Image.create(w, h, false, Image.FORMAT_RGBA8)
@@ -178,18 +185,7 @@ func _build_scene() -> void:
 	_roads = Node3D.new()
 	_roads.name = "Roads"
 	add_child(_roads)
-	# Pre-warm a decent number of road segments in the pool.
-	# Avoids creation + add_child cost on the frame when a long outpost road first completes (the "connect" event).
-	# 256 is enough for several long paths; pool grows if needed.
-	if _shared_road_box != null:
-		for _i in range(256):
-			var seg := MeshInstance3D.new()
-			seg.mesh = _shared_road_box
-			seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			seg.sorting_offset = 2.0
-			seg.visible = false
-			_roads.add_child(seg)
-			_road_seg_pool.append(seg)
+	_setup_road_multimeshes()
 	_preview = Node3D.new()
 	_preview.name = "Preview"
 	add_child(_preview)
@@ -236,6 +232,8 @@ func _build_scene() -> void:
 	_resource_link_material.emission = Color(0.55, 0.5, 0.2)
 	_resource_link_material.emission_energy_multiplier = 0.6
 	_resource_link_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_resource_link_material.no_depth_test = true
+	_resource_link_material.render_priority = RESOURCE_RENDER_PRIORITY
 	_resource_link_materials.clear()
 	_resource_link_materials_linking.clear()
 	for i in WorldConquestConfigLib.RESOURCE_TYPE_COUNT:
@@ -246,6 +244,8 @@ func _build_scene() -> void:
 		lmat.emission = col * 0.35
 		lmat.emission_energy_multiplier = 0.6
 		lmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		lmat.no_depth_test = true
+		lmat.render_priority = RESOURCE_RENDER_PRIORITY
 		_resource_link_materials.append(lmat)
 		var lmat_dim := StandardMaterial3D.new()
 		lmat_dim.albedo_color = Color(col.r, col.g, col.b, 0.36)
@@ -254,9 +254,12 @@ func _build_scene() -> void:
 		lmat_dim.emission_energy_multiplier = 0.45
 		lmat_dim.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		lmat_dim.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		lmat_dim.no_depth_test = true
+		lmat_dim.render_priority = RESOURCE_RENDER_PRIORITY
 		_resource_link_materials_linking.append(lmat_dim)
-	_road_seg_count.clear()
-	_road_nodes.clear()
+	_road_cache_land.clear()
+	_road_cache_bridge.clear()
+	_road_cached_seg_total.clear()
 	_path_cache.clear()
 	_resource_link_seg_count.clear()
 	_resource_link_nodes.clear()
@@ -428,6 +431,10 @@ func _setup_gpu_ownership_material(w: int, h: int) -> void:
 	_gpu_fluid_ready = false
 
 
+static func owner_display_byte_for(owner: int) -> int:
+	return _owner_display_byte(owner)
+
+
 static func _owner_display_byte(owner: int) -> int:
 	match owner:
 		BattleTileControlLib.OWNER_FRIENDLY:
@@ -440,6 +447,12 @@ static func _owner_display_byte(owner: int) -> int:
 			return 0
 		_:
 			return 0
+
+
+func get_owner_cache_byte(idx: int) -> int:
+	if idx < 0 or idx >= _owner_bytes_cache.size():
+		return 0
+	return int(_owner_bytes_cache[idx])
 
 
 static func _owner_kind_from_byte(byte_v: int) -> int:
@@ -621,19 +634,45 @@ func apply_ownership_display_bytes(bytes: PackedByteArray) -> void:
 	var n: int = w * h
 	if bytes.size() != n:
 		return
-	if _owner_bytes_cache.size() != n:
-		_owner_bytes_cache.resize(n)
-	for i in range(n):
-		_owner_bytes_cache[i] = bytes[i]
+	_owner_bytes_cache = bytes
 	_border_bytes_cache.resize(n)
 	_rebuild_border_mask_full()
 	_owner_overlay_patch_frame = -1
 	_upload_owner_gpu_textures(true)
 
 
+## Incremental overlay patch with pre-mapped R8 bytes from Rust (WorldDataset display buffer).
+func apply_ownership_display_delta(
+	indices: PackedInt32Array, r8_values: PackedByteArray
+) -> void:
+	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null:
+		return
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var n: int = mini(indices.size(), r8_values.size())
+	if n <= 0:
+		return
+	if _owner_bytes_cache.size() != w * h:
+		_owner_bytes_cache.resize(w * h)
+	if _border_bytes_cache.size() != w * h:
+		_border_bytes_cache.resize(w * h)
+	for i in range(n):
+		var idx: int = indices[i]
+		if idx < 0 or idx >= w * h:
+			continue
+		_owner_bytes_cache[idx] = r8_values[i]
+	if n > 256:
+		_rebuild_border_mask_full()
+	else:
+		_update_border_mask_for_indices(indices)
+	_owner_overlay_patch_frame = Engine.get_process_frames()
+	_upload_owner_gpu_textures()
+
+
 func apply_ownership_overlay_delta(
 	indices: PackedInt32Array, values: PackedByteArray
 ) -> void:
+	## CPU-backend / legacy: values are owner enum bytes; mapped to display R8 here.
 	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null:
 		return
 	var w: int = battle_data.grid_width
@@ -928,7 +967,7 @@ func refresh_markers(
 					col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
 				else:
 					col = Color(0.25, 0.65, 1.0) if team == 1 else Color(1.0, 0.4, 0.3)
-		if state != WorldConquestOutpostBuildLib.STATE_ACTIVE and hp_frac < 1.0:
+		if hp_frac < 1.0:
 			col = col.lerp(Color(0.92, 0.28, 0.18), 1.0 - hp_frac)
 			scale_f *= lerpf(0.85, 1.0, hp_frac)
 		var sid: int = int(st.get("id", -1))
@@ -1026,7 +1065,7 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 				col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
 			else:
 				col = Color(0.25, 0.65, 1.0) if team == 1 else Color(1.0, 0.4, 0.3)
-	if state != WorldConquestOutpostBuildLib.STATE_ACTIVE and hp_frac < 1.0:
+	if hp_frac < 1.0:
 		col = col.lerp(Color(0.92, 0.28, 0.18), 1.0 - hp_frac)
 		scale_f *= lerpf(0.85, 1.0, hp_frac)
 	var node: MeshInstance3D = _marker_pool[slot]
@@ -1159,6 +1198,7 @@ func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 		for sid_v in changed_sids:
 			changed_set[int(sid_v)] = true
 	var live_ids: Dictionary = {}
+	var road_dirty: bool = false
 	for st: Dictionary in structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
 			continue
@@ -1167,7 +1207,8 @@ func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 			continue
 		live_ids[sid] = true
 		if not incremental or changed_set.has(sid):
-			_sync_outpost_road(st, sid)
+			if _sync_outpost_road(st, sid, false):
+				road_dirty = true
 	for corridor: Dictionary in battle_data.bridge_corridors:
 		var sid: int = int(corridor.get("id", -1))
 		if sid < 0:
@@ -1176,10 +1217,70 @@ func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 		if not incremental or changed_set.has(sid):
 			var pseudo: Dictionary = corridor.duplicate()
 			pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
-			_sync_outpost_road(pseudo, sid)
-	for sid in _road_seg_count.keys():
+			if _sync_outpost_road(pseudo, sid, false):
+				road_dirty = true
+	for sid in _road_cached_seg_total.keys():
 		if not live_ids.has(sid):
-			_clear_road(sid)
+			if _clear_road(sid, false):
+				road_dirty = true
+	if road_dirty:
+		_flush_road_multimesh()
+
+
+func _setup_road_multimeshes() -> void:
+	if _roads == null or _shared_road_box == null:
+		return
+	if _road_land_mm != null and is_instance_valid(_road_land_mm):
+		_road_land_mm.queue_free()
+	if _road_bridge_mm != null and is_instance_valid(_road_bridge_mm):
+		_road_bridge_mm.queue_free()
+	_road_land_mm = MultiMeshInstance3D.new()
+	_road_land_mm.name = "RoadLandMM"
+	var land_mm := MultiMesh.new()
+	land_mm.transform_format = MultiMesh.TRANSFORM_3D
+	land_mm.mesh = _shared_road_box
+	land_mm.instance_count = 0
+	_road_land_mm.multimesh = land_mm
+	_road_land_mm.material_override = _road_material
+	_road_land_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_road_land_mm.sorting_offset = 2.0
+	_roads.add_child(_road_land_mm)
+	_road_bridge_mm = MultiMeshInstance3D.new()
+	_road_bridge_mm.name = "RoadBridgeMM"
+	var bridge_mm := MultiMesh.new()
+	bridge_mm.transform_format = MultiMesh.TRANSFORM_3D
+	bridge_mm.mesh = _shared_road_box
+	bridge_mm.instance_count = 0
+	_road_bridge_mm.multimesh = bridge_mm
+	_road_bridge_mm.material_override = _bridge_material
+	_road_bridge_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_road_bridge_mm.sorting_offset = 2.0
+	_roads.add_child(_road_bridge_mm)
+
+
+func _flush_road_multimesh() -> void:
+	if _road_land_mm == null or _road_bridge_mm == null:
+		return
+	var land_xforms: Array[Transform3D] = []
+	for sid in _road_cache_land.keys():
+		for xform_var in _road_cache_land[sid]:
+			land_xforms.append(xform_var)
+	var bridge_xforms: Array[Transform3D] = []
+	for sid in _road_cache_bridge.keys():
+		for xform_var in _road_cache_bridge[sid]:
+			bridge_xforms.append(xform_var)
+	_apply_multimesh_transforms(_road_land_mm, land_xforms)
+	_apply_multimesh_transforms(_road_bridge_mm, bridge_xforms)
+
+
+func _apply_multimesh_transforms(mm_node: MultiMeshInstance3D, xforms: Array[Transform3D]) -> void:
+	if mm_node == null or mm_node.multimesh == null:
+		return
+	var mm: MultiMesh = mm_node.multimesh
+	var n: int = xforms.size()
+	mm.instance_count = n
+	for i in range(n):
+		mm.set_instance_transform(i, xforms[i])
 
 
 func _packed_path_keys(st: Dictionary, sid: int) -> PackedInt32Array:
@@ -1194,10 +1295,10 @@ func _packed_path_keys(st: Dictionary, sid: int) -> PackedInt32Array:
 	return packed
 
 
-func _sync_outpost_road(st: Dictionary, sid: int) -> void:
+func _sync_outpost_road(st: Dictionary, sid: int, flush_now: bool = true) -> bool:
 	var packed: PackedInt32Array = _packed_path_keys(st, sid)
 	if packed.is_empty():
-		return
+		return false
 	var w: int = battle_data.grid_width
 	var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
 	var built_cells: int
@@ -1207,14 +1308,30 @@ func _sync_outpost_road(st: Dictionary, sid: int) -> void:
 		built_cells = packed.size()
 	built_cells = clampi(built_cells, 1, packed.size())
 	var need_segs: int = maxi(built_cells - 1, 0)
-	var have_segs: int = int(_road_seg_count.get(sid, 0))
-	if need_segs <= have_segs:
-		return
-	for i in range(have_segs, need_segs):
+	if int(_road_cached_seg_total.get(sid, -1)) == need_segs:
+		return false
+	_road_cached_seg_total[sid] = need_segs
+	var land_xforms: Array[Transform3D] = []
+	var bridge_xforms: Array[Transform3D] = []
+	for i in range(need_segs):
 		var a: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(packed[i], w)
 		var b: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(packed[i + 1], w)
-		_add_road_line_segment(a, b, sid)
-	_road_seg_count[sid] = need_segs
+		var xform: Transform3D = _road_segment_transform(a, b)
+		if _segment_is_bridge(a, b):
+			bridge_xforms.append(xform)
+		else:
+			land_xforms.append(xform)
+	if land_xforms.is_empty():
+		_road_cache_land.erase(sid)
+	else:
+		_road_cache_land[sid] = land_xforms
+	if bridge_xforms.is_empty():
+		_road_cache_bridge.erase(sid)
+	else:
+		_road_cache_bridge[sid] = bridge_xforms
+	if flush_now:
+		_flush_road_multimesh()
+	return true
 
 
 func clear_road(sid: int) -> void:
@@ -1246,14 +1363,20 @@ func spawn_outpost_destroy_fx(grid: Vector2i) -> void:
 	tween.chain().tween_callback(fx.queue_free)
 
 
-func _clear_road(sid: int) -> void:
-	for seg in _road_nodes.get(sid, []):
-		if is_instance_valid(seg):
-			seg.visible = false
-			_road_seg_pool.append(seg as MeshInstance3D)
-	_road_nodes.erase(sid)
-	_road_seg_count.erase(sid)
+func _clear_road(sid: int, flush_now: bool = true) -> bool:
+	var had: bool = (
+		_road_cache_land.has(sid)
+		or _road_cache_bridge.has(sid)
+		or _road_cached_seg_total.has(sid)
+		or _path_cache.has(sid)
+	)
+	_road_cache_land.erase(sid)
+	_road_cache_bridge.erase(sid)
+	_road_cached_seg_total.erase(sid)
 	_path_cache.erase(sid)
+	if had and flush_now:
+		_flush_road_multimesh()
+	return had
 
 
 func _add_deposit_marker(grid: Vector2i, color: Color, scale_f: float) -> void:
@@ -1272,6 +1395,8 @@ func _add_deposit_marker(grid: Vector2i, color: Color, scale_f: float) -> void:
 	mat.emission = color * 0.45
 	mat.emission_energy_multiplier = 1.4
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.no_depth_test = true
+	mat.render_priority = RESOURCE_RENDER_PRIORITY
 	cyl.material_override = mat
 	cyl.position = pos
 	_deposits.add_child(cyl)
@@ -1379,6 +1504,8 @@ func _place_pooled_marker(
 	var mat := box.material_override as StandardMaterial3D
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.emission = Color(color.r, color.g, color.b) * 0.5
+	mat.no_depth_test = true
+	mat.render_priority = MARKER_RENDER_PRIORITY
 	mat.transparency = (
 		BaseMaterial3D.TRANSPARENCY_ALPHA
 		if alpha < 0.99
@@ -1400,6 +1527,8 @@ func _add_capital_marker_to(
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.emission_enabled = true
 	mat.emission = Color(color.r, color.g, color.b) * 0.5
+	mat.no_depth_test = true
+	mat.render_priority = MARKER_RENDER_PRIORITY
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED
 	box.material_override = mat
 	box.position = pos
@@ -1440,41 +1569,27 @@ func _add_preview_segment_to(parent: Node3D, a: Vector2i, b: Vector2i) -> void:
 	parent.add_child(seg)
 
 
-func _add_road_line_segment(a: Vector2i, b: Vector2i, sid: int) -> void:
+func _road_segment_transform(a: Vector2i, b: Vector2i) -> Transform3D:
 	if battle_data == null or a.x < 0 or b.x < 0:
-		return
+		return Transform3D.IDENTITY
 	var is_bridge: bool = _segment_is_bridge(a, b)
 	var pos_a: Vector3 = _link_surface_pos(a)
 	var pos_b: Vector3 = _link_surface_pos(b)
 	var delta: Vector3 = pos_b - pos_a
 	var length: float = delta.length()
 	if length < 0.05:
-		return
+		return Transform3D.IDENTITY
 	var y_axis: Vector3 = delta / length
 	var x_axis: Vector3 = y_axis.cross(Vector3.UP)
 	if x_axis.length_squared() < 0.0001:
 		x_axis = y_axis.cross(Vector3.RIGHT)
 	x_axis = x_axis.normalized()
 	var z_axis: Vector3 = x_axis.cross(y_axis).normalized()
-	var seg: MeshInstance3D
-	if _road_seg_pool.is_empty():
-		seg = MeshInstance3D.new()
-		seg.mesh = _shared_road_box
-		seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		seg.sorting_offset = 2.0
-		_roads.add_child(seg)
-	else:
-		seg = _road_seg_pool.pop_back()
-		seg.visible = true
 	var thickness: float = BRIDGE_THICKNESS if is_bridge else ROAD_THICKNESS
-	seg.material_override = _bridge_material if is_bridge else _road_material
-	seg.transform = Transform3D(
+	return Transform3D(
 		Basis(x_axis * thickness, y_axis * length, z_axis * thickness),
 		(pos_a + pos_b) * 0.5,
 	)
-	if not _road_nodes.has(sid):
-		_road_nodes[sid] = []
-	(_road_nodes[sid] as Array).append(seg)
 
 
 func _segment_is_bridge(a: Vector2i, b: Vector2i) -> bool:

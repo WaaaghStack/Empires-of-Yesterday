@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Headless: coast snap, bridge corridors, connecting-phase survival, BridgeFlowMeasure.
+## Headless: coast snap, bridge corridors, connecting-phase survival.
 ## godot --headless --path . -s res://bridge_invasion_smoke_test.gd
 
 const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
@@ -9,7 +9,7 @@ const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend.gd")
-const BridgeFlowMeasureLib := preload("res://BridgeFlowMeasure.gd")
+const RoutePlannerLib := preload("res://RoutePlannerRustBackend.gd")
 
 
 func _init() -> void:
@@ -54,16 +54,16 @@ func _run() -> void:
 		return
 	_log(lines, "OK coastal click unchanged")
 
-	var route: Dictionary = OutpostBuildLib.nearest_corridor_path_to_target(
-		map_data, coastal, sources
+	var route: Dictionary = _rust_placement_route(
+		map_data, coastal, OutpostBuildLib.KIND_CORRIDOR_LINK, home
 	)
 	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
 	if path_packed.is_empty():
 		_log(lines, "FAIL no bridge route")
 		_write(lines)
 		return
-	if not OutpostBuildLib.is_valid_bridge_path(map_data, path_packed):
-		_log(lines, "FAIL bridge route is not water-only crossing")
+	if _first_water_prefix_end(map_data, path_packed) < 0:
+		_log(lines, "FAIL bridge route has no water cells")
 		_write(lines)
 		return
 
@@ -172,7 +172,11 @@ func _run() -> void:
 		var hp_before: float = WorldConquestConfigLib.OUTPOST_MAX_HEALTH
 		# Simulate connecting: no damage tick in game code; verify DPS would apply only in building.
 		var dps_connect: float = OutpostBuildLib.construction_dps_at(
-			hostile_map, hostile_tc, hostile_landing.x, hostile_landing.y
+			hostile_map,
+			hostile_tc,
+			hostile_landing.x,
+			hostile_landing.y,
+			BattleTileControlLib.OWNER_FRIENDLY,
 		)
 		if dps_connect <= 0.0:
 			_log(lines, "OK connecting phase skips damage (dps still defined for building)")
@@ -198,35 +202,14 @@ func _run() -> void:
 		return
 	_log(lines, "OK persisted land bridge corridor (%d claimable cells)" % persisted_claimable)
 
-	if not BridgeFlowMeasureLib.run_pipe_unit_selfcheck():
-		_log(lines, "FAIL bridge pipe unit suction selfcheck")
-		_write(lines)
-		return
-	_log(lines, "OK bridge pipe unit suction selfcheck")
-
-	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
-	var source_key: int = path_packed[0] if path_packed.size() > 0 else map_data.cell_index(home.x, home.y)
-	var cpu_flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
-		sim, tc, map_data, path_packed, landing_key, source_key, 30, "cpu"
-	)
-	_log(lines, "OK %s" % BridgeFlowMeasureLib.format_result(cpu_flow))
-	if not bool(cpu_flow.get("pass", false)):
-		_log(
-			lines,
-			"FAIL cpu natural land bridge landing (pre=%.3f post=%.3f)"
-			% [float(cpu_flow.get("pre", 0.0)), float(cpu_flow.get("post", 0.0))]
-		)
-		_write(lines)
-		return
-
 	if inland.x < 0:
 		_log(lines, "SKIP inland outpost routing (no inland foreign sample)")
 	else:
 		var hub_sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
 			map_data.placed_structures, home, map_data
 		)
-		var outpost_route: Dictionary = OutpostBuildLib.nearest_path_to_target(
-			map_data, inland, hub_sources
+		var outpost_route: Dictionary = _rust_placement_route(
+			map_data, inland, OutpostBuildLib.KIND_SPAWNER, home
 		)
 		if outpost_route.path_packed.is_empty():
 			_log(lines, "FAIL no outpost route across land bridge to %s" % inland)
@@ -242,8 +225,8 @@ func _run() -> void:
 		rust_sim.set_resolve_context("world_conquest")
 		var rust_map = EarthMapGeneratorLib.generate(424242)
 		OutpostBuildLib.prepare_land_components(rust_map)
-		var rust_route: Dictionary = OutpostBuildLib.nearest_corridor_path_to_target(
-			rust_map, coastal, [rust_map.player_home_grid]
+		var rust_route: Dictionary = _rust_placement_route(
+			rust_map, coastal, OutpostBuildLib.KIND_CORRIDOR_LINK, rust_map.player_home_grid
 		)
 		var rust_path: PackedInt32Array = rust_route.get("path_packed", PackedInt32Array())
 		rust_sim.setup(rust_map, 200, 200, null, {}, true)
@@ -257,32 +240,6 @@ func _run() -> void:
 			var rtc := rust_sim.tile_control
 			rtc.sync_bridge_corridors_from_map(rust_map, true)
 			rust_sim.rust_field.sync_claimable_from(rtc, rust_map, true)
-			rust_sim.rust_field.sync_bridge_pipe_from(rtc)
-			var rust_landing_key: int = rust_map.cell_index(rust_coastal.x, rust_coastal.y)
-			var rust_source_key: int = (
-				rust_path[0]
-				if rust_path.size() > 0
-				else rust_map.cell_index(rust_map.player_home_grid.x, rust_map.player_home_grid.y)
-			)
-			var rust_flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
-				rust_sim,
-				rtc,
-				rust_map,
-				rust_path,
-				rust_landing_key,
-				rust_source_key,
-				30,
-				"rust",
-			)
-			_log(lines, "OK %s" % BridgeFlowMeasureLib.format_result(rust_flow))
-			if not bool(rust_flow.get("pass", false)):
-				_log(
-					lines,
-					"FAIL rust natural land bridge landing (pre=%.3f post=%.3f)"
-					% [float(rust_flow.get("pre", 0.0)), float(rust_flow.get("post", 0.0))]
-				)
-				_write(lines)
-				return
 		else:
 			_log(lines, "SKIP rust land bridge (init failed)")
 	else:
@@ -303,6 +260,26 @@ func _write(lines: PackedStringArray) -> void:
 		for line in lines:
 			f.store_line(line)
 		f.close()
+
+
+func _rust_placement_route(
+	map_data,
+	landing: Vector2i,
+	build_kind: String,
+	home: Vector2i,
+) -> Dictionary:
+	var empty: Dictionary = {
+		"path_packed": PackedInt32Array(),
+		"source": Vector2i(-1, -1),
+	}
+	if not RoutePlannerLib.extension_available():
+		return empty
+	var planner := RoutePlannerLib.new()
+	var structures: Array = map_data.placed_structures
+	if not planner.setup_map(map_data, structures):
+		return empty
+	planner.rebuild_portals(map_data, structures, home, BattleTileControlLib.OWNER_FRIENDLY)
+	return planner.find_route_sync(landing, build_kind, true)
 
 
 func _first_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:

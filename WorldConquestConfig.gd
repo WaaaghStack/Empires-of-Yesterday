@@ -5,6 +5,7 @@ extends RefCounted
 
 const GRID_W := 360
 const GRID_H := 180
+const DEFAULT_WORLD_MAP_ID := "earth"
 const CELL_SIZE := 1.0
 
 const PLAYER_FORCE := 200
@@ -24,6 +25,9 @@ const FRAME_BUDGET_MS := 16.0
 ## Max ownership overlay cells applied to the globe per frame (remainder queued).
 const OVERLAY_DELTA_CELLS_PER_FRAME := 48
 const OVERLAY_UPDATES_PER_SEC := 3.0
+## Partitioned anti-drift sweep: compare Rust owner vs globe cache per frame.
+## Full 360×180 pass ≈ 68 s at 16/frame @ 60 fps (halved when prior frame exceeded budget).
+const OVERLAY_RECONCILE_CELLS_PER_FRAME := 16
 ## Globe tint from tile ownership only — skips pressure FFI and peak scans.
 const OVERLAY_OWNERS_ONLY := true
 const SOLDIER_VISUAL_UPDATES_PER_SEC := 4.0
@@ -38,7 +42,7 @@ const WORLD_CONQUEST_MIN_LOAD_SEC := 2.5
 const GLOBE_RADIUS := 100.0
 ## Subtle displacement so land reads as one continuous shell (not floating plates).
 const HEIGHT_SCALE := 7.0
-const FLUID_SURFACE_LIFT := 1.6
+const FLUID_SURFACE_LIFT := 0.35
 ## Globe render mesh (coarser than sim grid for GPU budget).
 const GLOBE_MESH_W := 144
 const GLOBE_MESH_H := 72
@@ -55,7 +59,7 @@ const MIN_SPAWNER_SPACING_CELLS := 6
 const OUTPOST_BUILD_SEC := 5.0
 const OUTPOST_ROAD_CELLS_PER_SEC := 1.0
 ## Flying builder bots per home base (player + enemy); future scaling hooks here.
-const BUILDER_BOTS_PER_HOME := 2
+const BUILDER_BOTS_PER_HOME := 4
 const BUILDER_SURFACE_LIFT := 2.85
 const BUILDER_ORBIT_RADIUS_CELLS := 3.5
 const BUILDER_ORBIT_SPEED := 0.55
@@ -76,9 +80,17 @@ const OUTPOST_HOVER_ALLOW_ASTAR := false
 const OUTPOST_PREVIEW_MAX_SEGMENTS := 48
 ## Min seconds between expensive hover route replans while cursor moves.
 const OUTPOST_HOVER_REPLAN_SEC := 0.32
-## Rust route planner: async path on click only (hover preview off by default — avoids background CPU fights).
+## Rust route planner on the preloaded world snapshot — sole placement pathfinder.
+const ROUTE_RUST_ONLY := true
+## Async Rust route on click (keeps main thread responsive during A*).
 const ROUTE_ASYNC_PLACEMENT := true
 const ROUTE_HOVER_PREVIEW := false
+## One-time setup_map + portal build during loading (avoids hitch on first build-button press).
+const ROUTE_PRELOAD_AT_LOAD := true
+## Optional sync route near home after preload (warms Rust pathfinder caches).
+const ROUTE_WARMUP_PROBE := true
+## Debounce portal/infra refresh when operational sources change (new active spawner).
+const ROUTE_SOURCE_DEBOUNCE_SEC := 0.4
 ## Debounce full infra-mask refresh while roads extend cell-by-cell during construction.
 const ROUTE_ROAD_INFRA_DEBOUNCE_SEC := 2.5
 const OUTPOST_MAX_HEALTH := 10.0
@@ -91,25 +103,45 @@ const BARRACKS_MAX_ACTIVE_UNITS := 5
 const GLOBAL_SOLDIER_CAP := 100
 const SOLDIER_SPAWN_AURELIUM_COST := 3.0
 const SOLDIER_UPKEEP_AURELIUM_PER_SEC := 0.15
-const SOLDIER_MAX_HP := 10.0
-const SOLDIER_ORPHAN_DPS := 1.0
+const SOLDIER_MAX_HP := 40.0
+const SOLDIER_ORPHAN_DPS := 4.0
 const SOLDIER_MOVE_CELLS_PER_SEC := 2.0
 const SOLDIER_INFRA_MOVE_MULT := 3.0
-const SOLDIER_AURA_PRESSURE := 0.12
-const SOLDIER_SHOOT_ERODE_PER_SEC := 6.0
+const SOLDIER_AURA_PRESSURE := 0.48
+const SOLDIER_SHOOT_ERODE_PER_SEC := 24.0
 const SOLDIER_UPKEEP_DEFICIT_DPS := 2.5
 ## Pressure flow multiplier on built bridge water cells (vs land).
 const BRIDGE_PRESSURE_FLOW_MULT := 2.8
-## Low-level suction along bridge pipe topology (prev→cell→next) per gradient pass.
-const BRIDGE_PIPE_SUCTION_RATE := 0.35
-## Live inject-phase sweeps along bridge pipes (long crossings need multiple per round).
-const BRIDGE_PIPE_LIVE_SUCTION_PASSES := 32
 
 ## Win: all claimable land, or enemy cumulative power reaches zero.
 const CONQUEST_LAND_FRAC := 1.0
 const MAX_SIM_TIME_SEC := 7200.0
 ## Hostile pressure total at or below this counts as zero (matches HUD integer display).
 const ZERO_POWER_VICTORY_EPS := 0.5
+## Log when the slow GDScript owner→display overlay path runs during Rust live play.
+const WORLD_DATASET_WARN_SLOW_OVERLAY := true
+## Rust kernel owns owners/claimable/reachability during WC live — skip GDScript grid mirror writes.
+const WORLD_DATASET_GRID_AUTHORITY := true
+## Rust structure store owns outpost/corridor sim state — GDScript placed_structures is render cache.
+const WORLD_DATASET_STRUCTURE_AUTHORITY := true
+## Building timers, construction damage, and barracks spawns in one Rust world_session_tick.
+const WORLD_DATASET_WORLD_SESSION_TICK := true
+## Builder job queues, path_built growth, and bot travel in Rust (GDScript visuals only).
+const WORLD_DATASET_BUILDER_AUTHORITY := true
+## Resource balances stored in Rust dataset; deposit tick still computed in GDScript.
+const WORLD_DATASET_RESOURCE_WALLET := true
+## QA: assert single-source WorldDataset invariants during validate runs.
+const WORLD_DATASET_QA_ASSERTS := true
+
+
+static func world_dataset_live() -> bool:
+	return (
+		WORLD_DATASET_GRID_AUTHORITY
+		and WORLD_DATASET_STRUCTURE_AUTHORITY
+		and WORLD_DATASET_WORLD_SESSION_TICK
+		and WORLD_DATASET_BUILDER_AUTHORITY
+		and WORLD_DATASET_RESOURCE_WALLET
+	)
 
 const CAMERA_ORBIT_SPEED := 0.35
 const CAMERA_PITCH_MIN := -1.2

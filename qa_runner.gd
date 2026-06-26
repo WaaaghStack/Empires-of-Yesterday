@@ -90,8 +90,9 @@ func _run_all_async() -> void:
 	_validate_enemy_strategy_selfcheck()
 	await _validate_enemy_ai_integration_smoke()
 	_validate_world_seed_variety()
-	_validate_bridge_pipe_suction()
+	_validate_earth_land_mask()
 	await _validate_builder_integration_smoke()
+	_validate_world_dataset_assert()
 	await _validate_fps_fix_paths()
 	_validate_territory_rust_compare()
 	_validate_territory_rust_bake_compare()
@@ -127,6 +128,34 @@ func _validate_run_log() -> void:
 		_fail("RunLog workspace log missing: %s" % RunLog.get_session_path())
 		return
 	_log("OK  RunLog session=%s" % RunLog.get_session_path())
+
+
+func _validate_world_dataset_assert() -> void:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	if not WorldConquestConfigLib.WORLD_DATASET_QA_ASSERTS:
+		return
+	_log("-- WorldDataset assert (config flags) --")
+	if not WorldConquestConfigLib.world_dataset_live():
+		_fail("world_dataset_live() false — all WORLD_DATASET_* flags must be true")
+		return
+	_log("OK  world_dataset_live config")
+
+
+func _validate_world_dataset_on_screen(screen: Control) -> void:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const WorldDatasetAssertLib := preload("res://WorldDatasetAssert.gd")
+	if not WorldConquestConfigLib.WORLD_DATASET_QA_ASSERTS:
+		return
+	var ts = screen.get("territory_sim")
+	var bd = screen.get("battle_data")
+	var result: Dictionary = WorldDatasetAssertLib.validate_live(ts, bd)
+	if bool(result.get("skipped", false)):
+		return
+	if not bool(result.get("ok", false)):
+		var issues: PackedStringArray = result.get("issues", PackedStringArray())
+		_fail("WorldDataset assert failed: %s" % ", ".join(issues))
+		return
+	_log("OK  WorldDataset live invariants (Rust authoritative)")
 
 
 func _validate_world_conquest_smoke() -> void:
@@ -237,9 +266,12 @@ func _validate_world_conquest_fps_bench() -> void:
 		):
 			var d: Dictionary = sim.rust_field.consume_owner_overlay_delta()
 			var idxs: PackedInt32Array = d.get("indices", PackedInt32Array())
+			if idxs.is_empty():
+				idxs = d.get("owner_indices", PackedInt32Array())
 			if idxs.size() > 0:
-				# Touch delta payload so FFI cost is included in the frame budget.
 				var vals: PackedByteArray = d.get("values", PackedByteArray())
+				if vals.is_empty():
+					vals = d.get("owner_values", PackedByteArray())
 				var _probe: int = int(vals[0]) if vals.size() > 0 else 0
 				_probe += idxs.size()
 		var ms: float = float(Time.get_ticks_usec() - t0) / 1000.0
@@ -735,84 +767,28 @@ func _validate_world_seed_variety() -> void:
 	)
 
 
-func _validate_bridge_pipe_suction() -> void:
-	_log("-- Bridge pipe suction (corridor pressure via real map route) --")
-	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
-	const BattleTileControlLib := preload("res://BattleTileControl.gd")
-	const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
-	const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
-	var map_data = null
-	var home: Vector2i = Vector2i(-1, -1)
-	var coastal: Vector2i = Vector2i(-1, -1)
-	var path_packed: PackedInt32Array = PackedInt32Array()
-	var sources: Array[Vector2i] = []
-	for try_seed in [424242, 44201, 44202, 99123]:
-		map_data = EarthMapGeneratorLib.generate(try_seed)
-		OutpostBuildLib.prepare_land_components(map_data)
-		home = map_data.player_home_grid
-		sources = [home]
-		var inland: Vector2i = _bridge_qa_find_inland_foreign(map_data, home, sources)
-		if inland.x < 0:
-			continue
-		coastal = OutpostBuildLib.snap_to_nearest_coast(map_data, inland)
-		if coastal.x < 0:
-			continue
-		var route: Dictionary = OutpostBuildLib.nearest_corridor_path_to_target(
-			map_data, coastal, sources
-		)
-		path_packed = route.get("path_packed", PackedInt32Array())
-		if not path_packed.is_empty():
-			break
-	if path_packed.is_empty() or map_data == null:
-		_fail("bridge pipe suction no corridor route on sample seeds")
+func _validate_earth_land_mask() -> void:
+	_log("-- Earth baked land mask --")
+	const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
+	const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
+	var map_data = WorldConquestMapGeneratorLib.generate(WorldMapCatalogLib.MAP_EARTH, 424242)
+	var land_n: int = 0
+	var w: int = map_data.grid_width
+	var h: int = map_data.grid_height
+	for gy in range(h):
+		for gx in range(w):
+			if map_data.is_land_cell(gx, gy):
+				land_n += 1
+	var frac: float = float(land_n) / float(w * h)
+	if land_n < 8000 or frac < 0.12 or frac > 0.38:
+		_fail("earth land mask suspicious land_n=%d frac=%.3f" % [land_n, frac])
 		return
-	map_data.bridge_corridors = []
-	map_data.placed_structures = []
-	map_data.placed_structures.append({
-		"id": 1,
-		"team": BattleTileControlLib.OWNER_FRIENDLY,
-		"gx": coastal.x,
-		"gy": coastal.y,
-		"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
-		"state": OutpostBuildLib.STATE_CONNECTING,
-		"path_keys": path_packed,
-		"path_len": path_packed.size(),
-		"path_built": float(path_packed.size()),
-	})
-	map_data.bridge_corridors.append({
-		"id": 1,
-		"team": BattleTileControlLib.OWNER_FRIENDLY,
-		"gx": coastal.x,
-		"gy": coastal.y,
-		"path_keys": path_packed,
-	})
-	map_data.placed_structures.clear()
-	var sim := BattleTerritorySimLib.new()
-	sim.use_simple_water_model = true
-	sim.set_resolve_context("world_conquest")
-	sim.setup(map_data, 200, 200, null, {}, true)
-	sim.set_live_backend(false)
-	var tc := sim.tile_control
-	tc.sync_bridge_corridors_from_map(map_data, true)
-	var landing_key: int = map_data.cell_index(coastal.x, coastal.y)
-	const BridgeFlowMeasureLib := preload("res://BridgeFlowMeasure.gd")
-	if not BridgeFlowMeasureLib.run_pipe_unit_selfcheck():
-		_fail("bridge pipe unit suction selfcheck")
-		return
-	_log("OK  bridge pipe unit suction selfcheck")
-	var source_key: int = (
-		path_packed[0] if path_packed.size() > 0 else map_data.cell_index(home.x, home.y)
-	)
-	var flow: Dictionary = BridgeFlowMeasureLib.measure_suction_delta(
-		sim, tc, map_data, path_packed, landing_key, source_key, 30, "cpu"
-	)
-	_log("OK  %s" % BridgeFlowMeasureLib.format_result(flow))
-	if not bool(flow.get("pass", false)):
-		_fail(
-			"bridge pipe suction natural landing pre=%.3f post=%.3f delta=%.3f"
-			% [float(flow.get("pre", 0.0)), float(flow.get("post", 0.0)), float(flow.get("delta", 0.0))]
-		)
-		return
+	_log("OK  earth land mask land_n=%d frac=%.3f homes=%s vs %s" % [
+		land_n,
+		frac,
+		map_data.player_home_grid,
+		map_data.enemy_home_grid,
+	])
 
 
 func _bridge_qa_water_prefix_end(map_data, path_packed: PackedInt32Array) -> int:
@@ -857,8 +833,14 @@ func _validate_builder_integration_smoke() -> void:
 		_write_validate_section_to_scratch(section_lines, "qa_builder_progress2.log")
 		return
 	var agents: Array = screen.get("_builder_agents")
-	if agents.size() != 4:
-		_fail("builder integration expected 4 agents, got %d" % agents.size())
+	var agent_count: int = agents.size()
+	if WorldConquestConfigLib.WORLD_DATASET_BUILDER_AUTHORITY:
+		var ts = screen.get("territory_sim")
+		if ts != null and ts.has_method("get_builder_visual_snapshot"):
+			var snap: Dictionary = ts.get_builder_visual_snapshot()
+			agent_count = snap.get("teams", PackedByteArray()).size()
+	if agent_count != 4:
+		_fail("builder integration expected 4 agents, got %d" % agent_count)
 		screen.queue_free()
 		return
 	var battle_data = screen.get("battle_data")
@@ -924,8 +906,9 @@ func _validate_builder_integration_smoke() -> void:
 		return
 	_vlog.call(
 		"OK  builder integration friendly_sid=%d hostile_sid=%d CONNECTING->ACTIVE frames=%d bots=%d"
-		% [friendly_sid, hostile_sid, frames, agents.size()]
+		% [friendly_sid, hostile_sid, frames, agent_count]
 	)
+	_validate_world_dataset_on_screen(screen)
 	_write_validate_section_to_scratch(section_lines, "qa_builder_progress2.log")
 	screen.queue_free()
 

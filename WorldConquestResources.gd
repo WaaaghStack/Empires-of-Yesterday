@@ -37,9 +37,29 @@ static func reset() -> void:
 	_hubs_cache_version = -1
 
 
+static func _grid_owner_at(grid, idx: int) -> int:
+	if grid == null or idx < 0:
+		return BattleTileControlLib.OWNER_NEUTRAL
+	if grid.has_method("owner_at_index"):
+		return int(grid.owner_at_index(idx))
+	if "owners" in grid and idx < grid.owners.size():
+		return int(grid.owners[idx])
+	return BattleTileControlLib.OWNER_NEUTRAL
+
+
+static func _grid_cell_count(grid) -> int:
+	if grid == null:
+		return 0
+	if grid.has_method("grid_cell_count"):
+		return int(grid.grid_cell_count())
+	if "owners" in grid:
+		return grid.owners.size()
+	return 0
+
+
 static func tick(
 	map_data,
-	tile_control,
+	grid,
 	structures: Array,
 	player_home: Vector2i,
 	enemy_home: Vector2i,
@@ -54,7 +74,7 @@ static func tick(
 		"pulses": [],
 		"links_dirty": false,
 	}
-	if map_data == null or tile_control == null or delta <= 0.0:
+	if map_data == null or grid == null or delta <= 0.0:
 		return result
 	var deposits: Array = map_data.resource_deposits
 	if deposits.is_empty():
@@ -85,9 +105,9 @@ static func tick(
 		var gx: int = int(dep.get("gx", 0))
 		var gy: int = int(dep.get("gy", 0))
 		var idx: int = map_data.cell_index(gx, gy)
-		if idx < 0 or idx >= tile_control.owners.size():
+		if idx < 0 or idx >= _grid_cell_count(grid):
 			continue
-		var owner: int = int(tile_control.owners[idx])
+		var owner: int = _grid_owner_at(grid, idx)
 		var team: int = 0
 		if owner == BattleTileControlLib.OWNER_FRIENDLY:
 			team = BattleTileControlLib.OWNER_FRIENDLY
@@ -116,7 +136,7 @@ static func tick(
 			if retry_v == network_key and bool(state.get("link_pending", false)):
 				continue
 			var link_path: PackedInt32Array = _plan_link_path(
-				map_data, tile_control, gx, gy, team, roads, hubs, w, h
+				map_data, grid, gx, gy, team, roads, hubs, w, h
 			)
 			state["link_retry_version"] = network_key
 			if link_path.is_empty():
@@ -250,7 +270,7 @@ static func _road_cells_for_team_cached(
 
 static func _plan_link_path(
 	map_data,
-	tile_control,
+	grid,
 	gx: int,
 	gy: int,
 	team: int,
@@ -277,7 +297,7 @@ static func _plan_link_path(
 	if targets.is_empty():
 		return PackedInt32Array()
 	var goal_key: int = _bfs_to_targets(
-		map_data, tile_control, start_key, team, roads, targets, w, h
+		map_data, grid, start_key, team, roads, targets, w, h
 	)
 	if goal_key < 0:
 		return PackedInt32Array()
@@ -334,7 +354,7 @@ static func _nearest_hub_key(from_key: int, hubs: Array[Vector2i], w: int) -> in
 
 static func _bfs_to_targets(
 	map_data,
-	tile_control,
+	grid,
 	start_key: int,
 	team: int,
 	roads: Dictionary,
@@ -368,7 +388,7 @@ static func _bfs_to_targets(
 			var nk: int = _key(nx, ny, w)
 			if _bfs_gen[nk] == gen:
 				continue
-			if not _can_traverse_link(map_data, tile_control, nx, ny, team, roads):
+			if not _can_traverse_link(map_data, grid, nx, ny, team, roads):
 				continue
 			_bfs_gen[nk] = gen
 			_bfs_parent[nk] = cur
@@ -419,7 +439,7 @@ static func _bfs_on_roads(
 
 static func _can_traverse_link(
 	map_data,
-	tile_control,
+	grid,
 	gx: int,
 	gy: int,
 	team: int,
@@ -431,9 +451,9 @@ static func _can_traverse_link(
 	if not map_data.is_land_cell(gx, gy):
 		return false
 	var idx: int = map_data.cell_index(gx, gy)
-	if idx < 0 or idx >= tile_control.owners.size():
+	if idx < 0 or idx >= _grid_cell_count(grid):
 		return false
-	return int(tile_control.owners[idx]) == team
+	return _grid_owner_at(grid, idx) == team
 
 
 static func _reconstruct_path(goal_key: int) -> PackedInt32Array:

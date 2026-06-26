@@ -7,6 +7,17 @@ const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const ROUTE_KIND_OUTPOST := 0
 const ROUTE_KIND_CORRIDOR := 1
 
+## Rust pathfind rule ids (see rust/empire_territory/src/pathfind/engine.rs).
+const ROUTE_RULE_SUPPLY_OUTPOST := 0
+const ROUTE_RULE_SUPPLY_BARRACKS := 1
+const ROUTE_RULE_LAND_BRIDGE := 2
+
+
+static func route_kind_for_build_kind(build_kind: String) -> int:
+	if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
+		return ROUTE_KIND_CORRIDOR
+	return ROUTE_KIND_OUTPOST
+
 var ready: bool = false
 var _planner: RefCounted
 var _grid_w: int = 0
@@ -45,22 +56,61 @@ func setup_map(map_data, structures: Array) -> bool:
 
 
 func update_infra(map_data, structures: Array) -> bool:
+	return update_infra_for_team(
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
+	)
+
+
+func update_infra_for_team(map_data, structures: Array, team: int) -> bool:
 	if not ready or _planner == null or map_data == null:
 		return false
 	if not _planner.has_method("update_infra_mask"):
-		# Stale DLL before incremental infra API — full snapshot still works.
-		return setup_map(map_data, structures)
-	var infra: PackedByteArray = OutpostBuildLib.pack_infra_mask_only(map_data, structures)
+		return setup_map_for_team(map_data, structures, team)
+	var infra: PackedByteArray = OutpostBuildLib.pack_infra_mask_for_team(
+		map_data, structures, team
+	)
 	if infra.is_empty():
 		return false
 	return bool(_planner.call("update_infra_mask", infra))
 
 
-func rebuild_portals(map_data, structures: Array, player_home: Vector2i) -> void:
+func setup_map_for_team(map_data, structures: Array, team: int) -> bool:
+	_free()
+	if map_data == null or not extension_available():
+		return false
+	_planner = ClassDB.instantiate("RoutePlanner")
+	if _planner == null:
+		return false
+	_grid_w = map_data.grid_width
+	OutpostBuildLib.prepare_land_components(map_data)
+	var packed: Dictionary = OutpostBuildLib.pack_route_snapshot_for_team(
+		map_data, structures, team
+	)
+	if packed.is_empty():
+		_free()
+		return false
+	if not _planner.call(
+		"set_map_snapshot",
+		packed.grid_w,
+		packed.grid_h,
+		packed.wrap_longitude,
+		packed.land_mask,
+		packed.bridge_mask,
+		packed.land_comp,
+	):
+		_free()
+		return false
+	ready = true
+	return true
+
+
+func rebuild_portals(
+	map_data, structures: Array, home: Vector2i, team: int = BattleTileControlLib.OWNER_FRIENDLY
+) -> void:
 	if not ready or _planner == null or map_data == null:
 		return
 	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		structures, player_home, map_data
+		structures, home, map_data, team
 	)
 	var source_keys := PackedInt32Array()
 	for src: Vector2i in sources:
@@ -68,10 +118,7 @@ func rebuild_portals(map_data, structures: Array, player_home: Vector2i) -> void
 			source_keys.append(map_data.cell_index(src.x, src.y))
 	var bridge_keys := PackedInt32Array()
 	for corridor: Dictionary in map_data.bridge_corridors:
-		if (
-			int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-			!= BattleTileControlLib.OWNER_FRIENDLY
-		):
+		if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
 			continue
 		var gx: int = int(corridor.get("gx", -1))
 		var gy: int = int(corridor.get("gy", -1))
@@ -84,6 +131,8 @@ func decode_route_result(res: Dictionary) -> Dictionary:
 	var empty: Dictionary = {
 		"path_packed": PackedInt32Array(),
 		"source": Vector2i(-1, -1),
+		"reject": int(res.get("reject", 0)),
+		"expand_count": int(res.get("expand_count", 0)),
 	}
 	if not bool(res.get("found", false)):
 		return empty
@@ -94,7 +143,12 @@ func decode_route_result(res: Dictionary) -> Dictionary:
 	var source := Vector2i(-1, -1)
 	if source_key >= 0 and _grid_w > 0:
 		source = OutpostBuildLib.grid_from_packed_key(source_key, _grid_w)
-	return {"path_packed": path, "source": source}
+	return {
+		"path_packed": path,
+		"source": source,
+		"reject": int(res.get("reject", 0)),
+		"expand_count": int(res.get("expand_count", 0)),
+	}
 
 
 func find_route_sync(
@@ -102,11 +156,7 @@ func find_route_sync(
 ) -> Dictionary:
 	if not ready or _planner == null or landing.x < 0:
 		return {"path_packed": PackedInt32Array(), "source": Vector2i(-1, -1)}
-	var kind: int = (
-		ROUTE_KIND_CORRIDOR
-		if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK
-		else ROUTE_KIND_OUTPOST
-	)
+	var kind: int = route_kind_for_build_kind(build_kind)
 	var res: Dictionary = _planner.call(
 		"find_route_sync", landing.x, landing.y, kind, allow_astar
 	)
@@ -118,11 +168,7 @@ func start_route_async(
 ) -> int:
 	if not ready or _planner == null or landing.x < 0:
 		return -1
-	var kind: int = (
-		ROUTE_KIND_CORRIDOR
-		if build_kind == OutpostBuildLib.KIND_CORRIDOR_LINK
-		else ROUTE_KIND_OUTPOST
-	)
+	var kind: int = route_kind_for_build_kind(build_kind)
 	return int(
 		_planner.call("start_route_async", landing.x, landing.y, kind, allow_astar)
 	)

@@ -9,6 +9,8 @@ const BattlePacingLib := preload("res://BattlePacing.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const BattleTileFluidFieldLib := preload("res://BattleTileFluidField.gd")
 const BattlePerfProfilerLib := preload("res://BattlePerfProfiler.gd")
+const BattleMapDataLib := preload("res://BattleMapData.gd")
+const WorldConquestOutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const MAX_ROUNDS_DEFAULT := 4800
 const DOMINANCE_FRAC := 0.92
 const DOMINANCE_ROUNDS := 10
@@ -139,6 +141,11 @@ func set_live_backend(use_gpu: bool) -> void:
 
 
 func enable_gpu_live() -> bool:
+	if _resolve_context == "world_conquest":
+		backend = BACKEND_CPU if not rust_live_ready else BACKEND_RUST
+		gpu_live_ready = false
+		gpu_field = null
+		return false
 	if battle_data == null or tile_control == null:
 		return false
 	if not BattleTerritoryGpuFieldLib.default_live_backend_enabled():
@@ -173,8 +180,12 @@ func enable_rust_live() -> bool:
 		backend = BACKEND_RUST
 		gpu_live_ready = false
 		gpu_field = null
+		var live_claimable: int = claimable_tile_count_live()
+		if live_claimable > 0:
+			claimable_tiles = live_claimable
 		if _resolve_context == "world_conquest":
 			_configure_world_agents()
+		refresh_world_dataset_mirror_mode()
 	else:
 		backend = BACKEND_CPU
 		rust_field = null
@@ -259,9 +270,7 @@ func advance_dt(delta: float, max_steps: int = 12) -> Dictionary:
 func _advance_rust_rounds(count: int) -> int:
 	if count <= 0 or finished or tile_control == null or rust_field == null:
 		return 0
-	if rust_field.agents_active():
-		rust_field.set_agent_deficit_dps(agent_deficit_dps.x, agent_deficit_dps.y)
-	rust_field.step_rounds(tile_control, count)
+	rust_field.step_rounds(tile_control, count, agent_deficit_dps.x, agent_deficit_dps.y)
 	round_index += count
 	# Rust syncs state once per batch — re-checking per round would see identical arrays.
 	_check_conquest()
@@ -270,6 +279,167 @@ func _advance_rust_rounds(count: int) -> int:
 
 func agents_ready() -> bool:
 	return rust_field != null and rust_field.agents_active()
+
+
+func grid_authority_active() -> bool:
+	return (
+		use_rust_for_live()
+		and rust_field != null
+		and rust_field.grid_authority_enabled()
+	)
+
+
+func structure_authority_active() -> bool:
+	return (
+		use_rust_for_live()
+		and rust_field != null
+		and rust_field.structure_authority_enabled()
+	)
+
+
+func pull_structure_render_cache(merge_by_sid: Dictionary = {}) -> bool:
+	if battle_data == null or rust_field == null:
+		return false
+	return rust_field.pull_structure_cache_to_map(battle_data, merge_by_sid)
+
+
+func owner_at_index(idx: int) -> int:
+	if grid_authority_active():
+		return rust_field.owner_at_index(idx)
+	if tile_control != null and idx >= 0 and idx < tile_control.owners.size():
+		return int(tile_control.owners[idx])
+	return BattleTileControlLib.OWNER_NEUTRAL
+
+
+func claimable_at_index(idx: int) -> bool:
+	if grid_authority_active():
+		return rust_field.claimable_at_index(idx)
+	if tile_control != null and idx >= 0 and idx < tile_control.claimable_mask.size():
+		return tile_control.claimable_mask[idx] != 0
+	return false
+
+
+func claimable_tile_count_live() -> int:
+	if grid_authority_active():
+		var rust_n: int = rust_field.get_claimable_tile_count()
+		if rust_n > 0:
+			return rust_n
+		if tile_control != null and tile_control.claimable_tile_count > 0:
+			return tile_control.claimable_tile_count
+		if claimable_tiles > 0:
+			return claimable_tiles
+		return maxi(rust_n, 0)
+	if tile_control != null:
+		return tile_control.claimable_tile_count
+	return claimable_tiles
+
+
+func claim_ratio_mult_at(idx: int) -> float:
+	if grid_authority_active():
+		return rust_field.claim_ratio_mult_at(idx)
+	if tile_control != null and idx >= 0 and idx < tile_control._claim_ratio_mult.size():
+		return tile_control._claim_ratio_mult[idx]
+	return 1.0
+
+
+func pressure_friendly_at(idx: int) -> float:
+	if use_rust_for_live() and rust_field != null and rust_field.ready:
+		var layers: PackedFloat32Array = rust_field.get_pressure_friendly()
+		if idx >= 0 and idx < layers.size():
+			return layers[idx]
+	if tile_control != null and idx >= 0 and idx < tile_control.pressure_friendly.size():
+		return tile_control.pressure_friendly[idx]
+	return 0.0
+
+
+func pressure_hostile_at(idx: int) -> float:
+	if use_rust_for_live() and rust_field != null and rust_field.ready:
+		var layers: PackedFloat32Array = rust_field.get_pressure_hostile()
+		if idx >= 0 and idx < layers.size():
+			return layers[idx]
+	if tile_control != null and idx >= 0 and idx < tile_control.pressure_hostile.size():
+		return tile_control.pressure_hostile[idx]
+	return 0.0
+
+
+func grid_cell_count() -> int:
+	if battle_data != null:
+		return battle_data.grid_width * battle_data.grid_height
+	if tile_control != null:
+		return tile_control.owners.size()
+	return 0
+
+
+func claim_tile(gx: int, gy: int, team: int) -> bool:
+	if grid_authority_active():
+		return rust_field.claim_tile_at(gx, gy, team)
+	if tile_control != null:
+		tile_control.claim_tile(gx, gy, team)
+		return true
+	return false
+
+
+func query_tile(gx: int, gy: int) -> Dictionary:
+	if grid_authority_active() and battle_data != null:
+		var probe: Dictionary = rust_field.query_tile(gx, gy)
+		if not bool(probe.get("valid", false)):
+			return {"valid": false}
+		var owner: int = int(probe.get("owner", BattleTileControlLib.OWNER_NEUTRAL))
+		var owner_name: String = "unclaimable"
+		match owner:
+			BattleTileControlLib.OWNER_NEUTRAL:
+				owner_name = "neutral"
+			BattleTileControlLib.OWNER_FRIENDLY:
+				owner_name = "friendly"
+			BattleTileControlLib.OWNER_HOSTILE:
+				owner_name = "hostile"
+			BattleTileControlLib.OWNER_CONTESTED:
+				owner_name = "contested"
+		var terrain: String = "water"
+		if battle_data.is_land_cell(gx, gy):
+			terrain = BattleMapDataLib.TERRAIN_NAMES[
+				clampi(
+					int(battle_data.get_cell_terrain(gx, gy)),
+					0,
+					BattleMapDataLib.TERRAIN_NAMES.size() - 1,
+				)
+			]
+		probe["terrain"] = terrain
+		probe["owner_name"] = owner_name
+		probe["owner"] = owner_name
+		return probe
+	if tile_control != null and battle_data != null:
+		return tile_control.tile_probe(battle_data, gx, gy)
+	return {"valid": false}
+
+
+func count_claimable_bridge_cells() -> Dictionary:
+	var water_claimable: int = 0
+	var water_total: int = 0
+	var landings: int = 0
+	if battle_data == null:
+		return {"water_claimable": 0, "water_total": 0, "landings": 0}
+	for corridor in battle_data.bridge_corridors:
+		if not corridor is Dictionary:
+			continue
+		landings += 1
+		var packed: PackedInt32Array = corridor.get("path_keys", PackedInt32Array())
+		for key in packed:
+			var idx: int = int(key)
+			if idx < 0 or idx >= grid_cell_count():
+				continue
+			var gx: int = idx % battle_data.grid_width
+			var gy: int = idx / battle_data.grid_width
+			if not WorldConquestOutpostBuildLib.is_water_cell(battle_data, gx, gy):
+				continue
+			water_total += 1
+			if claimable_at_index(idx):
+				water_claimable += 1
+	return {
+		"water_claimable": water_claimable,
+		"water_total": water_total,
+		"landings": landings,
+	}
 
 
 func sync_agent_nav() -> void:
@@ -324,6 +494,150 @@ func _configure_world_agents() -> void:
 		"replan_fallback_rounds": cfg.SOLDIER_REPLAN_FALLBACK_ROUNDS,
 	})
 	sync_agent_nav()
+	_configure_world_session()
+	_configure_builders_and_wallet()
+
+
+func configure_builders(player_home: Vector2i, enemy_home: Vector2i) -> void:
+	if rust_field == null:
+		return
+	var cfg := WorldConquestConfigLib
+	rust_field.configure_builders(
+		{
+			"road_cells_per_sec": cfg.OUTPOST_ROAD_CELLS_PER_SEC,
+			"bots_per_home": cfg.BUILDER_BOTS_PER_HOME,
+			"orbit_radius_cells": cfg.BUILDER_ORBIT_RADIUS_CELLS,
+			"orbit_speed": cfg.BUILDER_ORBIT_SPEED,
+			"return_sec": cfg.BUILDER_RETURN_SEC,
+			"outpost_build_sec": cfg.OUTPOST_BUILD_SEC,
+			"barracks_build_sec": cfg.BARRACKS_BUILD_SEC,
+			"outpost_max_health": cfg.OUTPOST_MAX_HEALTH,
+			"player_home_gx": player_home.x,
+			"player_home_gy": player_home.y,
+			"enemy_home_gx": enemy_home.x,
+			"enemy_home_gy": enemy_home.y,
+		},
+		cfg.WORLD_DATASET_BUILDER_AUTHORITY and cfg.WORLD_DATASET_STRUCTURE_AUTHORITY,
+	)
+
+
+func builder_authority_active() -> bool:
+	if rust_field == null or not WorldConquestConfigLib.WORLD_DATASET_BUILDER_AUTHORITY:
+		return false
+	return rust_field.builder_authority_enabled()
+
+
+func builder_step(dt: float) -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.builder_step(dt)
+
+
+func builder_enqueue_job(sid: int, team: int) -> void:
+	if rust_field == null:
+		return
+	rust_field.builder_enqueue_job(sid, team)
+
+
+func builder_cancel_job(sid: int) -> void:
+	if rust_field == null:
+		return
+	rust_field.builder_cancel_job(sid)
+
+
+func get_builder_visual_snapshot() -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.get_builder_visual_snapshot()
+
+
+func resource_wallet_active() -> bool:
+	if rust_field == null or not WorldConquestConfigLib.WORLD_DATASET_RESOURCE_WALLET:
+		return false
+	return rust_field.resource_wallet_enabled()
+
+
+func world_dataset_live_active() -> bool:
+	if not WorldConquestConfigLib.world_dataset_live():
+		return false
+	return (
+		use_rust_for_live()
+		and rust_field != null
+		and rust_field.ready
+		and grid_authority_active()
+		and structure_authority_active()
+		and world_session_active()
+		and builder_authority_active()
+		and resource_wallet_active()
+	)
+
+
+func refresh_world_dataset_mirror_mode() -> void:
+	if tile_control == null:
+		return
+	tile_control.grid_mirror_frozen = (
+		_resolve_context == "world_conquest"
+		and WorldConquestConfigLib.world_dataset_live()
+		and grid_authority_active()
+	)
+
+
+func sync_resource_balances(friendly: Array, hostile: Array) -> void:
+	if rust_field == null:
+		return
+	rust_field.sync_resource_balances(friendly, hostile)
+
+
+func apply_resource_tick_delta(friendly_delta: Array, hostile_delta: Array) -> void:
+	if rust_field == null:
+		return
+	rust_field.apply_resource_tick_delta(friendly_delta, hostile_delta)
+
+
+func pull_resource_balances() -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.get_resource_balances()
+
+
+func _configure_builders_and_wallet() -> void:
+	if rust_field == null:
+		return
+	var cfg := WorldConquestConfigLib
+	rust_field.configure_resource_wallet(
+		cfg.WORLD_DATASET_RESOURCE_WALLET and cfg.WORLD_DATASET_STRUCTURE_AUTHORITY,
+	)
+
+
+func world_session_active() -> bool:
+	if rust_field == null or not WorldConquestConfigLib.WORLD_DATASET_WORLD_SESSION_TICK:
+		return false
+	return rust_field.world_session_enabled()
+
+
+func tick_world_session(dt: float, friendly_aurelium: float) -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.world_session_tick(dt, friendly_aurelium)
+
+
+func _configure_world_session() -> void:
+	if rust_field == null:
+		return
+	var cfg := WorldConquestConfigLib
+	rust_field.configure_world_session(
+		{
+			"outpost_build_sec": cfg.OUTPOST_BUILD_SEC,
+			"barracks_build_sec": cfg.BARRACKS_BUILD_SEC,
+			"outpost_max_health": cfg.OUTPOST_MAX_HEALTH,
+			"outpost_enemy_dps": cfg.OUTPOST_ENEMY_DPS,
+			"barracks_spawn_interval": cfg.BARRACKS_SPAWN_INTERVAL_SEC,
+			"barracks_max_active": cfg.BARRACKS_MAX_ACTIVE_UNITS,
+			"global_soldier_cap": cfg.GLOBAL_SOLDIER_CAP,
+			"soldier_spawn_cost": cfg.SOLDIER_SPAWN_AURELIUM_COST,
+		},
+		cfg.WORLD_DATASET_WORLD_SESSION_TICK and cfg.WORLD_DATASET_STRUCTURE_AUTHORITY,
+	)
 
 
 func advance_round() -> void:
@@ -521,12 +835,16 @@ func _count_claimable() -> int:
 
 
 func _tiles_owned_by_player() -> int:
+	if grid_authority_active() and rust_field != null:
+		return rust_field.friendly_tiles
 	if tile_control != null:
 		return tile_control.friendly_tiles
 	return 0
 
 
 func _tiles_owned_by_enemy() -> int:
+	if grid_authority_active() and rust_field != null:
+		return rust_field.hostile_tiles
 	if tile_control != null:
 		return tile_control.hostile_tiles
 	return 0
@@ -575,10 +893,10 @@ func _estimate_max_rounds() -> int:
 func _check_conquest_world() -> void:
 	var friendly: int = _tiles_owned_by_player()
 	var hostile: int = _tiles_owned_by_enemy()
+	var live_claimable: int = claimable_tile_count_live()
+	if live_claimable > 0:
+		claimable_tiles = live_claimable
 	if claimable_tiles <= 0:
-		finished = true
-		player_won = friendly >= hostile
-		end_reason = "cap"
 		return
 	var need: int = int(ceil(float(claimable_tiles) * WorldConquestConfigLib.CONQUEST_LAND_FRAC))
 	if friendly >= need:

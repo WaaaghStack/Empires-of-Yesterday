@@ -74,7 +74,11 @@ static func job_queue_for_team(queues: Dictionary, team: int) -> Array:
 
 
 static func assign_builder_jobs(
-	bots: Array, queues: Dictionary, structures: Array, team_filter: int = -1
+	bots: Array,
+	queues: Dictionary,
+	structures: Array,
+	grid_w: int,
+	team_filter: int = -1,
 ) -> void:
 	for bot: Dictionary in bots:
 		if str(bot.get("state", "")) != STATE_IDLE:
@@ -90,7 +94,7 @@ static func assign_builder_jobs(
 				q.remove_at(0)
 				continue
 			q.remove_at(0)
-			start_builder_job(bot, sid, structures)
+			start_builder_job_chained(bot, sid, structures, grid_w)
 			break
 
 
@@ -387,7 +391,7 @@ static func step_frame(
 		bot["seg_t"] = seg_t
 		result["visual_dirty"] = true
 	for team_var in result["reassign_teams"]:
-		assign_builder_jobs(bots, queues, structures, int(team_var))
+		assign_builder_jobs(bots, queues, structures, grid_w, int(team_var))
 	if map_data != null:
 		result["building_timer_result"] = step_building_timers(dt, structures, map_data, tile_control)
 	return result
@@ -422,7 +426,8 @@ static func step_building_timers(
 			continue
 		st["state"] = OutpostBuildLib.STATE_ACTIVE
 		st.erase("build_remaining")
-		st.erase("health")
+		if not st.has("health"):
+			st["health"] = CFG.OUTPOST_MAX_HEALTH
 		st["spawn_timer"] = 0.0
 		var sid: int = int(st.get("id", -1))
 		if sid >= 0:
@@ -432,12 +437,13 @@ static func step_building_timers(
 				activated_spawner_sids.append(sid)
 			var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
 			var idx: int = int(st.get("gy", 0)) * w + int(st.get("gx", 0))
-			if (
-				tile_control != null
-				and idx >= 0
-				and idx < tile_control.owners.size()
-				and tile_control.owners[idx] != team
-			):
+			var owner: int = BattleTileControlLib.OWNER_NEUTRAL
+			if tile_control != null:
+				if tile_control.has_method("owner_at_index"):
+					owner = int(tile_control.owner_at_index(idx))
+				elif "owners" in tile_control and idx >= 0 and idx < tile_control.owners.size():
+					owner = int(tile_control.owners[idx])
+			if tile_control != null and idx >= 0 and owner != team:
 				pending_claims.append(Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0))))
 				needs_sim_sync = true
 		else:
@@ -476,7 +482,7 @@ static func run_selfcheck() -> Dictionary:
 	}
 	var fake_map = BattleMapDataLib.new()
 	fake_map.grid_width = GRID_W
-	assign_builder_jobs(bots, queues, structures)
+	assign_builder_jobs(bots, queues, structures, GRID_W)
 	var cells: int = 0
 	var steps: int = 0
 	while steps < SELFCHECK_MAX_STEPS:
@@ -531,7 +537,7 @@ static func run_chain_selfcheck() -> Dictionary:
 	var queues: Dictionary = {"friendly": [1, 2], "hostile": []}
 	var fake_map = BattleMapDataLib.new()
 	fake_map.grid_width = GRID_W
-	assign_builder_jobs(bots, queues, structures)
+	assign_builder_jobs(bots, queues, structures, GRID_W)
 	var steps: int = 0
 	var saw_returning: bool = false
 	var saw_chain: bool = false

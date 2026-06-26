@@ -12,6 +12,7 @@ var _corridor_sids: Array[int] = []
 var _beachheads: Array[Dictionary] = []
 var _overlay_indices: PackedInt32Array = PackedInt32Array()
 var _overlay_values: PackedByteArray = PackedByteArray()
+var _overlay_is_r8: bool = false
 var _gpu_upload_pending: bool = false
 var _last_overlay_drain_frame: int = -1
 
@@ -61,6 +62,21 @@ func enqueue_overlay_delta(indices: PackedInt32Array, values: PackedByteArray) -
 	var n: int = mini(indices.size(), values.size())
 	if n <= 0:
 		return
+	if _overlay_indices.is_empty():
+		_overlay_is_r8 = false
+	for i in range(n):
+		_overlay_indices.append(indices[i])
+		_overlay_values.append(values[i])
+
+
+func enqueue_overlay_display_delta(
+	indices: PackedInt32Array, values: PackedByteArray
+) -> void:
+	var n: int = mini(indices.size(), values.size())
+	if n <= 0:
+		return
+	if _overlay_indices.is_empty():
+		_overlay_is_r8 = true
 	for i in range(n):
 		_overlay_indices.append(indices[i])
 		_overlay_values.append(values[i])
@@ -116,6 +132,7 @@ func drain_plan(current_frame: int) -> Dictionary:
 		"full_map_sync": false,
 		"overlay_indices": PackedInt32Array(),
 		"overlay_values": PackedByteArray(),
+		"overlay_is_r8": false,
 		"gpu_upload": false,
 	}
 
@@ -153,12 +170,14 @@ func drain_plan(current_frame: int) -> Dictionary:
 		overlay_n = mini(_overlay_indices.size(), cap)
 		plan.overlay_indices = _overlay_indices.slice(0, overlay_n)
 		plan.overlay_values = _overlay_values.slice(0, overlay_n)
+		plan.overlay_is_r8 = _overlay_is_r8
 		if _overlay_indices.size() > overlay_n:
 			_overlay_indices = _overlay_indices.slice(overlay_n, _overlay_indices.size())
 			_overlay_values = _overlay_values.slice(overlay_n, _overlay_values.size())
 		else:
 			_overlay_indices = PackedInt32Array()
 			_overlay_values = PackedByteArray()
+			_overlay_is_r8 = false
 		_last_overlay_drain_frame = current_frame
 
 	var visual_drained: bool = (

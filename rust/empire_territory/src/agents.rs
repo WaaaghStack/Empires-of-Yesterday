@@ -1,5 +1,10 @@
-//! World Conquest soldiers — deploy along roads/bridges to front-line nodes.
+//! World Conquest soldiers — path via nav rules toward nearest unclaimed land.
 
+use crate::pathfind::battle_nav::AgentNavMasks;
+use crate::pathfind::kernel::SearchKernel;
+use crate::pathfind::nav_rules::{
+    is_advance_goal_at, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
+};
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
     MIN_CLAIM_PRESSURE,
@@ -8,7 +13,6 @@ use crate::sim::{
 const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 const HOSTILE_TERRITORY_DPS: f32 = 3.0;
 const CLAIM_DOMINANCE_RATIO: f32 = 1.15;
-const NETWORK_BFS_VISITS: usize = 12_000;
 const AURA_STACK_CAP: u32 = 5;
 
 #[derive(Clone, Debug)]
@@ -31,12 +35,12 @@ impl Default for AgentConfig {
         Self {
             global_cap: 100,
             per_barracks_cap: 5,
-            max_hp: 10.0,
+            max_hp: 40.0,
             move_cells_per_sec: 1.0,
             infra_move_mult: 3.0,
-            aura_pressure: 0.12,
-            shoot_erode_per_step: 0.4 / 14.0,
-            orphan_dps: 1.0,
+            aura_pressure: 0.48,
+            shoot_erode_per_step: 1.6 / 14.0,
+            orphan_dps: 4.0,
             step_dt: 1.0 / 14.0,
             replans_per_tick: 6,
             replan_fallback_rounds: 42,
@@ -59,7 +63,7 @@ pub struct Agent {
     pub step_gy: i32,
     pub move_accum: f32,
     pub retarget_cd: i32,
-    /// Cell indices along the supply network toward a front-line node.
+    /// Cell indices along the planned route toward the nav-rule goal.
     deploy_path: Vec<i32>,
     /// Index into `deploy_path` for the soldier's current cell.
     deploy_path_pos: usize,
@@ -80,11 +84,7 @@ pub struct AgentLayer {
     pub hostile_bridge: Vec<u8>,
     nav_masks_epoch: u32,
     replan_cursor: usize,
-    bfs_parent: Vec<i32>,
-    bfs_depth: Vec<i32>,
-    bfs_stamp: Vec<u32>,
-    bfs_gen: u32,
-    bfs_queue: std::collections::VecDeque<i32>,
+    nav_search: SearchKernel,
 }
 
 impl AgentLayer {
@@ -102,11 +102,7 @@ impl AgentLayer {
             hostile_bridge: Vec::new(),
             nav_masks_epoch: 0,
             replan_cursor: 0,
-            bfs_parent: Vec::new(),
-            bfs_depth: Vec::new(),
-            bfs_stamp: Vec::new(),
-            bfs_gen: 0,
-            bfs_queue: std::collections::VecDeque::new(),
+            nav_search: SearchKernel::new(1),
         }
     }
 
@@ -234,7 +230,7 @@ impl AgentLayer {
                     self.agents[i].gy = sy;
                     self.advance_deploy_path_after_move(kernel, i);
                     self.sync_step_from_deploy_path(kernel, i);
-                } else if self.holding_at_front_line(kernel, team, &self.agents[i]) {
+                } else if self.holding_at_goal(kernel, team, &self.agents[i]) {
                     break;
                 } else {
                     self.agents[i].retarget_cd = 0;
@@ -299,7 +295,7 @@ impl AgentLayer {
 
         for i in 0..n {
             let team = self.agents[i].team;
-            let holding = self.holding_at_front_line(kernel, team, &self.agents[i]);
+            let holding = self.holding_at_goal(kernel, team, &self.agents[i]);
             let stuck = self.agents[i].step_gx < 0 && !holding;
             let nav_stale = self.nav_stale_for_agent(kernel, &self.agents[i]);
             let fallback_due = self.agents[i].retarget_cd <= 0;
@@ -369,7 +365,7 @@ impl AgentLayer {
         let stamp = self.snapshot_nav_stamp(kernel, gx, gy, goal_gx, goal_gy);
         let masks_epoch = self.nav_masks_epoch;
         let stagger = (id as i32 % 7).max(1);
-        let holding = self.holding_at_front_line(kernel, team, &self.agents[agent_i]);
+        let holding = self.holding_at_goal(kernel, team, &self.agents[agent_i]);
         let agent = &mut self.agents[agent_i];
         if agent.step_gx >= 0 || holding {
             agent.retarget_cd = self.config.replan_fallback_rounds + stagger;
@@ -474,8 +470,16 @@ impl AgentLayer {
             }
         }
 
-        // Lazy hold: stay on a valid front-line node until it stops qualifying.
-        if self.is_front_line_node(kernel, team, start_ui) {
+        let hold = {
+            let masks = AgentNavMasks {
+                friendly_corridor: &self.friendly_corridor,
+                hostile_corridor: &self.hostile_corridor,
+                friendly_bridge: &self.friendly_bridge,
+                hostile_bridge: &self.hostile_bridge,
+            };
+            is_advance_goal_at(kernel, &masks, team, gx, gy)
+        };
+        if hold {
             self.agents[agent_i].goal_gx = gx;
             self.agents[agent_i].goal_gy = gy;
             self.agents[agent_i].deploy_path = vec![start_idx];
@@ -485,27 +489,47 @@ impl AgentLayer {
             return;
         }
 
-        if !self.is_network_cell(team, start_ui) {
-            if let Some((nx, ny)) = self.step_onto_network(kernel, team, gx, gy) {
-                self.agents[agent_i].step_gx = nx;
-                self.agents[agent_i].step_gy = ny;
-                self.agents[agent_i].deploy_path.clear();
+        self.nav_search.ensure_capacity(kernel.tile_count);
+        let masks = AgentNavMasks {
+            friendly_corridor: &self.friendly_corridor,
+            hostile_corridor: &self.hostile_corridor,
+            friendly_bridge: &self.friendly_bridge,
+            hostile_bridge: &self.hostile_bridge,
+        };
+        let outcome = run_nav_rule(
+            &mut self.nav_search,
+            kernel,
+            &masks,
+            gx,
+            gy,
+            team,
+            NAV_RULE_INFANTRY_ADVANCE,
+        );
+
+        if let Some(route) = outcome.path {
+            if route.path.len() >= 2 {
+                let w = kernel.grid_w;
+                let goal_idx = *route.path.last().unwrap();
+                let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
+                self.agents[agent_i].goal_gx = goal_x;
+                self.agents[agent_i].goal_gy = goal_y;
+                self.agents[agent_i].deploy_path = route.path;
                 self.agents[agent_i].deploy_path_pos = 0;
+                self.sync_step_from_deploy_path(kernel, agent_i);
                 return;
             }
-        }
-
-        if let Some((front_idx, path)) =
-            self.bfs_nearest_front_line_path(kernel, team, start_idx)
-        {
-            let w = kernel.grid_w;
-            let (goal_x, goal_y) = Self::grid_from_idx(front_idx, w);
-            self.agents[agent_i].goal_gx = goal_x;
-            self.agents[agent_i].goal_gy = goal_y;
-            self.agents[agent_i].deploy_path = path;
-            self.agents[agent_i].deploy_path_pos = 0;
-            self.sync_step_from_deploy_path(kernel, agent_i);
-            return;
+            if route.path.len() == 1 {
+                let w = kernel.grid_w;
+                let goal_idx = route.path[0];
+                let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
+                self.agents[agent_i].goal_gx = goal_x;
+                self.agents[agent_i].goal_gy = goal_y;
+                self.agents[agent_i].deploy_path = route.path;
+                self.agents[agent_i].deploy_path_pos = 0;
+                self.agents[agent_i].step_gx = -1;
+                self.agents[agent_i].step_gy = -1;
+                return;
+            }
         }
 
         self.agents[agent_i].step_gx = -1;
@@ -514,49 +538,14 @@ impl AgentLayer {
         self.agents[agent_i].deploy_path_pos = 0;
     }
 
-    /// Network cell (road or bridge) adjacent to neutral or enemy territory.
-    fn is_front_line_node(&self, kernel: &TerritoryKernel, team: u8, idx: usize) -> bool {
-        if idx >= kernel.tile_count || !self.is_network_cell(team, idx) {
-            return false;
-        }
-        let w = kernel.grid_w;
-        let gx = idx as i32 % w;
-        let gy = idx as i32 / w;
-        self.adjacent_to_neutral_or_enemy(kernel, team, gx, gy)
-    }
-
-    fn holding_at_front_line(
-        &self,
-        kernel: &TerritoryKernel,
-        team: u8,
-        agent: &Agent,
-    ) -> bool {
-        let idx = kernel.cell_index(agent.gx, agent.gy);
-        if idx < 0 {
-            return false;
-        }
-        self.is_front_line_node(kernel, team, idx as usize)
-    }
-
-    fn adjacent_to_neutral_or_enemy(
-        &self,
-        kernel: &TerritoryKernel,
-        team: u8,
-        gx: i32,
-        gy: i32,
-    ) -> bool {
-        let enemy = enemy_team(team);
-        for (dx, dy) in CARDINAL {
-            let ni = kernel.cell_index(gx + dx, gy + dy);
-            if ni < 0 {
-                continue;
-            }
-            let o = kernel.owners[ni as usize];
-            if o == OWNER_NEUTRAL || o == enemy {
-                return true;
-            }
-        }
-        false
+    fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, agent: &Agent) -> bool {
+        let masks = AgentNavMasks {
+            friendly_corridor: &self.friendly_corridor,
+            hostile_corridor: &self.hostile_corridor,
+            friendly_bridge: &self.friendly_bridge,
+            hostile_bridge: &self.hostile_bridge,
+        };
+        is_advance_goal_at(kernel, &masks, team, agent.gx, agent.gy)
     }
 
     fn is_network_cell(&self, team: u8, idx: usize) -> bool {
@@ -568,140 +557,9 @@ impl AgentLayer {
         (idx < corridor.len() && corridor[idx] != 0) || (idx < bridge.len() && bridge[idx] != 0)
     }
 
-    /// BFS on the road/bridge network to the nearest front-line node.
-    fn bfs_nearest_front_line_path(
-        &mut self,
-        kernel: &TerritoryKernel,
-        team: u8,
-        start_idx: i32,
-    ) -> Option<(i32, Vec<i32>)> {
-        let start_ui = start_idx as usize;
-        if start_idx < 0 || start_ui >= kernel.tile_count {
-            return None;
-        }
-
-        let w = kernel.grid_w;
-        let h = kernel.grid_h;
-        let n = kernel.tile_count;
-        self.begin_bfs_search(n);
-        self.bfs_parent[start_ui] = -1;
-        self.bfs_depth[start_ui] = 0;
-        self.bfs_stamp[start_ui] = self.bfs_gen;
-        self.bfs_queue.push_back(start_idx);
-
-        let mut best_front: i32 = -1;
-        let mut best_depth: i32 = i32::MAX;
-        let mut visits: usize = 0;
-
-        while let Some(cur_idx) = self.bfs_queue.pop_front() {
-            visits += 1;
-            if visits > NETWORK_BFS_VISITS {
-                break;
-            }
-            let cur_ui = cur_idx as usize;
-            let depth = self.bfs_depth[cur_ui];
-
-            if self.is_front_line_node(kernel, team, cur_ui) && depth < best_depth {
-                best_depth = depth;
-                best_front = cur_idx;
-            }
-
-            let cx = cur_idx % w;
-            let cy = cur_idx / w;
-            for (dx, dy) in CARDINAL {
-                let ny = cy + dy;
-                if ny < 0 || ny >= h {
-                    continue;
-                }
-                let Some(nxw) = TerritoryKernel::wrap_nx_public(cx + dx, w, kernel.wrap_longitude)
-                else {
-                    continue;
-                };
-                let ni = kernel.cell_index(nxw, ny);
-                if ni < 0 {
-                    continue;
-                }
-                let nui = ni as usize;
-                if ni != start_idx && !self.is_network_cell(team, nui) {
-                    continue;
-                }
-                if !self.is_passable(kernel, team, nxw, ny) {
-                    continue;
-                }
-                if self.bfs_stamp[nui] == self.bfs_gen {
-                    continue;
-                }
-                self.bfs_stamp[nui] = self.bfs_gen;
-                self.bfs_parent[nui] = cur_idx;
-                self.bfs_depth[nui] = depth + 1;
-                self.bfs_queue.push_back(ni);
-            }
-        }
-
-        if best_front < 0 {
-            return None;
-        }
-        let path = self.reconstruct_cell_path(start_idx, best_front);
-        if path.is_empty() {
-            return None;
-        }
-        Some((best_front, path))
-    }
-
-    fn reconstruct_cell_path(&self, start_idx: i32, goal_idx: i32) -> Vec<i32> {
-        let mut path = vec![goal_idx];
-        let mut cur = goal_idx;
-        while cur != start_idx && cur >= 0 {
-            let ui = cur as usize;
-            if ui >= self.bfs_parent.len() || self.bfs_stamp[ui] != self.bfs_gen {
-                return Vec::new();
-            }
-            let parent = self.bfs_parent[ui];
-            if parent < 0 {
-                return Vec::new();
-            }
-            path.push(parent);
-            cur = parent;
-        }
-        path.reverse();
-        path
-    }
-
-    fn step_onto_network(
-        &self,
-        kernel: &TerritoryKernel,
-        team: u8,
-        gx: i32,
-        gy: i32,
-    ) -> Option<(i32, i32)> {
-        let w = kernel.grid_w;
-        let h = kernel.grid_h;
-        for (dx, dy) in CARDINAL {
-            let ny = gy + dy;
-            if ny < 0 || ny >= h {
-                continue;
-            }
-            let Some(nxw) = TerritoryKernel::wrap_nx_public(gx + dx, w, kernel.wrap_longitude) else {
-                continue;
-            };
-            let ni = kernel.cell_index(nxw, ny);
-            if ni < 0 {
-                continue;
-            }
-            if !self.is_network_cell(team, ni as usize) {
-                continue;
-            }
-            if !self.is_passable(kernel, team, nxw, ny) {
-                continue;
-            }
-            return Some((nxw, ny));
-        }
-        None
-    }
-
     fn sync_step_from_deploy_path(&mut self, kernel: &TerritoryKernel, agent_i: usize) {
         let team = self.agents[agent_i].team;
-        if self.holding_at_front_line(kernel, team, &self.agents[agent_i]) {
+        if self.holding_at_goal(kernel, team, &self.agents[agent_i]) {
             self.agents[agent_i].step_gx = -1;
             self.agents[agent_i].step_gy = -1;
             return;
@@ -744,43 +602,35 @@ impl AgentLayer {
         start_gx: i32,
         start_gy: i32,
     ) -> Option<(i32, i32, i32, i32)> {
-        let start_idx = kernel.cell_index(start_gx, start_gy);
-        if start_idx < 0 {
-            return None;
-        }
-        if let Some((front_idx, path)) =
-            self.bfs_nearest_front_line_path(kernel, team, start_idx)
-        {
-            if path.len() >= 2 {
-                let w = kernel.grid_w;
-                let (goal_x, goal_y) = Self::grid_from_idx(front_idx, w);
-                let (step_x, step_y) = Self::grid_from_idx(path[1], w);
-                return Some((goal_x, goal_y, step_x, step_y));
-            }
+        self.nav_search.ensure_capacity(kernel.tile_count);
+        let masks = AgentNavMasks {
+            friendly_corridor: &self.friendly_corridor,
+            hostile_corridor: &self.hostile_corridor,
+            friendly_bridge: &self.friendly_bridge,
+            hostile_bridge: &self.hostile_bridge,
+        };
+        let outcome = run_nav_rule(
+            &mut self.nav_search,
+            kernel,
+            &masks,
+            start_gx,
+            start_gy,
+            team,
+            NAV_RULE_INFANTRY_RETREAT,
+        );
+        let route = outcome.path?;
+        if route.path.len() >= 2 {
+            let w = kernel.grid_w;
+            let goal_idx = *route.path.last().unwrap();
+            let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
+            let (step_x, step_y) = Self::grid_from_idx(route.path[1], w);
+            return Some((goal_x, goal_y, step_x, step_y));
         }
         None
     }
 
-    fn begin_bfs_search(&mut self, n: usize) {
-        self.ensure_bfs_bufs(n);
-        self.bfs_gen = self.bfs_gen.wrapping_add(1);
-        if self.bfs_gen == 0 {
-            self.bfs_gen = 1;
-            self.bfs_stamp.fill(0);
-        }
-        self.bfs_queue.clear();
-    }
-
     fn grid_from_idx(idx: i32, w: i32) -> (i32, i32) {
         (idx % w, idx / w)
-    }
-
-    fn ensure_bfs_bufs(&mut self, n: usize) {
-        if self.bfs_parent.len() != n {
-            self.bfs_parent.resize(n, -1);
-            self.bfs_depth.resize(n, 0);
-            self.bfs_stamp.resize(n, 0);
-        }
     }
 
     fn adjacent_to_team_supply(&self, kernel: &TerritoryKernel, team: u8, gx: i32, gy: i32) -> bool {

@@ -63,6 +63,14 @@ static func invalidate_snap_cache() -> void:
 
 ## Pack static terrain + infrastructure masks for Rust route planner.
 static func pack_route_snapshot(map_data, structures: Array) -> Dictionary:
+	return pack_route_snapshot_for_team(
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
+	)
+
+
+static func pack_route_snapshot_for_team(
+	map_data, structures: Array, team: int
+) -> Dictionary:
 	if map_data == null:
 		return {}
 	var w: int = map_data.grid_width
@@ -77,12 +85,8 @@ static func pack_route_snapshot(map_data, structures: Array) -> Dictionary:
 	land_mask.resize(n)
 	land_comp_out.resize(n)
 	infra_mask.resize(n)
-	var road_cells: Dictionary = road_cells_for_team(
-		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
-	)
-	var bridge_mask: PackedByteArray = _bridge_mask_for_team(
-		map_data, BattleTileControlLib.OWNER_FRIENDLY, structures
-	)
+	var road_cells: Dictionary = road_cells_for_team(map_data, structures, team)
+	var bridge_mask: PackedByteArray = _bridge_mask_for_team(map_data, team, structures)
 	for gy in range(h):
 		for gx in range(w):
 			var idx: int = gy * w + gx
@@ -104,6 +108,12 @@ static func pack_route_snapshot(map_data, structures: Array) -> Dictionary:
 
 ## Road/bridge infra only — avoids re-scanning the full land grid on every road cell.
 static func pack_infra_mask_only(map_data, structures: Array) -> PackedByteArray:
+	return pack_infra_mask_for_team(
+		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
+	)
+
+
+static func pack_infra_mask_for_team(map_data, structures: Array, team: int) -> PackedByteArray:
 	if map_data == null:
 		return PackedByteArray()
 	var n: int = map_data.grid_width * map_data.grid_height
@@ -112,12 +122,14 @@ static func pack_infra_mask_only(map_data, structures: Array) -> PackedByteArray
 	var infra_mask := PackedByteArray()
 	infra_mask.resize(n)
 	infra_mask.fill(0)
-	var road_cells: Dictionary = road_cells_for_team(
-		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY
-	)
+	var road_cells: Dictionary = road_cells_for_team(map_data, structures, team)
 	for key in road_cells:
 		var idx: int = int(key)
 		if idx >= 0 and idx < n:
+			infra_mask[idx] = 1
+	var bridge_mask: PackedByteArray = _bridge_mask_for_team(map_data, team, structures)
+	for idx in range(n):
+		if idx < bridge_mask.size() and bridge_mask[idx] != 0:
 			infra_mask[idx] = 1
 	return infra_mask
 
@@ -734,7 +746,21 @@ static func grid_from_packed_key(cell_key: int, grid_w: int) -> Vector2i:
 
 
 ## Ensure each path step is one cardinal tile apart (longitude seam counts as adjacent).
+static func path_is_cardinal_dense(map_data, packed: PackedInt32Array) -> bool:
+	if packed.size() < 2 or map_data == null:
+		return true
+	var w: int = map_data.grid_width
+	for i in range(1, packed.size()):
+		var a: Vector2i = grid_from_packed_key(packed[i - 1], w)
+		var b: Vector2i = grid_from_packed_key(packed[i], w)
+		if not _cardinal_adjacent(a, b, w):
+			return false
+	return true
+
+
 static func densify_path_cardinal(map_data, packed: PackedInt32Array) -> PackedInt32Array:
+	if path_is_cardinal_dense(map_data, packed):
+		return packed
 	if packed.size() < 2 or map_data == null:
 		return packed
 	var w: int = map_data.grid_width
@@ -778,7 +804,11 @@ static func _connector_path_cardinal(
 	_bfs_queue.clear()
 	_bfs_queue.append(start_key)
 	var head: int = 0
+	var expanded: int = 0
 	while head < _bfs_queue.size():
+		expanded += 1
+		if expanded >= WorldConquestConfigLib.OUTPOST_PATHFIND_MAX_EXPAND:
+			return empty
 		var cur_key: int = _bfs_queue[head]
 		head += 1
 		if cur_key == goal_key:
@@ -822,25 +852,56 @@ static func path_from_structure(st: Dictionary, grid_w: int) -> Array[Vector2i]:
 	return out_legacy
 
 
-static func construction_dps_at(map_data, tile_control, gx: int, gy: int) -> float:
-	if map_data == null or tile_control == null:
+static func construction_dps_at(
+	map_data, grid, gx: int, gy: int, team: int = BattleTileControlLib.OWNER_FRIENDLY
+) -> float:
+	if map_data == null or grid == null:
 		return 0.0
 	if gx < 0 or gy < 0:
 		return 0.0
 	var idx: int = map_data.cell_index(gx, gy)
-	if idx < 0 or idx >= tile_control.owners.size():
+	var owners_size: int = idx
+	if grid.has_method("grid_cell_count"):
+		owners_size = int(grid.grid_cell_count())
+	elif "owners" in grid:
+		owners_size = grid.owners.size()
+	if idx < 0 or idx >= owners_size:
 		return 0.0
-	var owner: int = int(tile_control.owners[idx])
-	if owner == BattleTileControlLib.OWNER_FRIENDLY:
+	var owner: int = BattleTileControlLib.OWNER_NEUTRAL
+	if grid.has_method("owner_at_index"):
+		owner = int(grid.owner_at_index(idx))
+	elif "owners" in grid:
+		owner = int(grid.owners[idx])
+	if owner == team:
 		return 0.0
-	if owner == BattleTileControlLib.OWNER_HOSTILE:
+	if owner == BattleTileControlLib.OWNER_FRIENDLY or owner == BattleTileControlLib.OWNER_HOSTILE:
 		return WorldConquestConfigLib.OUTPOST_ENEMY_DPS
-	var pf: float = tile_control.pressure_friendly[idx]
-	var ph: float = tile_control.pressure_hostile[idx]
+	var own_p: float = 0.0
+	var opp_p: float = 0.0
+	if grid.has_method("pressure_friendly_at"):
+		var pf: float = float(grid.pressure_friendly_at(idx))
+		var ph: float = float(grid.pressure_hostile_at(idx))
+		if team == BattleTileControlLib.OWNER_FRIENDLY:
+			own_p = pf
+			opp_p = ph
+		else:
+			own_p = ph
+			opp_p = pf
+	elif "pressure_friendly" in grid and "pressure_hostile" in grid:
+		var pf2: float = grid.pressure_friendly[idx]
+		var ph2: float = grid.pressure_hostile[idx]
+		if team == BattleTileControlLib.OWNER_FRIENDLY:
+			own_p = pf2
+			opp_p = ph2
+		else:
+			own_p = ph2
+			opp_p = pf2
 	var ratio: float = 1.15
-	if idx < tile_control._claim_ratio_mult.size():
-		ratio *= tile_control._claim_ratio_mult[idx]
-	if ph >= BattleTileControlLib.MIN_CLAIM_PRESSURE and ph > pf * ratio:
+	if grid.has_method("claim_ratio_mult_at"):
+		ratio *= float(grid.claim_ratio_mult_at(idx))
+	elif "_claim_ratio_mult" in grid and idx < grid._claim_ratio_mult.size():
+		ratio *= grid._claim_ratio_mult[idx]
+	if opp_p >= BattleTileControlLib.MIN_CLAIM_PRESSURE and opp_p > own_p * ratio:
 		return WorldConquestConfigLib.OUTPOST_ENEMY_DPS
 	return 0.0
 
@@ -1239,9 +1300,13 @@ static func _bfs_water_back_to_goals(
 	if _bfs_queue.is_empty():
 		return false
 	var head: int = 0
+	var expanded: int = 0
 	while head < _bfs_queue.size():
 		var cur_key: int = _bfs_queue[head]
 		head += 1
+		expanded += 1
+		if expanded >= WorldConquestConfigLib.OUTPOST_PATHFIND_MAX_EXPAND:
+			return false
 		var cur_dist: int = _g_score[cur_key]
 		var cx: int = cur_key % w
 		var cy: int = cur_key / w

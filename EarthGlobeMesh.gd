@@ -3,27 +3,33 @@ extends RefCounted
 
 const BattleMapDataLib := preload("res://BattleMapData.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
+const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
 
 
-static func build_globe(map_data) -> ArrayMesh:
+static func build_globe(map_data, map_id: String = WorldMapCatalogLib.DEFAULT_MAP_ID) -> ArrayMesh:
 	return _build_globe_mesh(
 		map_data,
 		false,
 		WorldConquestConfigLib.GLOBE_MESH_W,
 		WorldConquestConfigLib.GLOBE_MESH_H,
+		map_id,
 	)
 
 
-static func build_fluid_globe(map_data) -> ArrayMesh:
+static func build_fluid_globe(map_data, map_id: String = WorldMapCatalogLib.DEFAULT_MAP_ID) -> ArrayMesh:
 	return _build_globe_mesh(
 		map_data,
 		true,
 		WorldConquestConfigLib.FLUID_MESH_W,
 		WorldConquestConfigLib.FLUID_MESH_H,
+		map_id,
 	)
 
 
-static func _build_globe_mesh(map_data, fluid: bool, mw: int, mh: int) -> ArrayMesh:
+static func _build_globe_mesh(
+	map_data, fluid: bool, mw: int, mh: int, map_id: String
+) -> ArrayMesh:
 	if map_data == null:
 		return ArrayMesh.new()
 	var gw: int = map_data.grid_width
@@ -36,7 +42,7 @@ static func _build_globe_mesh(map_data, fluid: bool, mw: int, mh: int) -> ArrayM
 		for mx in range(mw):
 			if fluid and not _quad_has_land(map_data, mx, my, mw, mh, gw, gh):
 				continue
-			_add_meridian_quad(st, map_data, mx, my, mw, mh, gw, gh, r, hs, fluid)
+			_add_meridian_quad(st, map_data, mx, my, mw, mh, gw, gh, r, hs, fluid, map_id)
 	st.generate_normals()
 	return st.commit()
 
@@ -107,6 +113,7 @@ static func _add_meridian_quad(
 	radius: float,
 	hs: float,
 	fluid: bool,
+	map_id: String,
 ) -> void:
 	var lons: Array[float] = [_mx_to_lon(mx, mw), _mx_to_lon(mx + 1, mw)]
 	var lats: Array[float] = [_my_to_lat(my, mh), _my_to_lat(my + 1, mh)]
@@ -128,7 +135,7 @@ static func _add_meridian_quad(
 	var col: Color = (
 		Color(1, 1, 1, 0.0)
 		if fluid
-		else _cell_color(map_data, sample_g.x, sample_g.y)
+		else _cell_color(map_data, sample_g.x, sample_g.y, map_id)
 	)
 	for idx in [0, 2, 1, 1, 2, 3]:
 		st.set_color(col)
@@ -136,18 +143,17 @@ static func _add_meridian_quad(
 		st.add_vertex(verts[idx])
 
 
-static func _cell_color(map_data, gx: int, gy: int) -> Color:
+static func _cell_color(map_data, gx: int, gy: int, map_id: String) -> Color:
+	var colors: Dictionary = WorldConquestMapGeneratorLib.globe_colors_for_map(map_id)
 	if not map_data.is_land_cell(gx, gy):
-		return Color(0.08, 0.22, 0.42)
+		return colors.get("ocean", Color(0.05, 0.18, 0.42))
 	var t: int = map_data.get_cell_terrain(gx, gy)
 	match t:
 		BattleMapDataLib.Terrain.WATER:
-			return Color(0.08, 0.22, 0.42)
+			return colors.get("ocean", Color(0.05, 0.18, 0.42))
 		BattleMapDataLib.Terrain.MOUNTAIN:
-			return Color(0.45, 0.42, 0.38)
+			return colors.get("mountain", Color(0.48, 0.44, 0.38))
 		BattleMapDataLib.Terrain.SAND:
-			return Color(0.72, 0.65, 0.42)
-		BattleMapDataLib.Terrain.MUD:
-			return Color(0.35, 0.48, 0.28)
+			return colors.get("sand", Color(0.72, 0.64, 0.38))
 		_:
-			return Color(0.28, 0.52, 0.22)
+			return colors.get("land", Color(0.34, 0.52, 0.28))
