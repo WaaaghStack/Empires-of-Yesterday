@@ -16,7 +16,8 @@ pub use graph::NavGraph;
 pub use kernel::{RouteContext, RoutePath, SearchStats};
 pub use battle_nav::{AgentNavMasks, BattleNavView};
 pub use nav_rules::{
-    is_advance_goal_at, run_nav_rule, NavGoalMode, NavRule, NavRuleId, NavRuleOutcome,
+    is_pressure_target_at, is_stance_goal_at, run_nav_rule, NavGoalMode, NavRule, NavRuleId,
+    NavRuleOutcome,
     NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_FRONTLINE, NAV_RULE_INFANTRY_RETREAT,
 };
 pub use route_rules::{PlacementMeta, RouteRule, ROUTE_RULES};

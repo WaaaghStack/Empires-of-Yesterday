@@ -7,7 +7,7 @@ use crate::sim::TerritoryKernel;
 
 pub type NavRuleId = i32;
 
-/// Infantry — march toward nearest unclaimed claimable land (via land + team infra).
+/// Infantry — march to nearest safe stance tile one step back from unclaimed land.
 pub const NAV_RULE_INFANTRY_ADVANCE: NavRuleId = 0;
 /// Back-compat alias — same rule as advance.
 pub const NAV_RULE_INFANTRY_FRONTLINE: NavRuleId = NAV_RULE_INFANTRY_ADVANCE;
@@ -18,7 +18,7 @@ pub const NAV_RULE_INFANTRY_RETREAT: NavRuleId = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavGoalMode {
     FixedTile,
-    NearestUnclaimedLand,
+    NearestFrontierStance,
     NearestFriendlySupply,
 }
 
@@ -42,7 +42,7 @@ const CTX_INFANTRY_BFS: RouteContext = RouteContext {
 pub const NAV_RULES: &[NavRule] = &[
     NavRule {
         id: NAV_RULE_INFANTRY_ADVANCE,
-        goal_mode: NavGoalMode::NearestUnclaimedLand,
+        goal_mode: NavGoalMode::NearestFrontierStance,
         search: CTX_INFANTRY_BFS,
     },
     NavRule {
@@ -90,11 +90,11 @@ pub fn run_nav_rule(
     let view = BattleNavView::new(territory, masks, team);
     let ctx = rule.search;
     let outcome = match rule.goal_mode {
-        NavGoalMode::NearestUnclaimedLand => search.find_nearest_goal(
+        NavGoalMode::NearestFrontierStance => search.find_nearest_goal(
             &view,
             &[start],
             ctx,
-            |idx| view.is_advance_goal(idx),
+            |idx| view.is_stance_goal(idx),
         ),
         NavGoalMode::NearestFriendlySupply => search.find_nearest_goal(
             &view,
@@ -116,8 +116,24 @@ pub fn run_nav_rule(
     }
 }
 
-/// True when a soldier is already standing on an advance-rule goal tile.
-pub fn is_advance_goal_at(
+/// True when a soldier is already standing on a valid stance tile.
+pub fn is_stance_goal_at(
+    territory: &TerritoryKernel,
+    masks: &AgentNavMasks<'_>,
+    team: u8,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    let idx = territory.cell_index(gx, gy);
+    if idx < 0 {
+        return false;
+    }
+    let view = BattleNavView::new(territory, masks, team);
+    view.is_stance_goal(idx as usize)
+}
+
+/// True when a tile is a pressure target (unowned land soldiers fight over).
+pub fn is_pressure_target_at(
     territory: &TerritoryKernel,
     masks: &AgentNavMasks<'_>,
     team: u8,
@@ -210,9 +226,11 @@ mod tests {
         );
         let path = out.path.expect("path");
         assert!(!path.path.is_empty());
-        let goal = *path.path.last().unwrap();
+        let goal = *path.path.last().unwrap() as usize;
         let view = BattleNavView::new(&k, &masks, OWNER_FRIENDLY);
-        assert!(view.is_advance_goal(goal as usize));
+        assert!(view.is_stance_goal(goal));
+        assert_eq!(k.owners[goal], OWNER_FRIENDLY);
+        assert!(view.is_advance_goal(2));
     }
 
     #[test]
@@ -234,8 +252,8 @@ mod tests {
         let path = out.path.expect("hostile path");
         let goal = *path.path.last().unwrap() as usize;
         let view = BattleNavView::new(&k, &masks, OWNER_HOSTILE);
-        assert!(view.is_advance_goal(goal));
-        assert_ne!(k.owners[goal], OWNER_HOSTILE);
+        assert!(view.is_stance_goal(goal));
+        assert_eq!(k.owners[goal], OWNER_HOSTILE);
     }
 
     #[test]
@@ -314,7 +332,7 @@ mod tests {
         );
         let goal = *path.path.last().unwrap() as usize;
         let view = BattleNavView::new(&k, &masks, OWNER_FRIENDLY);
-        assert!(view.is_advance_goal(goal));
+        assert!(view.is_stance_goal(goal));
     }
 
     #[test]

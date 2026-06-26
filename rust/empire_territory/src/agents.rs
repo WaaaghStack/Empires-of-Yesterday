@@ -1,9 +1,9 @@
-//! World Conquest soldiers — path via nav rules toward nearest unclaimed land.
+//! World Conquest soldiers — path via nav rules toward frontier stance tiles.
 
 use crate::pathfind::battle_nav::AgentNavMasks;
 use crate::pathfind::kernel::SearchKernel;
 use crate::pathfind::nav_rules::{
-    is_advance_goal_at, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
+    is_stance_goal_at, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
 };
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
@@ -477,7 +477,7 @@ impl AgentLayer {
                 friendly_bridge: &self.friendly_bridge,
                 hostile_bridge: &self.hostile_bridge,
             };
-            is_advance_goal_at(kernel, &masks, team, gx, gy)
+            is_stance_goal_at(kernel, &masks, team, gx, gy)
         };
         if hold {
             self.agents[agent_i].goal_gx = gx;
@@ -545,7 +545,7 @@ impl AgentLayer {
             friendly_bridge: &self.friendly_bridge,
             hostile_bridge: &self.hostile_bridge,
         };
-        is_advance_goal_at(kernel, &masks, team, agent.gx, agent.gy)
+        is_stance_goal_at(kernel, &masks, team, agent.gx, agent.gy)
     }
 
     fn is_network_cell(&self, team: u8, idx: usize) -> bool {
