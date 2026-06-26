@@ -81,6 +81,7 @@ func setup_from_tile_control(
 				"pressure_hostile": tile_control.pressure_hostile,
 				"friendly_spawn_rate": tile_control._friendly_spawn_rate,
 				"hostile_spawn_rate": tile_control._hostile_spawn_rate,
+				"pressure_inject_interval_rounds": WorldConquestConfigLib.PRESSURE_INJECT_INTERVAL_ROUNDS,
 				"player_home_idx": player_home,
 				"enemy_home_idx": enemy_home,
 				"spawner_teams": spawner_data.teams,

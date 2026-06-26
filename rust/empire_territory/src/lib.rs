@@ -179,8 +179,6 @@ fn world_session_events_dict(events: &WorldSessionEvents, friendly_aurelium: f32
         "activated_spawner_sids",
         &vec_to_packed_i32(&events.activated_spawner_sids),
     );
-    out.set("pending_claim_gx", &vec_to_packed_i32(&events.pending_claim_gx));
-    out.set("pending_claim_gy", &vec_to_packed_i32(&events.pending_claim_gy));
     out.set("destroyed_sids", &vec_to_packed_i32(&events.destroyed_sids));
     out.set(
         "spawned_barracks_sids",
@@ -467,6 +465,12 @@ impl TerritorySim {
             wrap_longitude,
         ));
         if let Some(kernel) = self.kernel.as_mut() {
+            let inject_interval: i32 = config
+                .get("pressure_inject_interval_rounds")
+                .or_else(|| config.get("spawner_inject_interval_rounds"))
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(10);
+            kernel.spawner_inject_interval_rounds = inject_interval.max(1);
             let passable: PackedByteArray = config
                 .get("passable_mask")
                 .and_then(|v| v.try_to().ok())

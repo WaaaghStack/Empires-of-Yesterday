@@ -119,6 +119,7 @@ var _claimable_dirty_indices: Array[int] = []
 var _claimable_dirty_lookup: PackedByteArray = PackedByteArray()
 var _friendly_spawn_rate: float = 1.0
 var _hostile_spawn_rate: float = 1.0
+var _territory_round_index: int = 0
 
 var use_simple_water_model: bool = false
 var use_longitude_wrap: bool = false
@@ -186,6 +187,7 @@ func setup(map_data) -> void:
 	_pressure_hostile_next.fill(0.0)
 	_recount_ownership()
 	_load_placed_spawners_from_map(map_data)
+	_territory_round_index = 0
 
 
 func reset_for_battle(map_data, store, cell_grid = null) -> void:
@@ -338,14 +340,17 @@ func propagate_round(map_data, store, cell_grid = null) -> void:
 func _propagate_simple_water(map_data) -> void:
 	_prev_friendly_tiles = friendly_tiles
 	_prev_hostile_tiles = hostile_tiles
+	_territory_round_index += 1
 
 	var t_inj: int = 0
 	if perf != null:
 		t_inj = perf.begin_phase("inject")
-	if home_inject_enabled:
+	var inject_sources: bool = _should_inject_pressure_sources_this_round()
+	if home_inject_enabled and inject_sources:
 		_inject_home_base_tile(map_data, map_data.player_spawn_zone, _friendly_spawn_rate, true)
 		_inject_home_base_tile(map_data, map_data.enemy_spawn_zone, _hostile_spawn_rate, false)
-	_inject_placed_spawners(map_data)
+	if inject_sources:
+		_inject_placed_spawners(map_data)
 	if perf != null:
 		perf.end_phase("inject", t_inj)
 
@@ -568,12 +573,6 @@ func _preserve_home_base_ownership(map_data) -> void:
 		return
 	_claim_home_base_tile(map_data, map_data.player_spawn_zone, OWNER_FRIENDLY)
 	_claim_home_base_tile(map_data, map_data.enemy_spawn_zone, OWNER_HOSTILE)
-	for sp: Dictionary in _placed_spawners:
-		var team: int = int(sp.get("team", OWNER_FRIENDLY))
-		var gx: int = int(sp.get("gx", -1))
-		var gy: int = int(sp.get("gy", -1))
-		if gx >= 0 and gy >= 0:
-			_claim_at(gx, gy, OWNER_FRIENDLY if team == OWNER_FRIENDLY else OWNER_HOSTILE)
 
 
 func _inject_home_base_tile(
@@ -629,6 +628,11 @@ func _inject_at_grid(
 	_inject_pressure_at_index(idx, amount, is_friendly, set_absolute)
 
 
+func _should_inject_pressure_sources_this_round() -> bool:
+	var interval: int = maxi(1, WorldConquestConfigLib.PRESSURE_INJECT_INTERVAL_ROUNDS)
+	return (_territory_round_index - 1) % interval == 0
+
+
 func _inject_placed_spawners(map_data) -> void:
 	for sp: Dictionary in _placed_spawners:
 		var team: int = int(sp.get("team", OWNER_FRIENDLY))
@@ -637,7 +641,9 @@ func _inject_placed_spawners(map_data) -> void:
 		var amount: float = (
 			_friendly_spawn_rate if team == OWNER_FRIENDLY else _hostile_spawn_rate
 		)
-		_inject_at_grid(map_data, gx, gy, amount, team == OWNER_FRIENDLY)
+		var is_friendly: bool = team == OWNER_FRIENDLY
+		for d: Vector2i in _DIRS_CARDINAL:
+			_inject_at_grid(map_data, gx + d.x, gy + d.y, amount, is_friendly)
 
 
 func add_placed_spawner(team: int, gx: int, gy: int, kind: String = "spawner") -> void:
@@ -1473,7 +1479,11 @@ func seed_initial_owners(map_data, store, cell_grid = null) -> PackedByteArray:
 
 static func home_spawn_rate_for_force(committed: int, galaxy_bonus: float = 0.0) -> float:
 	var units: int = maxi(1, committed)
-	return HOME_START_POWER * (1.0 + float(units) * SPAWN_MULTIPLIER_PER_UNIT + galaxy_bonus)
+	return (
+		HOME_START_POWER
+		* (1.0 + float(units) * SPAWN_MULTIPLIER_PER_UNIT + galaxy_bonus)
+		* WorldConquestConfigLib.PRESSURE_SOURCE_OUTPUT_MULT
+	)
 
 
 func _seed_initial_pressure(map_data) -> void:

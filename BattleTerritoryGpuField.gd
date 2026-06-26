@@ -59,6 +59,8 @@ var _hostile_rate: float = 1.0
 var _player_home: Vector2i = Vector2i(-1, -1)
 var _enemy_home: Vector2i = Vector2i(-1, -1)
 var _inject_points: PackedInt32Array = PackedInt32Array()
+var _territory_round_index: int = 0
+var _pressure_inject_interval: int = 10
 
 var _groups_x: int = 1
 var _groups_y: int = 1
@@ -100,6 +102,8 @@ func setup_from_tile_control(map_data, tile_control: BattleTileControlLib) -> bo
 	_hostile_rate = tile_control._hostile_spawn_rate
 	_player_home = map_data.player_home_grid
 	_enemy_home = map_data.enemy_home_grid
+	_pressure_inject_interval = maxi(1, WorldConquestConfigLib.PRESSURE_INJECT_INTERVAL_ROUNDS)
+	_territory_round_index = 0
 	_sync_inject_points_from_tile_control(tile_control)
 	_create_param_buffers()
 	_update_tile_counts_from_owners_cpu(tile_control.owners)
@@ -125,6 +129,7 @@ func step_round(tile_control: BattleTileControlLib = null) -> void:
 		return
 	if tile_control != null:
 		_tile_control = tile_control
+	_territory_round_index += 1
 	_sync_inject_points_from_tile_control(_tile_control)
 	_dispatch_inject()
 	_dispatch_flow(true)
@@ -477,10 +482,14 @@ func _sync_inject_points_from_tile_control(tile_control: BattleTileControlLib) -
 			var team: int = int(sp.get("team", BattleTileControlLib.OWNER_FRIENDLY))
 			var gx: int = int(sp.get("gx", -1))
 			var gy: int = int(sp.get("gy", -1))
-			_inject_points[count * 3] = gx
-			_inject_points[count * 3 + 1] = gy
-			_inject_points[count * 3 + 2] = 1 if team == BattleTileControlLib.OWNER_FRIENDLY else 2
-			count += 1
+			var team_code: int = 1 if team == BattleTileControlLib.OWNER_FRIENDLY else 2
+			for d: Vector2i in BattleTileControlLib._DIRS_CARDINAL:
+				if count >= MAX_INJECT_POINTS:
+					break
+				_inject_points[count * 3] = gx + d.x
+				_inject_points[count * 3 + 1] = gy + d.y
+				_inject_points[count * 3 + 2] = team_code
+				count += 1
 	if not _inject_points_buf.is_valid():
 		return
 	var byte_data := PackedByteArray()
@@ -517,6 +526,8 @@ func _dispatch_inject() -> void:
 	if _tile_control != null:
 		inject_count = mini(MAX_INJECT_POINTS, _tile_control._placed_spawners.size())
 	pb.encode_s32(32, inject_count)
+	pb.encode_s32(36, _territory_round_index)
+	pb.encode_s32(40, _pressure_inject_interval)
 	_rd.buffer_update(_inject_params_buf, 0, pb.size(), pb)
 
 	var u0: Array[RDUniform] = []

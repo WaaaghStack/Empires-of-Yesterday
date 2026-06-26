@@ -56,6 +56,8 @@ pub struct TerritoryKernel {
     pub use_adaptive_double_pass: bool,
     pub wrap_longitude: bool,
     pub home_inject_enabled: bool,
+    pub spawner_inject_interval_rounds: i32,
+    territory_round_index: u32,
     // World-edit terrain + reachability (Phase 3 — Rust authority during WC play)
     pub(crate) passable_mask: Vec<u8>,
     pub(crate) land_mask: Vec<u8>,
@@ -142,6 +144,8 @@ impl TerritoryKernel {
             use_adaptive_double_pass,
             wrap_longitude,
             home_inject_enabled: true,
+            spawner_inject_interval_rounds: 10,
+            territory_round_index: 0,
             active_indices: Vec::new(),
             active_seen: vec![0; tile_count],
             frontier_changed: true,
@@ -203,12 +207,15 @@ impl TerritoryKernel {
         // or multi-round batches drop all but the last round's overlay deltas.
         self.prev_friendly_tiles = self.friendly_tiles;
         self.prev_hostile_tiles = self.hostile_tiles;
+        self.territory_round_index = self.territory_round_index.saturating_add(1);
 
-        if self.home_inject_enabled {
+        if self.home_inject_enabled && self.should_inject_pressure_sources_this_round() {
             self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
             self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
         }
-        self.inject_placed_spawners();
+        if self.should_inject_pressure_sources_this_round() {
+            self.inject_placed_spawners();
+        }
 
         self.run_gradient_cancel_sync_pass();
         let frontier_delta = (self.friendly_tiles - self.prev_friendly_tiles).unsigned_abs()
@@ -319,25 +326,31 @@ impl TerritoryKernel {
             if sp.gx < 0 || sp.gy < 0 {
                 continue;
             }
-            let idx = sp.gy * self.grid_w + sp.gx;
-            if idx < 0 || idx as usize >= self.tile_count {
-                continue;
-            }
-            let ui = idx as usize;
-            if self.claimable_mask[ui] == 0 {
-                continue;
-            }
             let amount = if sp.team == OWNER_FRIENDLY {
                 self.friendly_spawn_rate
             } else {
                 self.hostile_spawn_rate
             };
-            if sp.team == OWNER_FRIENDLY {
-                self.pressure_friendly[ui] += amount;
-            } else {
-                self.pressure_hostile[ui] += amount;
+            let is_friendly = sp.team == OWNER_FRIENDLY;
+            // Pump adjacent tiles — not the spawner cell (so the tile under it can flip).
+            for (dx, dy) in CARDINAL {
+                let nx = sp.gx + dx;
+                let ny = sp.gy + dy;
+                let ni = self.cell_index(nx, ny);
+                if ni < 0 {
+                    continue;
+                }
+                let ui = ni as usize;
+                if self.claimable_mask[ui] == 0 {
+                    continue;
+                }
+                if is_friendly {
+                    self.pressure_friendly[ui] += amount;
+                } else {
+                    self.pressure_hostile[ui] += amount;
+                }
+                dirty.push(ui);
             }
-            dirty.push(ui);
         }
         for ui in dirty {
             self.mark_active_dirty(ui);
@@ -352,6 +365,11 @@ impl TerritoryKernel {
 
     pub fn set_home_inject_enabled(&mut self, enabled: bool) {
         self.home_inject_enabled = enabled;
+    }
+
+    fn should_inject_pressure_sources_this_round(&self) -> bool {
+        let interval = self.spawner_inject_interval_rounds.max(1) as u32;
+        (self.territory_round_index - 1) % interval == 0
     }
 
     fn gradient_flow_pass_into(&mut self, friendly: bool) {
@@ -704,24 +722,10 @@ impl TerritoryKernel {
         }
     }
 
+    /// HQ capitals only — operational spawners are not force-owned here.
     fn preserve_homes(&mut self) {
         self.claim_home_idx(self.player_home_idx, OWNER_FRIENDLY);
         self.claim_home_idx(self.enemy_home_idx, OWNER_HOSTILE);
-        let spawners: Vec<Spawner> = self.spawners.clone();
-        for sp in spawners {
-            if sp.gx < 0 || sp.gy < 0 {
-                continue;
-            }
-            let owner = if sp.team == OWNER_FRIENDLY {
-                OWNER_FRIENDLY
-            } else {
-                OWNER_HOSTILE
-            };
-            let idx = (sp.gy * self.grid_w + sp.gx) as usize;
-            if idx < self.tile_count {
-                self.set_owner_at(idx, owner);
-            }
-        }
     }
 
     fn claim_home_idx(&mut self, idx: i32, owner: u8) {

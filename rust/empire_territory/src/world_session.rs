@@ -39,8 +39,6 @@ impl Default for WorldSessionConfig {
 pub struct WorldSessionEvents {
     pub activated_sids: Vec<i32>,
     pub activated_spawner_sids: Vec<i32>,
-    pub pending_claim_gx: Vec<i32>,
-    pub pending_claim_gy: Vec<i32>,
     pub destroyed_sids: Vec<i32>,
     pub spawned_barracks_sids: Vec<i32>,
     pub friendly_aurelium_spent: f32,
@@ -73,12 +71,6 @@ fn construction_dps_at(
     }
     let ui = idx as usize;
     let owner = kernel.owner_at_index(ui);
-    if owner == team {
-        return 0.0;
-    }
-    if owner == OWNER_FRIENDLY || owner == OWNER_HOSTILE {
-        return cfg.outpost_enemy_dps;
-    }
     let (own_p, opp_p) = if team == OWNER_FRIENDLY {
         (kernel.pressure_friendly[ui], kernel.pressure_hostile[ui])
     } else {
@@ -87,10 +79,15 @@ fn construction_dps_at(
     let mut ratio = CLAIM_DOMINANCE_RATIO;
     ratio *= kernel.claim_ratio_mult_at(ui);
     if opp_p >= MIN_CLAIM_PRESSURE && opp_p > own_p * ratio {
-        cfg.outpost_enemy_dps
-    } else {
-        0.0
+        return cfg.outpost_enemy_dps;
     }
+    if owner == team {
+        return 0.0;
+    }
+    if owner == OWNER_FRIENDLY || owner == OWNER_HOSTILE {
+        return cfg.outpost_enemy_dps;
+    }
+    0.0
 }
 
 pub fn tick_world_session(
@@ -160,18 +157,8 @@ pub fn tick_world_session(
         events.marker_dirty = true;
         if st.kind == KIND_SPAWNER {
             events.activated_spawner_sids.push(sid);
-            let idx = kernel.cell_index(st.gx, st.gy);
-            if idx >= 0 {
-                let ui = idx as usize;
-                if kernel.owner_at_index(ui) != st.team {
-                    events.pending_claim_gx.push(st.gx);
-                    events.pending_claim_gy.push(st.gy);
-                    events.needs_sim_sync = true;
-                }
-            }
-        } else {
-            events.needs_sim_sync = true;
         }
+        events.needs_sim_sync = true;
     }
 
     let Some(agents) = agents else {

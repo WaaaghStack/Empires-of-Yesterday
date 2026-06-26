@@ -154,6 +154,10 @@ const CAMERA_DEFAULT_DISTANCE := 200.0
 
 ## Slower creep spread than compact RTS maps (HOME_START_POWER / 2000 per step).
 const WORLD_CONQUEST_PRESSURE_SCALE := 1.0 / 2000.0
+## Per-round pressure from home base + operational spawners (1.0 = full output).
+const PRESSURE_SOURCE_OUTPUT_MULT := 0.5
+## Home + spawner pressure inject cadence in sim rounds (@ SIM_DT).
+const PRESSURE_INJECT_INTERVAL_ROUNDS := 10
 
 ## Strategic minerals — Aurelium (yellow), Verdantite (green), Emberstone (orange).
 const RESOURCE_TYPE_COUNT := 3

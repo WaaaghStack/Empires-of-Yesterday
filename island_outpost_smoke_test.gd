@@ -67,7 +67,6 @@ func _run() -> bool:
 		"state": OutpostBuildLib.STATE_ACTIVE,
 	})
 	tc.sync_placed_spawners_from_map(map_data)
-	tc.claim_tile(island.x, island.y, BattleTileControlLib.OWNER_FRIENDLY)
 	if sim.rust_live_ready and sim.rust_field != null:
 		sim.rust_field.sync_claimable_from(tc, map_data, true)
 		sim.rust_field.sync_spawners_from(tc)
@@ -82,19 +81,15 @@ func _run() -> bool:
 	for _i in range(80):
 		sim.advance_dt(1.0 / 14.0, 1)
 
-	var pf: float = 0.0
-	if backend == "rust" and sim.rust_field != null:
-		var pf_arr: PackedFloat32Array = sim.rust_field.get_pressure_friendly()
-		if idx >= 0 and idx < pf_arr.size():
-			pf = pf_arr[idx]
-	else:
-		pf = tc.pressure_friendly[idx]
-	_log(lines, "After 80 steps friendly pressure at island: %s" % pf)
+	var pf_neighbor: float = _max_cardinal_friendly_pressure(
+		map_data, island, backend, sim, tc
+	)
+	_log(lines, "After 80 steps max friendly pressure on island neighbors: %s" % pf_neighbor)
 	var sim_ok: bool = false
 	if tc.claimable_mask[idx] == 0:
 		_log(lines, "FAIL island tile still unclaimable on CPU tile_control")
-	elif pf < 0.001:
-		_log(lines, "FAIL no friendly pressure injected on island (backend=%s)" % backend)
+	elif pf_neighbor < 0.001:
+		_log(lines, "FAIL no friendly pressure injected near island (backend=%s)" % backend)
 	else:
 		_log(lines, "PASS island outpost pressure OK (backend=%s)" % backend)
 		sim_ok = true
@@ -162,6 +157,30 @@ func _write(lines: PackedStringArray) -> void:
 		for line in lines:
 			f.store_line(line)
 		f.close()
+
+
+func _max_cardinal_friendly_pressure(
+	map_data, center: Vector2i, backend: String, sim, tc
+) -> float:
+	var best: float = 0.0
+	var dirs: Array[Vector2i] = [
+		Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)
+	]
+	for d in dirs:
+		var nx: int = center.x + d.x
+		var ny: int = center.y + d.y
+		if not map_data.is_land_cell(nx, ny):
+			continue
+		var nidx: int = map_data.cell_index(nx, ny)
+		var pf: float = 0.0
+		if backend == "rust" and sim.rust_field != null:
+			var pf_arr: PackedFloat32Array = sim.rust_field.get_pressure_friendly()
+			if nidx >= 0 and nidx < pf_arr.size():
+				pf = pf_arr[nidx]
+		else:
+			pf = tc.pressure_friendly[nidx]
+		best = maxf(best, pf)
+	return best
 
 
 func _find_isolated_land(map_data, home: Vector2i) -> Vector2i:

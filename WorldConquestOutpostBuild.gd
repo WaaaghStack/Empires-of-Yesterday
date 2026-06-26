@@ -872,10 +872,6 @@ static func construction_dps_at(
 		owner = int(grid.owner_at_index(idx))
 	elif "owners" in grid:
 		owner = int(grid.owners[idx])
-	if owner == team:
-		return 0.0
-	if owner == BattleTileControlLib.OWNER_FRIENDLY or owner == BattleTileControlLib.OWNER_HOSTILE:
-		return WorldConquestConfigLib.OUTPOST_ENEMY_DPS
 	var own_p: float = 0.0
 	var opp_p: float = 0.0
 	if grid.has_method("pressure_friendly_at"):
@@ -902,6 +898,10 @@ static func construction_dps_at(
 	elif "_claim_ratio_mult" in grid and idx < grid._claim_ratio_mult.size():
 		ratio *= grid._claim_ratio_mult[idx]
 	if opp_p >= BattleTileControlLib.MIN_CLAIM_PRESSURE and opp_p > own_p * ratio:
+		return WorldConquestConfigLib.OUTPOST_ENEMY_DPS
+	if owner == team:
+		return 0.0
+	if owner == BattleTileControlLib.OWNER_FRIENDLY or owner == BattleTileControlLib.OWNER_HOSTILE:
 		return WorldConquestConfigLib.OUTPOST_ENEMY_DPS
 	return 0.0
 

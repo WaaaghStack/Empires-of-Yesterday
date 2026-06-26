@@ -1447,20 +1447,14 @@ func _apply_world_session_events(result: Dictionary) -> void:
 	var timer_result: Dictionary = {
 		"activated_sids": [],
 		"activated_spawner_sids": [],
-		"pending_claims": [],
 		"needs_sim_sync": bool(result.get("needs_sim_sync", false)),
 	}
 	for sid_v in result.get("activated_sids", PackedInt32Array()):
 		timer_result.activated_sids.append(int(sid_v))
 	for sid_v2 in result.get("activated_spawner_sids", PackedInt32Array()):
 		timer_result.activated_spawner_sids.append(int(sid_v2))
-	var gx_arr: PackedInt32Array = result.get("pending_claim_gx", PackedInt32Array())
-	var gy_arr: PackedInt32Array = result.get("pending_claim_gy", PackedInt32Array())
-	for i in range(mini(gx_arr.size(), gy_arr.size())):
-		timer_result.pending_claims.append(Vector2i(gx_arr[i], gy_arr[i]))
 	if (
 		not timer_result.activated_sids.is_empty()
-		or not timer_result.pending_claims.is_empty()
 		or bool(timer_result.needs_sim_sync)
 	):
 		_apply_building_timer_result(timer_result)
@@ -1973,8 +1967,7 @@ func _apply_building_timer_result(result: Dictionary) -> void:
 		for sid_var in activated_sids:
 			_outpost_construction_queue.on_build_completed(int(sid_var))
 	if bool(result.get("needs_sim_sync", false)):
-		var pending_claims: Array = result.get("pending_claims", [])
-		_sync_active_spawners_to_sim(pending_claims)
+		_sync_active_spawners_to_sim()
 
 
 func _emit_builder_cell_arrival(st: Dictionary, seg_from_idx: int) -> void:
@@ -2336,7 +2329,7 @@ func _on_inspect_toggled(on: bool) -> void:
 		tile_probe_label.text = ""
 
 
-func _sync_active_spawners_to_sim(pending_claims: Array = []) -> void:
+func _sync_active_spawners_to_sim() -> void:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return
 	var tc := territory_sim.tile_control
@@ -2347,23 +2340,16 @@ func _sync_active_spawners_to_sim(pending_claims: Array = []) -> void:
 	if live_claimable > 0:
 		territory_sim.claimable_tiles = live_claimable
 		_claimable_tiles = live_claimable
-	for cell in pending_claims:
-		if cell is Vector2i:
-			territory_sim.claim_tile(cell.x, cell.y, BattleTileControlLib.OWNER_FRIENDLY)
-	var had_new_claims = pending_claims.size() > 0
 	if territory_sim.rust_live_ready and territory_sim.rust_field != null:
-		if had_new_claims and not territory_sim.grid_authority_active():
+		if not territory_sim.grid_authority_active():
 			territory_sim.rust_field.sync_claimable_from(tc, battle_data, true)
-		territory_sim.rust_field.sync_spawners_from(tc)  # always needed for the new active pump
+		territory_sim.rust_field.sync_spawners_from(tc)
 	if (
 		not territory_sim.world_dataset_live_active()
 		and territory_sim.use_gpu_for_live()
 		and territory_sim.gpu_field != null
 	):
-		if had_new_claims:
-			territory_sim.gpu_field.refresh_claimable_from(battle_data, tc)
-	# No forced owner visual here when no new claims (outpost in already controlled land).
-	# The spawners list is synced so the new pressure source works. Marker visual will update the outpost color.
+		territory_sim.gpu_field.refresh_claimable_from(battle_data, tc)
 
 
 func _sync_counts() -> void:
