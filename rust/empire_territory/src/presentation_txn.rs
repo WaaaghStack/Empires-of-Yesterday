@@ -117,6 +117,7 @@ impl PresentationTxn {
         for ev in &events.path_completions {
             self.completed_sids.push(ev.sid);
             self.marker_dirty_sids.push(ev.sid);
+            // Completions may need a rare full snap on place/activate — not every road cell.
             self.structures_dirty = true;
         }
         for &sid in &events.completed_corridor_sids {
@@ -124,9 +125,9 @@ impl PresentationTxn {
             self.marker_dirty_sids.push(sid);
             self.structures_dirty = true;
         }
-        if events.visual_dirty {
-            self.structures_dirty = true;
-        }
+        // Do NOT set structures_dirty on visual_dirty: every grown road cell was forcing
+        // Godot toward full structure snapshots and crushed mid-game FPS (~40 instead of ~60).
+        let _ = events.visual_dirty;
     }
 
     /// After logistics step, fill path_built patches from the authoritative store.
@@ -219,6 +220,9 @@ fn vec_to_packed_f32(v: &[f32]) -> PackedFloat32Array {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logistics::{CellArrivalEvent, LogisticsStepEvents, PathCompletionEvent};
+    use crate::structures::{StructureRecord, KIND_SPAWNER, STATE_BUILDING, STATE_CONNECTING};
+    use crate::sim::OWNER_FRIENDLY;
 
     #[test]
     fn txn_path_built_is_not_empty_after_push() {
@@ -231,5 +235,86 @@ mod tests {
         let taken = txn.take();
         assert!(txn.is_empty());
         assert_eq!(taken.path_built_sids, vec![3]);
+    }
+
+    #[test]
+    fn merge_logistics_emits_deltas_not_full_snap() {
+        let mut txn = PresentationTxn::default();
+        let events = LogisticsStepEvents {
+            visual_dirty: true,
+            new_built_cells: vec![10, 11],
+            cell_arrivals: vec![CellArrivalEvent {
+                sid: 1,
+                seg_from_idx: 0,
+                kind: KIND_SPAWNER,
+            }],
+            path_completions: vec![PathCompletionEvent {
+                sid: 1,
+                gx: 3,
+                gy: 0,
+                team: OWNER_FRIENDLY,
+                is_corridor_link: false,
+                kind: KIND_SPAWNER,
+            }],
+            completed_corridor_sids: vec![],
+            friendly_output_mult: 1.0,
+            hostile_output_mult: 1.0,
+            road_network_version: 2,
+            reconcile_cells_examined: 0,
+        };
+        txn.merge_logistics(&events);
+        assert_eq!(txn.new_road_cells, vec![10, 11]);
+        assert!(txn.completed_sids.contains(&1));
+        assert!(txn.structures_dirty);
+        // take() preserves delta shape without Godot engine (to_dict needs runtime).
+        let taken = txn.take();
+        assert!(txn.is_empty());
+        assert_eq!(taken.new_road_cells, vec![10, 11]);
+    }
+
+    #[test]
+    fn fill_path_built_from_arrivals_reads_store() {
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 7,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_CONNECTING,
+            gx: 1,
+            gy: 0,
+            path_keys: vec![0, 1],
+            path_built: 2.0,
+            path_len: 2,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        let events = LogisticsStepEvents {
+            cell_arrivals: vec![CellArrivalEvent {
+                sid: 7,
+                seg_from_idx: 0,
+                kind: KIND_SPAWNER,
+            }],
+            path_completions: vec![PathCompletionEvent {
+                sid: 7,
+                gx: 1,
+                gy: 0,
+                team: OWNER_FRIENDLY,
+                is_corridor_link: false,
+                kind: KIND_SPAWNER,
+            }],
+            ..Default::default()
+        };
+        // Simulate completion state already applied by logistics.
+        if let Some(st) = store.structures.get_mut(&7) {
+            st.state = STATE_BUILDING;
+            st.path_built = 2.0;
+        }
+        let mut txn = PresentationTxn::default();
+        txn.fill_path_built_from_arrivals(&store, &events);
+        assert!(txn.path_built_sids.contains(&7));
+        assert!(txn.state_sids.contains(&7));
     }
 }

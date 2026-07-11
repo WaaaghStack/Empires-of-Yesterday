@@ -1,6 +1,18 @@
 class_name WorldConquestResources
 extends RefCounted
 
+## Resource site simulation (link + haul visuals) for World Conquest deposits.
+##
+## A8 — wallet boundary (WORLD_DATASET_RESOURCE_WALLET):
+## - When wallet authority is ON, Rust owns authoritative balances.
+## - `tick()` returns *yield deltas* in result.friendly / result.hostile for presentation
+##   and for `BattleTerritorySim.apply_resource_tick_delta` — NOT dual balance writes.
+## - Godot must NOT treat those arrays as a second wallet: Screen applies deltas via Rust
+##   (`apply_resource_tick_delta` / `sync_resource_balances` / `pull_resource_balances`)
+##   and mirrors the pulled balances into HUD arrays.
+## - When wallet authority is OFF (QA/CPU harness only), callers may add deltas to local wallets.
+## - Site phases / haul pulse visuals remain GDScript presentation state (not balance authority).
+
 const BattleMapDataLib := preload("res://BattleMapData.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
@@ -37,6 +49,14 @@ static func reset() -> void:
 	_hubs_cache_version = -1
 
 
+## A8: true when production live wallet contract is on (balances live in Rust).
+static func wallet_authority_active() -> bool:
+	return (
+		WorldConquestConfigLib.WORLD_DATASET_RESOURCE_WALLET
+		and WorldConquestConfigLib.world_dataset_live()
+	)
+
+
 static func _grid_owner_at(grid, idx: int) -> int:
 	if grid == null or idx < 0:
 		return BattleTileControlLib.OWNER_NEUTRAL
@@ -57,6 +77,9 @@ static func _grid_cell_count(grid) -> int:
 	return 0
 
 
+## Simulate deposit link/haul for visuals + yield deltas.
+## result.friendly / result.hostile are per-frame yield *deltas* (not balances).
+## Under wallet authority, push deltas via Rust only — never dual-write local wallets (A8).
 static func tick(
 	map_data,
 	grid,
@@ -73,6 +96,8 @@ static func tick(
 		"hostile": [0.0, 0.0, 0.0],
 		"pulses": [],
 		"links_dirty": false,
+		## A8: when true, caller must apply friendly/hostile via Rust wallet APIs only.
+		"wallet_authority": wallet_authority_active(),
 	}
 	if map_data == null or grid == null or delta <= 0.0:
 		return result

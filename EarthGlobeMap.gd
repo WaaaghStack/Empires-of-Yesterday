@@ -6,6 +6,7 @@ const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
+const EarthGlobeRoadsLib := preload("res://EarthGlobeRoads.gd")
 const WorldConquestOutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const WorldConquestResourcesLib := preload("res://WorldConquestResources.gd")
 const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
@@ -18,6 +19,16 @@ const ROAD_SURFACE_LIFT := 2.75
 const ROAD_RENDER_PRIORITY := 8
 const RESOURCE_RENDER_PRIORITY := 6
 const MARKER_RENDER_PRIORITY := 7
+const UNIT_RENDER_PRIORITY := 10
+## Billboard pixel art (res://assets/units). pixel_size ≈ world meters per texture pixel.
+const SOLDIER_SPRITE_PIXEL_SIZE := 0.0055
+const BOMBER_SPRITE_PIXEL_SIZE := 0.0065
+const SOLDIER_SURFACE_LIFT := 1.85
+const TEX_SOLDIER_FRIENDLY: Texture2D = preload("res://assets/units/soldier_friendly.png")
+const TEX_SOLDIER_HOSTILE: Texture2D = preload("res://assets/units/soldier_hostile.png")
+const TEX_BOMBER_FRIENDLY: Texture2D = preload("res://assets/units/bomber_friendly.png")
+const TEX_BOMBER_HOSTILE: Texture2D = preload("res://assets/units/bomber_hostile.png")
+## B3/I4: prealloc MultiMesh capacity (EarthGlobeRoads.MIN_CAPACITY). Grow always reseeds.
 
 @onready var camera: Camera3D = $Camera3D
 
@@ -46,12 +57,10 @@ var _pulse_sphere_mesh: SphereMesh
 var _pulse_materials: Array[StandardMaterial3D] = []
 var _marker_pool: Array[MeshInstance3D] = []
 var _marker_pool_used: int = 0
-var _soldier_pool: Array[MeshInstance3D] = []
+var _soldier_pool: Array[Sprite3D] = []
 var _soldier_pool_used: int = 0
-var _soldier_sphere_mesh: SphereMesh
-var _bomber_pool: Array[MeshInstance3D] = []
+var _bomber_pool: Array[Sprite3D] = []
 var _bomber_pool_used: int = 0
-var _bomber_mesh: BoxMesh
 var _bomb_drop_mesh: SphereMesh
 var _builder_pool: Array[MeshInstance3D] = []
 var _builder_pool_used: int = 0
@@ -60,9 +69,11 @@ var _marker_box_mesh: BoxMesh
 var _road_land_mm: MultiMeshInstance3D
 var _road_bridge_mm: MultiMeshInstance3D
 ## Live instance counts (MultiMesh.instance_count is capacity; visible_instance_count is drawn).
+## Authoritative transforms live in _road_cache_* / _network_road_* (rebuild source on grow).
 var _road_mm_land_used: int = 0
 var _road_mm_bridge_used: int = 0
-const _ROAD_MM_MIN_CAPACITY := 256
+## Keep in sync with EarthGlobeRoads.MIN_CAPACITY (prealloc; grow always reseeds).
+const _ROAD_MM_MIN_CAPACITY := 4096
 var _road_cache_land: Dictionary = {}
 var _road_cache_bridge: Dictionary = {}
 var _road_cached_seg_total: Dictionary = {}
@@ -76,6 +87,8 @@ var _preview_pins: Node3D
 var _preview_material: StandardMaterial3D
 var _preview_bridge_material: StandardMaterial3D
 var _marker_pulse: float = 0.0
+## B8/H5: 1.0 = config mesh density; lower = fewer globe/fluid quads (rebuild via setup).
+var _mesh_detail_scale: float = 1.0
 var _preview_path_sig: int = 0
 var _preview_landing: Vector2i = Vector2i(-99999, -99999)
 var _preview_click: Vector2i = Vector2i(-99999, -99999)
@@ -130,9 +143,11 @@ func _build_scene() -> void:
 	for c in get_children():
 		if c != camera:
 			c.queue_free()
+	# B8/H5: mesh density from config knobs (detail scale clamps GPU cost under load).
+	# GLOBE_RENDER_SCALE is applied by WorldConquestScreen on SubViewport size, not here.
 	_globe_mi = MeshInstance3D.new()
 	_globe_mi.name = "Globe"
-	_globe_mi.mesh = EarthGlobeMeshLib.build_globe(battle_data, _world_map_id)
+	_globe_mi.mesh = _build_globe_mesh_for_detail(false)
 	_globe_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var tmat := StandardMaterial3D.new()
 	tmat.vertex_color_use_as_albedo = true
@@ -142,7 +157,7 @@ func _build_scene() -> void:
 	add_child(_globe_mi)
 	_fluid_mi = MeshInstance3D.new()
 	_fluid_mi.name = "Fluid"
-	_fluid_mi.mesh = EarthGlobeMeshLib.build_fluid_globe(battle_data, _world_map_id)
+	_fluid_mi.mesh = _build_globe_mesh_for_detail(true)
 	_fluid_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_fluid_mi.sorting_offset = 0.0
 	var w: int = battle_data.grid_width
@@ -169,28 +184,52 @@ func _build_scene() -> void:
 	_shared_road_box.size = Vector3.ONE
 	_shared_link_box = BoxMesh.new()
 	_shared_link_box.size = Vector3.ONE
+	_marker_box_mesh = BoxMesh.new()
+	_marker_box_mesh.size = Vector3.ONE
+	_pulse_sphere_mesh = SphereMesh.new()
+	_pulse_sphere_mesh.radius = 0.38
+	_pulse_sphere_mesh.height = 0.76
+	# Road materials before MultiMesh setup (material_override on MMI).
+	_road_material = StandardMaterial3D.new()
+	_road_material.albedo_color = ROAD_COLOR
+	_road_material.roughness = 0.95
+	_road_material.metallic = 0.0
+	_road_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_road_material.no_depth_test = true
+	_road_material.render_priority = ROAD_RENDER_PRIORITY
+	_bridge_material = StandardMaterial3D.new()
+	_bridge_material.albedo_color = BRIDGE_COLOR
+	_bridge_material.roughness = 0.85
+	_bridge_material.metallic = 0.05
+	_bridge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_bridge_material.no_depth_test = true
+	_bridge_material.render_priority = ROAD_RENDER_PRIORITY
 	_markers = Node3D.new()
 	_markers.name = "Markers"
 	add_child(_markers)
-	# Pre-warm marker pool (after _markers node exists) to avoid creation hitch on state changes like outpost build complete.
+	_marker_pool.clear()
+	_marker_pool_used = 0
+	_marker_sid_slot.clear()
+	# Pre-warm marker pool (after mesh exists) to avoid creation hitch on state changes.
 	for _i in range(128):
 		var node := MeshInstance3D.new()
 		node.mesh = _marker_box_mesh
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		node.visible = false
+		node.material_override = StandardMaterial3D.new()
+		(node.material_override as StandardMaterial3D).emission_enabled = true
 		_markers.add_child(node)
 		_marker_pool.append(node)
 	_soldiers = Node3D.new()
 	_soldiers.name = "Soldiers"
 	add_child(_soldiers)
-	_soldier_sphere_mesh = SphereMesh.new()
-	_soldier_sphere_mesh.radius = 0.35
-	_soldier_sphere_mesh.height = 0.7
+	_soldier_pool.clear()
+	_soldier_pool_used = 0
 	_bombers = Node3D.new()
 	_bombers.name = "Bombers"
 	add_child(_bombers)
-	_bomber_mesh = BoxMesh.new()
-	_bomber_mesh.size = Vector3(0.9, 0.28, 1.35)
+	_bomber_pool.clear()
+	_bomber_pool_used = 0
 	_bomb_drop_mesh = SphereMesh.new()
 	_bomb_drop_mesh.radius = 0.22
 	_bomb_drop_mesh.height = 0.44
@@ -232,20 +271,6 @@ func _build_scene() -> void:
 	_resource_pulses = Node3D.new()
 	_resource_pulses.name = "ResourcePulses"
 	add_child(_resource_pulses)
-	_road_material = StandardMaterial3D.new()
-	_road_material.albedo_color = ROAD_COLOR
-	_road_material.roughness = 0.95
-	_road_material.metallic = 0.0
-	_road_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_road_material.no_depth_test = true
-	_road_material.render_priority = ROAD_RENDER_PRIORITY
-	_bridge_material = StandardMaterial3D.new()
-	_bridge_material.albedo_color = BRIDGE_COLOR
-	_bridge_material.roughness = 0.85
-	_bridge_material.metallic = 0.05
-	_bridge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_bridge_material.no_depth_test = true
-	_bridge_material.render_priority = ROAD_RENDER_PRIORITY
 	_resource_link_material = StandardMaterial3D.new()
 	_resource_link_material.albedo_color = Color(0.72, 0.68, 0.38, 0.85)
 	_resource_link_material.emission_enabled = true
@@ -288,13 +313,6 @@ func _build_scene() -> void:
 	_resource_link_seg_count.clear()
 	_resource_link_nodes.clear()
 	_pulse_pool.clear()
-	_marker_pool.clear()
-	_marker_pool_used = 0
-	_marker_box_mesh = BoxMesh.new()
-	_marker_box_mesh.size = Vector3.ONE
-	_pulse_sphere_mesh = SphereMesh.new()
-	_pulse_sphere_mesh.radius = 0.38
-	_pulse_sphere_mesh.height = 0.76
 	_pulse_materials.clear()
 	for i in WorldConquestConfigLib.RESOURCE_TYPE_COUNT:
 		var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[i]
@@ -313,6 +331,60 @@ func _build_scene() -> void:
 	camera.fov = 50.0
 
 
+## B8/H5: effective mesh dimensions after detail scale (min 36×18 quads).
+func effective_globe_mesh_dims() -> Vector2i:
+	var s: float = clampf(_mesh_detail_scale, 0.35, 1.0)
+	return Vector2i(
+		maxi(int(round(float(WorldConquestConfigLib.GLOBE_MESH_W) * s)), 36),
+		maxi(int(round(float(WorldConquestConfigLib.GLOBE_MESH_H) * s)), 18),
+	)
+
+
+func effective_fluid_mesh_dims() -> Vector2i:
+	var s: float = clampf(_mesh_detail_scale, 0.35, 1.0)
+	return Vector2i(
+		maxi(int(round(float(WorldConquestConfigLib.FLUID_MESH_W) * s)), 36),
+		maxi(int(round(float(WorldConquestConfigLib.FLUID_MESH_H) * s)), 18),
+	)
+
+
+## B8/H5: quality knobs (config + runtime detail). Screen applies GLOBE_RENDER_SCALE to SubViewport.
+func get_globe_render_knobs() -> Dictionary:
+	var g: Vector2i = effective_globe_mesh_dims()
+	var f: Vector2i = effective_fluid_mesh_dims()
+	return {
+		"globe_mesh_w": g.x,
+		"globe_mesh_h": g.y,
+		"fluid_mesh_w": f.x,
+		"fluid_mesh_h": f.y,
+		"mesh_detail_scale": clampf(_mesh_detail_scale, 0.35, 1.0),
+		"globe_render_scale": WorldConquestConfigLib.GLOBE_RENDER_SCALE,
+		"road_mm_min_capacity": _ROAD_MM_MIN_CAPACITY,
+		"overlay_owners_only": WorldConquestConfigLib.OVERLAY_OWNERS_ONLY,
+	}
+
+
+## Optional lower-detail path. Call before setup() or re-setup to rebuild meshes.
+func set_mesh_detail_scale(scale: float) -> void:
+	_mesh_detail_scale = clampf(scale, 0.35, 1.0)
+
+
+func _build_globe_mesh_for_detail(fluid: bool) -> ArrayMesh:
+	# Full detail uses public builders (config GLOBE_MESH_*/FLUID_MESH_*).
+	# Lower detail scales those knobs and calls the mesh builder with explicit dims (B8/H5).
+	var s: float = clampf(_mesh_detail_scale, 0.35, 1.0)
+	if s >= 0.999:
+		if fluid:
+			return EarthGlobeMeshLib.build_fluid_globe(battle_data, _world_map_id)
+		return EarthGlobeMeshLib.build_globe(battle_data, _world_map_id)
+	var dims: Vector2i = effective_fluid_mesh_dims() if fluid else effective_globe_mesh_dims()
+	return EarthGlobeMeshLib._build_globe_mesh(
+		battle_data, fluid, dims.x, dims.y, _world_map_id
+	)
+
+
+## H4: Slow full-grid fluid bake — live WC prefers ownership R8/delta from Screen drain only.
+## Do not call every sim step under WorldDataset live; use apply_ownership_display_* instead.
 func apply_fluid_from_pressures(
 	pressure_friendly: PackedFloat32Array,
 	pressure_hostile: PackedFloat32Array,
@@ -622,11 +694,10 @@ func _commit_owner_gpu_textures(allow_same_frame_as_patch: bool = false) -> void
 
 
 func apply_ownership_overlay(owners: PackedByteArray) -> void:
-	# Fallback / CPU-backend path. 
-	# In normal Rust live play we avoid this expensive loop entirely:
-	# - Regular outpost connect/build → only cheap per-changed delta (apply_ownership_overlay_delta).
-	# - Rare full cases (load, real bridge land opens) → callers now use apply_ownership_display_bytes()
-	#   which gets pre-baked bytes from Rust (get_owner_display_r8) so zero 65k GDScript work.
+	# H4 / I2 / I3 — SLOW full-grid GDScript owner→R8 map (65k loop). Forbidden on live hot path.
+	# Live WC Screen apply path must use:
+	#   apply_ownership_display_bytes (pre-baked R8) or apply_ownership_display_delta (indices+R8).
+	# Fallback only: CPU backend, load recovery, non-live tools. Prefer R8 from Rust authority.
 	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null:
 		return
 	var w: int = battle_data.grid_width
@@ -696,7 +767,8 @@ func apply_ownership_display_delta(
 func apply_ownership_overlay_delta(
 	indices: PackedInt32Array, values: PackedByteArray
 ) -> void:
-	## CPU-backend / legacy: values are owner enum bytes; mapped to display R8 here.
+	## H4: CPU-backend / legacy delta — owner enum bytes mapped to display R8 here.
+	## Live WC prefers apply_ownership_display_delta (pre-mapped R8 from PresentationTxn).
 	if not _gpu_ownership_ready or battle_data == null or _owner_img_gpu == null:
 		return
 	var w: int = battle_data.grid_width
@@ -989,7 +1061,10 @@ func refresh_markers(
 				scale_f = lerpf(0.78, 1.0, prog)
 				alpha = lerpf(0.65, 1.0, prog)
 			_:
-				if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+				# Completed land bridge (ACTIVE corridor still in placed_structures briefly).
+				if kind == WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
+					col = Color(0.28, 0.88, 0.78) if team == 1 else Color(0.95, 0.55, 0.42)
+				elif kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 					col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
 				elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
 					col = Color(0.52, 0.68, 0.98) if team == 1 else Color(0.95, 0.48, 0.38)
@@ -1002,6 +1077,21 @@ func refresh_markers(
 		if sid >= 0:
 			_marker_sid_slot[sid] = _marker_pool_used
 		_place_pooled_marker(Vector2i(gx, gy), col, scale_f, alpha)
+	# Completed land bridges live in bridge_corridors (not placed_structures) — solid pin at landing.
+	if battle_data != null:
+		for corridor: Dictionary in battle_data.bridge_corridors:
+			var cgx: int = int(corridor.get("gx", -1))
+			var cgy: int = int(corridor.get("gy", -1))
+			if cgx < 0:
+				continue
+			var cteam: int = int(corridor.get("team", 1))
+			var ccol: Color = (
+				Color(0.28, 0.88, 0.78) if cteam == 1 else Color(0.95, 0.55, 0.42)
+			)
+			var csid: int = int(corridor.get("id", -1))
+			if csid >= 0:
+				_marker_sid_slot[csid] = _marker_pool_used
+			_place_pooled_marker(Vector2i(cgx, cgy), ccol, 1.05, 1.0)
 	for i in range(_marker_pool_used, _marker_pool.size()):
 		_marker_pool[i].visible = false
 
@@ -1012,17 +1102,19 @@ func refresh_connecting_markers(structures: Array, home_player: Vector2i, home_e
 	if _marker_sid_slot.is_empty():
 		refresh_markers(structures, home_player, home_enemy)
 		return
-	# Only CONNECTING (road still growing) blinks. BUILDING uses solid progress colors —
-	# road is already complete in the structure table.
+	# H1/H3/I10: Only CONNECTING (road still growing) blinks.
+	# BUILDING / ACTIVE / path-complete must not pulse — authority state is source of truth.
+	# Path-complete / state txn paths call refresh_markers([sid]) to freeze solid colors.
 	var pulse_sids: Array[int] = []
 	for st: Dictionary in structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
 			continue
 		var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
-		if state == WorldConquestOutpostBuildLib.STATE_CONNECTING:
-			var sid: int = int(st.get("id", -1))
-			if sid >= 0:
-				pulse_sids.append(sid)
+		if state != WorldConquestOutpostBuildLib.STATE_CONNECTING:
+			continue
+		var sid: int = int(st.get("id", -1))
+		if sid >= 0:
+			pulse_sids.append(sid)
 	if pulse_sids.is_empty():
 		return
 	_refresh_markers_for_sids(structures, home_player, home_enemy, pulse_sids)
@@ -1067,6 +1159,7 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 			0.0,
 			1.0,
 		)
+	# I10: pulse scale/alpha only for CONNECTING. BUILDING/ACTIVE use solid colors.
 	match state:
 		WorldConquestOutpostBuildLib.STATE_CONNECTING:
 			if kind == WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
@@ -1090,7 +1183,9 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 			scale_f = lerpf(0.78, 1.0, prog)
 			alpha = lerpf(0.65, 1.0, prog)
 		_:
-			if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+			if kind == WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
+				col = Color(0.28, 0.88, 0.78) if team == 1 else Color(0.95, 0.55, 0.42)
+			elif kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 				col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
 			elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
 				col = Color(0.52, 0.68, 0.98) if team == 1 else Color(0.95, 0.48, 0.38)
@@ -1192,32 +1287,49 @@ func sync_soldiers(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32
 		var grid := Vector2i(gx[i], gy[i])
 		if grid.x < 0:
 			continue
-		var team: int = int(teams[i])
-		var col: Color = Color(0.35, 0.82, 1.0) if team == 1 else Color(1.0, 0.42, 0.32)
-		_place_pooled_soldier(grid, col)
+		_place_pooled_soldier(grid, int(teams[i]))
 	for j in range(_soldier_pool_used, _soldier_pool.size()):
 		_soldier_pool[j].visible = false
 
 
-func _place_pooled_soldier(grid: Vector2i, color: Color) -> void:
+func _unit_sprite_texture(is_bomber: bool, team: int) -> Texture2D:
+	var friendly: bool = team == BattleTileControlLib.OWNER_FRIENDLY
+	if is_bomber:
+		return TEX_BOMBER_FRIENDLY if friendly else TEX_BOMBER_HOSTILE
+	return TEX_SOLDIER_FRIENDLY if friendly else TEX_SOLDIER_HOSTILE
+
+
+func _make_unit_billboard(is_bomber: bool) -> Sprite3D:
+	var node := Sprite3D.new()
+	node.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	node.shaded = false
+	node.double_sided = true
+	node.transparent = true
+	node.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+	node.alpha_scissor_threshold = 0.15
+	node.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	node.pixel_size = BOMBER_SPRITE_PIXEL_SIZE if is_bomber else SOLDIER_SPRITE_PIXEL_SIZE
+	node.render_priority = UNIT_RENDER_PRIORITY
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.centered = true
+	node.no_depth_test = false
+	node.visible = false
+	return node
+
+
+func _place_pooled_soldier(grid: Vector2i, team: int) -> void:
 	if _soldiers == null or battle_data == null or grid.x < 0:
 		return
 	while _soldier_pool.size() <= _soldier_pool_used:
-		var node := MeshInstance3D.new()
-		node.mesh = _soldier_sphere_mesh
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		node.material_override = StandardMaterial3D.new()
-		(node.material_override as StandardMaterial3D).emission_enabled = true
+		var node: Sprite3D = _make_unit_billboard(false)
 		_soldiers.add_child(node)
 		_soldier_pool.append(node)
-	var sphere: MeshInstance3D = _soldier_pool[_soldier_pool_used]
+	var sprite: Sprite3D = _soldier_pool[_soldier_pool_used]
 	_soldier_pool_used += 1
-	sphere.visible = true
-	sphere.position = _grid_surface_pos(grid, 1.85)
-	var mat := sphere.material_override as StandardMaterial3D
-	mat.albedo_color = color
-	mat.emission = color * 0.55
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sprite.visible = true
+	sprite.texture = _unit_sprite_texture(false, team)
+	sprite.position = _grid_surface_pos(grid, SOLDIER_SURFACE_LIFT)
+	sprite.scale = Vector3.ONE
 
 
 func sync_bombers(
@@ -1234,10 +1346,8 @@ func sync_bombers(
 		var grid := Vector2i(gx[i], gy[i])
 		if grid.x < 0:
 			continue
-		var team: int = int(teams[i])
-		var col: Color = Color(0.45, 0.72, 1.0) if team == 1 else Color(1.0, 0.42, 0.32)
 		var scope: int = int(search_scope[i]) if i < search_scope.size() else 0
-		_place_pooled_bomber(grid, col, scope)
+		_place_pooled_bomber(grid, int(teams[i]), scope)
 	for j in range(_bomber_pool_used, _bomber_pool.size()):
 		_bomber_pool[j].visible = false
 
@@ -1257,27 +1367,20 @@ func _bomber_scope_visual_scale(scope: int) -> float:
 	return lerpf(1.0, 1.85, t)
 
 
-func _place_pooled_bomber(grid: Vector2i, color: Color, search_scope: int = 0) -> void:
+func _place_pooled_bomber(grid: Vector2i, team: int, search_scope: int = 0) -> void:
 	if _bombers == null or battle_data == null or grid.x < 0:
 		return
 	while _bomber_pool.size() <= _bomber_pool_used:
-		var node := MeshInstance3D.new()
-		node.mesh = _bomber_mesh
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		node.material_override = StandardMaterial3D.new()
-		(node.material_override as StandardMaterial3D).emission_enabled = true
+		var node: Sprite3D = _make_unit_billboard(true)
 		_bombers.add_child(node)
 		_bomber_pool.append(node)
-	var craft: MeshInstance3D = _bomber_pool[_bomber_pool_used]
+	var sprite: Sprite3D = _bomber_pool[_bomber_pool_used]
 	_bomber_pool_used += 1
-	craft.visible = true
+	sprite.visible = true
+	sprite.texture = _unit_sprite_texture(true, team)
 	var scope_scale: float = _bomber_scope_visual_scale(search_scope)
-	craft.scale = Vector3(scope_scale, scope_scale, scope_scale)
-	craft.position = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
-	var mat := craft.material_override as StandardMaterial3D
-	mat.albedo_color = color
-	mat.emission = color * 0.7
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sprite.scale = Vector3(scope_scale, scope_scale, scope_scale)
+	sprite.position = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
 
 
 func play_bomb_drops(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:
@@ -1337,6 +1440,10 @@ func _spawn_bomb_impact_fx(pos: Vector3, col: Color) -> void:
 	tween.tween_callback(flash.queue_free)
 
 
+## B4: `changed_sids` non-empty → only those sids get path-cache growth/append.
+## Full MultiMesh rewrite from caches happens only on shrink/remove/capacity-grow,
+## never by re-walking every structure when an incremental sid list is provided.
+## Empty `changed_sids` = full structure pass (load/reset). Prefer always pass dirty sids live.
 func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool = false) -> void:
 	if _roads == null or battle_data == null:
 		return
@@ -1360,7 +1467,7 @@ func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool
 			continue
 		live_ids[sid] = true
 		if not incremental or changed_set.has(sid):
-			# Growth is O(delta) append; shrink/material reclass returns need_rebuild.
+			# Growth is O(delta) append; shrink returns need_rebuild (B4).
 			if _sync_outpost_road(st, sid, false):
 				need_full_rebuild = true
 	for corridor: Dictionary in battle_data.bridge_corridors:
@@ -1373,6 +1480,8 @@ func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool
 			pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
 			if _sync_outpost_road(pseudo, sid, false):
 				need_full_rebuild = true
+	# Orphan cleanup (O(cached sids), not O(path cells)). Remove/reset triggers MultiMesh
+	# reseed from remaining caches — not a per-sid path rewalk of live growth sids (B4).
 	for sid in _road_cached_seg_total.keys():
 		if not live_ids.has(sid):
 			if _clear_road(sid, false):
@@ -1380,6 +1489,8 @@ func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool
 	if need_full_rebuild:
 		_rebuild_road_multimesh_from_caches()
 
+
+#region Road MultiMesh (B3/I4/H2 — helpers in EarthGlobeRoads.gd)
 
 func _setup_road_multimeshes() -> void:
 	if _roads == null or _shared_road_box == null:
@@ -1393,7 +1504,7 @@ func _setup_road_multimeshes() -> void:
 	var land_mm := MultiMesh.new()
 	land_mm.transform_format = MultiMesh.TRANSFORM_3D
 	land_mm.mesh = _shared_road_box
-	# Preallocate capacity — raising instance_count clears buffers in Godot 4.
+	# Preallocate large capacity once — raising instance_count mid-run wipes buffers (I4).
 	land_mm.instance_count = _ROAD_MM_MIN_CAPACITY
 	land_mm.visible_instance_count = 0
 	_road_land_mm.multimesh = land_mm
@@ -1418,6 +1529,7 @@ func _setup_road_multimeshes() -> void:
 
 
 func _collect_road_multimesh_xforms() -> Array:
+	## Authoritative transform lists for full reseed after capacity grow / remove.
 	var land_xforms: Array[Transform3D] = []
 	for xform_var in _network_road_land:
 		land_xforms.append(xform_var)
@@ -1433,7 +1545,7 @@ func _collect_road_multimesh_xforms() -> Array:
 	return [land_xforms, bridge_xforms]
 
 
-## Full rewrite from authoritative caches (remove/reset, or capacity growth).
+## Full rewrite from authoritative caches (remove/reset, or capacity growth — H2/I4).
 func _rebuild_road_multimesh_from_caches() -> void:
 	if _road_land_mm == null or _road_bridge_mm == null:
 		return
@@ -1452,7 +1564,7 @@ func _reset_road_multimesh_instances() -> void:
 
 
 ## Append new segments. Does NOT raise instance_count (that would wipe prior instances).
-## If capacity is exceeded, rebuilds from caches with a larger buffer.
+## If capacity is exceeded, rebuilds from caches with a larger buffer (grow+reseed).
 func _append_road_multimesh_transforms(
 	land_new: Array[Transform3D], bridge_new: Array[Transform3D]
 ) -> void:
@@ -1518,15 +1630,11 @@ func apply_network_road_cells(cells: PackedInt32Array) -> void:
 func _write_multimesh_transforms(mm_node: MultiMeshInstance3D, xforms: Array, is_land: bool) -> void:
 	if mm_node == null or mm_node.multimesh == null:
 		return
-	var mm: MultiMesh = mm_node.multimesh
-	var n: int = xforms.size()
-	var cap: int = maxi(n, _ROAD_MM_MIN_CAPACITY)
-	# Only touch instance_count when capacity must change (clears buffer in Godot 4).
-	if mm.instance_count < cap:
-		mm.instance_count = maxi(cap * 2, _ROAD_MM_MIN_CAPACITY) if n > 0 else _ROAD_MM_MIN_CAPACITY
-	for i in range(n):
-		mm.set_instance_transform(i, xforms[i] as Transform3D)
-	mm.visible_instance_count = n
+	# B3/I4/H2: EarthGlobeRoads.write_all_transforms grows capacity then reseeds ALL
+	# transforms from the provided list — never leave wiped slots after instance_count change.
+	var n: int = EarthGlobeRoadsLib.write_all_transforms(
+		mm_node.multimesh, xforms, _ROAD_MM_MIN_CAPACITY
+	)
 	if is_land:
 		_road_mm_land_used = n
 	else:
@@ -1539,18 +1647,15 @@ func _try_append_multimesh(mm_node: MultiMeshInstance3D, xforms: Array, is_land:
 		return true
 	if xforms.is_empty():
 		return true
-	var mm: MultiMesh = mm_node.multimesh
 	var used: int = _road_mm_land_used if is_land else _road_mm_bridge_used
-	var need: int = used + xforms.size()
-	if need > mm.instance_count:
+	# Never raise instance_count here — append-only; -1 means need full reseed grow path.
+	var new_used: int = EarthGlobeRoadsLib.try_append_transforms(mm_node.multimesh, used, xforms)
+	if new_used < 0:
 		return false
-	for i in range(xforms.size()):
-		mm.set_instance_transform(used + i, xforms[i] as Transform3D)
 	if is_land:
-		_road_mm_land_used = need
+		_road_mm_land_used = new_used
 	else:
-		_road_mm_bridge_used = need
-	mm.visible_instance_count = need
+		_road_mm_bridge_used = new_used
 	return true
 
 
@@ -1573,14 +1678,22 @@ func road_multimesh_used_counts() -> Dictionary:
 			if _road_land_mm != null and _road_land_mm.multimesh != null
 			else 0
 		),
+		"bridge_capacity": (
+			_road_bridge_mm.multimesh.instance_count
+			if _road_bridge_mm != null and _road_bridge_mm.multimesh != null
+			else 0
+		),
 		"network_land": _network_road_land.size(),
 		"network_bridge": _network_road_bridge.size(),
 	}
 
 
-## Unit exercise of the shipped MultiMesh append path.
+## Unit exercise of the shipped MultiMesh append path + capacity-grow reseed (B3/I4).
 ## Appends `batches` × `per_batch` synthetic land segments; asserts cumulative visible count.
-func selfcheck_road_multimesh_append(batches: int = 5, per_batch: int = 4) -> Dictionary:
+## When force_grow is true, capacity is collapsed so append must rebuild-from-buffer.
+func selfcheck_road_multimesh_append(
+	batches: int = 5, per_batch: int = 4, force_grow: bool = true
+) -> Dictionary:
 	if _shared_road_box == null:
 		_shared_road_box = BoxMesh.new()
 		_shared_road_box.size = Vector3.ONE
@@ -1607,22 +1720,32 @@ func selfcheck_road_multimesh_append(batches: int = 5, per_batch: int = 4) -> Di
 	_road_cached_seg_total.clear()
 	_road_mm_land_used = 0
 	_road_mm_bridge_used = 0
-	# Re-seed capacity without wiping via a zero instance_count (which would clear buffers).
-	if _road_land_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
+	# Collapse capacity so the first overflow exercises grow+reseed from caches (I4).
+	# Setting instance_count wipes buffers — visible stays 0 until we write transforms.
+	if force_grow:
+		_road_land_mm.multimesh.instance_count = maxi(per_batch, 1)
+	elif _road_land_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
 		_road_land_mm.multimesh.instance_count = _ROAD_MM_MIN_CAPACITY
 	_road_land_mm.multimesh.visible_instance_count = 0
 	if _road_bridge_mm != null and _road_bridge_mm.multimesh != null:
-		if _road_bridge_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
+		if force_grow:
+			_road_bridge_mm.multimesh.instance_count = maxi(per_batch, 1)
+		elif _road_bridge_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
 			_road_bridge_mm.multimesh.instance_count = _ROAD_MM_MIN_CAPACITY
 		_road_bridge_mm.multimesh.visible_instance_count = 0
 	var expected: int = 0
+	var grew: bool = false
+	var cap_before_grow: int = _road_land_mm.multimesh.instance_count
 	for _b in range(maxi(batches, 1)):
 		var land_new: Array[Transform3D] = []
 		for _i in range(maxi(per_batch, 1)):
 			var t := Transform3D(Basis.IDENTITY, Vector3(float(expected + _i), 0.0, 0.0))
 			land_new.append(t)
 			_network_road_land.append(t)
+		var cap_before: int = _road_land_mm.multimesh.instance_count
 		_append_road_multimesh_transforms(land_new, [] as Array[Transform3D])
+		if _road_land_mm.multimesh.instance_count > cap_before:
+			grew = true
 		expected += land_new.size()
 		var used_now: int = _road_mm_land_used
 		var vis_now: int = _road_land_mm.multimesh.visible_instance_count
@@ -1633,14 +1756,23 @@ func selfcheck_road_multimesh_append(batches: int = 5, per_batch: int = 4) -> Di
 				"expected": expected,
 				"used": used_now,
 				"visible": vis_now,
+				"capacity": _road_land_mm.multimesh.instance_count,
 			}
 	var counts: Dictionary = road_multimesh_used_counts()
-	counts["ok"] = (
+	var ok: bool = (
 		int(counts.get("land_used", 0)) == expected
 		and int(counts.get("land_visible", 0)) == expected
 	)
+	if force_grow and expected > cap_before_grow and not grew:
+		ok = false
+		counts["error"] = "expected capacity grow reseed but capacity did not increase"
+	counts["ok"] = ok
 	counts["expected"] = expected
+	counts["grew"] = grew
+	counts["cap_before_grow"] = cap_before_grow
 	return counts
+
+#endregion
 
 
 func _packed_path_keys(st: Dictionary, sid: int) -> PackedInt32Array:

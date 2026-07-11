@@ -1,6 +1,19 @@
 # Performance tuning — Empires of Yesterday (World Conquest)
 
-Runtime budgets and knobs for the 360×180 Earth territory sim. Canonical mechanics: [DESIGN.md](DESIGN.md).
+Runtime budgets and knobs for the 360×180 Earth territory sim. Canonical mechanics: [DESIGN.md](DESIGN.md). Doc index: [docs/INDEX.md](docs/INDEX.md).
+
+## Live authority pipeline (must stay cheap)
+
+Live Play is **WorldDataset in Rust** + **PresentationTxn apply-only** on the Godot side (not full-table paint):
+
+| Concern | Live behavior | Where |
+|---------|---------------|--------|
+| **PresentationTxn** | Pull deltas once/frame (`owner`, `path_built`, roads, markers); apply to render cache only | `presentation_txn.rs`, `pull_presentation_txn` |
+| **Roads MultiMesh** | **Append-only** instance growth on path/network extend; full rewrite only on remove/reset | `EarthGlobeMap._append_road_multimesh_transforms` |
+| **Sim catch-up cap** | When prior frame > `FRAME_BUDGET_MS` (16 ms), cap catch-up to **1** sim step | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` |
+| **Construction drain order** | Ordered queue drain: corridors → beachhead → roads → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu (never same frame as roads/markers/overlay; gpu blocked N+1 after overlay) | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` |
+
+Do not reintroduce per-step full pressure/R8 pulls, full structure snapshots every frame, or uncapped multi-step catch-up on live.
 
 ---
 

@@ -7,9 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Use git master for latest Godot 4.x compatibility (including 4.6).
-# After `cargo build` you can pin to a specific commit or tag for reproducibility.
-godot = { git = "https://github.com/godot-rust/gdext", branch = "master" }
+# Pin gdext off floating `branch = "master"` (C13 / G1).
+# Rev from Cargo.lock known-good: godot 0.5.3 @ 38154780a3aa959df50158959e2c04dbcacc9956
+# (Godot 4.x including 4.6). Bump intentionally when upgrading gdext.
+godot = { git = "https://github.com/godot-rust/gdext", rev = "38154780a3aa959df50158959e2c04dbcacc9956" }
 rayon = "1.10"
 
 [features]

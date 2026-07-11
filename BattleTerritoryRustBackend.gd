@@ -10,6 +10,9 @@ var friendly_tiles: int = 0
 var hostile_tiles: int = 0
 var _grid_authority: bool = false
 var _structure_authority: bool = false
+## Cached for per-cell query (B10/I2) — set in setup_from_tile_control.
+var _grid_w: int = 0
+var _grid_h: int = 0
 
 var _sim: RefCounted
 
@@ -18,14 +21,30 @@ static func extension_available() -> bool:
 	return ClassDB.class_exists("TerritorySim")
 
 
+static func backend_env() -> String:
+	return OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower()
+
+
 static func backend_requested() -> bool:
-	return OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower() == "rust"
+	return backend_env() == "rust"
+
+
+## A9/G4/C9: GPU env is never a valid World Conquest live backend.
+static func gpu_env_requested() -> bool:
+	return backend_env() == "gpu"
+
+
+static func reject_gpu_env_for_world_conquest() -> void:
+	if gpu_env_requested():
+		push_error(
+			"World Conquest rejects BATTLE_TERRITORY_BACKEND=gpu — use rust or omit (A9/G4/C9)"
+		)
 
 
 static func default_resolve_backend_enabled() -> bool:
 	if not extension_available():
 		return false
-	return OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower() != "cpu"
+	return backend_env() != "cpu"
 
 
 static func compare_enabled() -> bool:
@@ -110,6 +129,8 @@ func setup_from_tile_control(
 	if ready:
 		friendly_tiles = tile_control.friendly_tiles
 		hostile_tiles = tile_control.hostile_tiles
+		_grid_w = int(map_data.grid_width)
+		_grid_h = int(map_data.grid_height)
 		_grid_authority = use_active_set and WorldConquestConfigLib.WORLD_DATASET_GRID_AUTHORITY
 		_structure_authority = (
 			use_active_set and WorldConquestConfigLib.WORLD_DATASET_STRUCTURE_AUTHORITY
@@ -117,6 +138,9 @@ func setup_from_tile_control(
 		sync_structure_store_from_map(map_data)
 		if _structure_authority and not structure_store_capable():
 			_structure_authority = false
+	else:
+		_grid_w = 0
+		_grid_h = 0
 	return ready
 
 
@@ -238,8 +262,37 @@ func consume_owner_overlay_delta() -> Dictionary:
 	return out
 
 
-## Single presentation pull for a live frame (consume-only; does not advance sim).
-## Prefer Rust presentation transaction log (main tables stay in Rust; this is the change feed).
+## SCD1 domain pull (live paint path). See docs/REQUEST_SCD1_VERSIONED_PULL.md.
+func pull_domain_since(domain: String, last_version: int, force_full: bool = false) -> Dictionary:
+	if not ready or _sim == null or not _sim.has_method("pull_domain_since"):
+		return {"empty": true, "error": true, "domain": domain}
+	return _sim.call("pull_domain_since", domain, last_version, force_full)
+
+
+func scd1_domain_epoch(domain: String) -> int:
+	if not ready or _sim == null or not _sim.has_method("scd1_domain_epoch"):
+		return 0
+	return int(_sim.call("scd1_domain_epoch", domain))
+
+
+func scd1_sim_generation() -> int:
+	if not ready or _sim == null or not _sim.has_method("scd1_sim_generation"):
+		return 0
+	return int(_sim.call("scd1_sim_generation"))
+
+
+func scd1_decide_full_pull(last_version: int, domain: String, client_sim_gen: int, hard_error: bool = false) -> String:
+	if not ready or _sim == null or not _sim.has_method("scd1_decide_full_pull"):
+		return "start" if last_version == 0 else ""
+	return str(_sim.call("scd1_decide_full_pull", last_version, domain, client_sim_gen, hard_error))
+
+
+func scd1_note_full_pull(reason: String) -> void:
+	if ready and _sim != null and _sim.has_method("scd1_note_full_pull"):
+		_sim.call("scd1_note_full_pull", reason)
+
+
+## LEGACY / QA only — not the live SCD1 paint path (PresentationTxn dual-feed removed for Play).
 func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
 	# Defaults false: callers must opt in. Avoid accidental full structure/agent FFI every frame.
 	var include_structures: bool = bool(opts.get("structures", false))
@@ -288,6 +341,7 @@ func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
 		out["owners"] = consume_owner_overlay_delta()
 		if include_structures and structure_authority_enabled():
 			out["structures"] = get_structure_snapshot()
+			out["structures_dirty"] = true
 	if include_agents and ready and _sim != null and _sim.has_method("get_agent_snapshot"):
 		out["agents"] = _sim.call("get_agent_snapshot")
 	if include_bombers and ready and _sim != null and _sim.has_method("get_bomber_snapshot"):
@@ -345,6 +399,8 @@ func get_owner_display_r8() -> PackedByteArray:
 	return PackedByteArray()
 
 
+## Full pressure layer FFI — expensive. Do not call every sim step (B10/I2).
+## Prefer pressure_friendly_at / query_tile for single cells; power_totals for HUD.
 func get_pressure_friendly() -> PackedFloat32Array:
 	if not ready or _sim == null:
 		return PackedFloat32Array()
@@ -353,12 +409,42 @@ func get_pressure_friendly() -> PackedFloat32Array:
 	return PackedFloat32Array()
 
 
+## Full pressure layer FFI — expensive. Do not call every sim step (B10/I2).
 func get_pressure_hostile() -> PackedFloat32Array:
 	if not ready or _sim == null:
 		return PackedFloat32Array()
 	if _sim.has_method("get_pressure_hostile"):
 		return _sim.call("get_pressure_hostile")
 	return PackedFloat32Array()
+
+
+## Per-cell pressure via query_tile — avoids full-layer pull (B10/I2).
+func pressure_friendly_at(idx: int) -> float:
+	return _pressure_at_index_layer(idx, true)
+
+
+func pressure_hostile_at(idx: int) -> float:
+	return _pressure_at_index_layer(idx, false)
+
+
+func _pressure_at_index_layer(idx: int, friendly: bool) -> float:
+	if not ready or _sim == null or idx < 0:
+		return 0.0
+	if _sim.has_method("query_tile") and _grid_w > 0:
+		var gx: int = idx % _grid_w
+		var gy: int = idx / _grid_w
+		if gy < 0 or (_grid_h > 0 and gy >= _grid_h):
+			return 0.0
+		var probe: Dictionary = _sim.call("query_tile", gx, gy)
+		if bool(probe.get("valid", false)):
+			return float(probe.get("pf" if friendly else "ph", 0.0))
+	# Last resort full layer (power_totals path already rate-limits).
+	var layers: PackedFloat32Array = (
+		get_pressure_friendly() if friendly else get_pressure_hostile()
+	)
+	if idx >= 0 and idx < layers.size():
+		return layers[idx]
+	return 0.0
 
 
 func pressure_overlay_peak() -> float:
@@ -1003,6 +1089,8 @@ func _free() -> void:
 	_sim = null
 	_grid_authority = false
 	_structure_authority = false
+	_grid_w = 0
+	_grid_h = 0
 	friendly_tiles = 0
 	hostile_tiles = 0
 

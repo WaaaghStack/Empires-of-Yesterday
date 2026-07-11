@@ -432,3 +432,124 @@ pub fn tick_world_session(
 
     events
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::economy::ContentTables;
+    use crate::structures::{StructureRecord, KIND_SPAWNER, STATE_BUILDING};
+
+    fn tiny_kernel() -> TerritoryKernel {
+        let w = 4i32;
+        let h = 4i32;
+        let n = (w * h) as usize;
+        TerritoryKernel::new(
+            w,
+            h,
+            vec![1u8; n],
+            vec![0.0f32; n],
+            vec![1.0f32; n],
+            vec![1.0f32; n],
+            vec![OWNER_FRIENDLY; n],
+            vec![1.0f32; n],
+            vec![0.0f32; n],
+            0.0,
+            0.0,
+            0,
+            n as i32 - 1,
+            Vec::new(),
+            n as i32,
+            0,
+            false,
+            false,
+            false,
+        )
+    }
+
+    #[test]
+    fn tick_world_session_noop_when_store_not_ready() {
+        let kernel = tiny_kernel();
+        let mut store = StructureStore::default();
+        store.ready = false;
+        let tables = ContentTables::default();
+        let cfg = WorldSessionConfig::default();
+        let events = tick_world_session(
+            &kernel,
+            &mut store,
+            None,
+            None,
+            0.1,
+            None,
+            None,
+            &tables,
+            &cfg,
+        );
+        assert!(events.activated_sids.is_empty());
+        assert!(!events.needs_sim_sync);
+    }
+
+    #[test]
+    fn tick_world_session_activates_finished_building() {
+        let kernel = tiny_kernel();
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 42,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_BUILDING,
+            gx: 1,
+            gy: 1,
+            path_keys: vec![0, 1],
+            path_built: 2.0,
+            path_len: 2,
+            corridor_synced_built: 1,
+            health: 10.0,
+            build_remaining: 0.01,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        let tables = ContentTables::default();
+        let cfg = WorldSessionConfig::default();
+        let events = tick_world_session(
+            &kernel,
+            &mut store,
+            None,
+            None,
+            0.1,
+            None,
+            None,
+            &tables,
+            &cfg,
+        );
+        assert!(
+            events.activated_sids.contains(&42) || events.activated_spawner_sids.contains(&42),
+            "building with build_remaining exhausted should activate"
+        );
+        assert_eq!(
+            store.structures.get(&42).unwrap().state,
+            STATE_ACTIVE
+        );
+    }
+
+    #[test]
+    fn tick_world_session_zero_dt_is_noop() {
+        let kernel = tiny_kernel();
+        let mut store = StructureStore::default();
+        store.ready = true;
+        let tables = ContentTables::default();
+        let cfg = WorldSessionConfig::default();
+        let events = tick_world_session(
+            &kernel,
+            &mut store,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            &tables,
+            &cfg,
+        );
+        assert!(events.activated_sids.is_empty());
+    }
+}

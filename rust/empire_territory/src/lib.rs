@@ -1,9 +1,16 @@
 //! Empire Territory Sim — Rust GDExtension for high-performance territory conquest simulation.
+//!
+//! lib.rs is the GDExtension class surface (C3). Conversion helpers live in `ffi_convert`;
+//! domain logic lives in modules (`logistics`, `sim`, `world_session`, …). Prefer not growing
+//! pure helpers here — extract to domain modules or `ffi_convert`.
 
 mod agents;
 mod bombers;
 mod builders;
+mod domain_version;
 mod economy;
+mod ffi_convert;
+mod flow_constants;
 mod fluid_bake;
 mod grid_query;
 mod logistics;
@@ -20,6 +27,12 @@ mod world_session;
 use economy::{
     fill_structure_row, f32_at, i32_at, u32_at, ContentTables, MAX_KINDS, RESOURCE_SLOTS,
 };
+use ffi_convert::{
+    corridor_specs_from_array, f32_triple_from_array, logistics_step_events_dict,
+    packed_byte_to_vec, packed_f32_to_vec, persisted_corridor_from_dict, spawners_from_dict,
+    structure_record_from_dict, structure_record_to_dict, vec_to_packed_byte, vec_to_packed_f32,
+    vec_to_packed_i32, world_edit_result_dict, world_session_events_dict, GdDictionary,
+};
 use fluid_bake::bake_fluid_rgba;
 use godot::builtin::Variant;
 use godot::prelude::*;
@@ -27,367 +40,25 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use agents::{AgentConfig, AgentLayer};
 use bombers::{BomberConfig, BomberLayer};
-use builders::{
-    work_grid_pos, BuilderConfig, BuilderLayer, BuilderStepEvents, PathCompletionEvent,
-};
-use logistics::{
-    kind_str as logistics_kind_str, LogisticsConfig, LogisticsLayer, LogisticsStepEvents,
-};
+use builders::{BuilderConfig, BuilderLayer};
+use logistics::{clamp_reconcile_budget, LogisticsConfig, LogisticsLayer};
 use resources::ResourceWallet;
-use route::{
-    find_route, PortalGraph, RoutePlannerState, RouteSnapshot,
-};
-use structures::{
-    kind_from_str, kind_to_str, state_from_str, state_to_str, PersistedCorridor, StructureRecord,
-    StructureStore,
-};
+use route::{PortalGraph, RoutePlannerState, RouteSnapshot};
+use structures::{state_from_str, StructureStore};
 use sim::{Spawner, TerritoryKernel};
 use tape_codec::{decode_pressure_v2, encode_pressure_v2, pack_territory_tape_v2};
+use domain_version::{
+    decide_full_pull, full_pull_allowed_by_cooldown, DomainBook, DomainId, FullPullReason,
+    FULL_PULL_COOLDOWN,
+};
 use presentation_txn::PresentationTxn;
-use world_edit::{ClaimableDelta, CorridorPathSpec, WorldEditResult};
-use world_session::{tick_world_session, WorldSessionConfig, WorldSessionEvents};
-
-type GdDictionary = Dictionary<Variant, Variant>;
+use world_session::{tick_world_session, WorldSessionConfig};
+use std::time::Instant;
 
 struct EmpireTerritoryExtension;
 
 #[gdextension]
 unsafe impl ExtensionLibrary for EmpireTerritoryExtension {}
-
-fn packed_byte_to_vec(arr: &PackedByteArray) -> Vec<u8> {
-    (0..arr.len()).map(|i| arr.get(i).unwrap_or(0)).collect()
-}
-
-fn packed_f32_to_vec(arr: &PackedFloat32Array) -> Vec<f32> {
-    (0..arr.len()).map(|i| arr.get(i).unwrap_or(0.0)).collect()
-}
-
-fn vec_to_packed_byte(data: &[u8]) -> PackedByteArray {
-    PackedByteArray::from(data)
-}
-
-fn vec_to_packed_f32(data: &[f32]) -> PackedFloat32Array {
-    PackedFloat32Array::from(data)
-}
-
-fn vec_to_packed_i32(data: &[i32]) -> PackedInt32Array {
-    PackedInt32Array::from(data)
-}
-
-fn structure_record_from_dict(spec: &GdDictionary) -> Option<StructureRecord> {
-    let id: i32 = spec.get("id").and_then(|v| v.try_to().ok())?;
-    let team: u8 = spec.get("team").and_then(|v| v.try_to().ok()).unwrap_or(1);
-    let kind: GString = spec
-        .get("kind")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or_default();
-    let state: GString = spec
-        .get("state")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or_default();
-    let gx: i32 = spec.get("gx").and_then(|v| v.try_to().ok()).unwrap_or(0);
-    let gy: i32 = spec.get("gy").and_then(|v| v.try_to().ok()).unwrap_or(0);
-    let path: PackedInt32Array = spec
-        .get("path_keys")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or_default();
-    let path_keys: Vec<i32> = (0..path.len())
-        .map(|j| path.get(j).unwrap_or(-1))
-        .collect();
-    let path_built: f32 = spec
-        .get("path_built")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or(1.0);
-    let path_len: i32 = spec
-        .get("path_len")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or(path_keys.len() as i32);
-    let corridor_synced_built: i32 = spec
-        .get("corridor_synced_built")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or(1);
-    let health: f32 = spec.get("health").and_then(|v| v.try_to().ok()).unwrap_or(-1.0);
-    let build_remaining: f32 = spec
-        .get("build_remaining")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or(-1.0);
-    let spawn_timer: f32 = spec
-        .get("spawn_timer")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or(0.0);
-    Some(StructureRecord {
-        id,
-        team,
-        kind: kind_from_str(kind.to_string().as_str()),
-        state: state_from_str(state.to_string().as_str()),
-        gx,
-        gy,
-        path_keys,
-        path_built,
-        path_len,
-        corridor_synced_built,
-        health,
-        build_remaining,
-        spawn_timer,
-    })
-}
-
-fn persisted_corridor_from_dict(slot: usize, spec: &GdDictionary) -> Option<PersistedCorridor> {
-    let path: PackedInt32Array = spec
-        .get("path_keys")
-        .and_then(|v| v.try_to().ok())
-        .unwrap_or_default();
-    if path.is_empty() {
-        return None;
-    }
-    let path_keys: Vec<i32> = (0..path.len())
-        .map(|j| path.get(j).unwrap_or(-1))
-        .collect();
-    Some(PersistedCorridor {
-        slot,
-        team: spec.get("team").and_then(|v| v.try_to().ok()).unwrap_or(1),
-        path_keys,
-        corridor_synced_built: spec
-            .get("corridor_synced_built")
-            .and_then(|v| v.try_to().ok())
-            .unwrap_or(1),
-    })
-}
-
-fn structure_record_to_dict(record: &StructureRecord) -> GdDictionary {
-    let mut out = GdDictionary::new();
-    out.set("id", record.id);
-    out.set("team", record.team);
-    let kind = GString::from(kind_to_str(record.kind));
-    let state = GString::from(state_to_str(record.state));
-    out.set("kind", &kind);
-    out.set("state", &state);
-    out.set("gx", record.gx);
-    out.set("gy", record.gy);
-    out.set("path_keys", &vec_to_packed_i32(&record.path_keys));
-    out.set("path_built", record.path_built);
-    out.set("path_len", record.path_len);
-    out.set("corridor_synced_built", record.corridor_synced_built);
-    if record.health >= 0.0 {
-        out.set("health", record.health);
-    }
-    if record.build_remaining >= 0.0 {
-        out.set("build_remaining", record.build_remaining);
-    }
-    if record.spawn_timer > 0.0 {
-        out.set("spawn_timer", record.spawn_timer);
-    }
-    out
-}
-
-fn world_session_events_dict(events: &WorldSessionEvents, friendly_aurelium: f32) -> GdDictionary {
-    let mut out = GdDictionary::new();
-    out.set("friendly_aurelium", friendly_aurelium);
-    out.set("friendly_aurelium_spent", events.friendly_aurelium_spent);
-    out.set("friendly_deficit_dps", events.friendly_deficit_dps);
-    out.set("hostile_deficit_dps", events.hostile_deficit_dps);
-    out.set("needs_sim_sync", events.needs_sim_sync);
-    out.set("marker_dirty", events.marker_dirty);
-    out.set("activated_sids", &vec_to_packed_i32(&events.activated_sids));
-    out.set(
-        "activated_spawner_sids",
-        &vec_to_packed_i32(&events.activated_spawner_sids),
-    );
-    out.set("destroyed_sids", &vec_to_packed_i32(&events.destroyed_sids));
-    out.set(
-        "spawned_barracks_sids",
-        &vec_to_packed_i32(&events.spawned_barracks_sids),
-    );
-    out.set(
-        "spawned_hangar_sids",
-        &vec_to_packed_i32(&events.spawned_hangar_sids),
-    );
-    out
-}
-
-fn builder_step_events_dict(events: &BuilderStepEvents) -> GdDictionary {
-    logistics_step_events_dict_from_builder(events)
-}
-
-fn logistics_step_events_dict(events: &LogisticsStepEvents) -> GdDictionary {
-    let mut out = GdDictionary::new();
-    out.set("visual_dirty", events.visual_dirty);
-    let mut arrivals = Array::<Variant>::new();
-    for ev in &events.cell_arrivals {
-        let mut entry = GdDictionary::new();
-        entry.set("sid", ev.sid);
-        entry.set("seg_from_idx", ev.seg_from_idx);
-        entry.set("kind", &GString::from(logistics_kind_str(ev.kind)));
-        arrivals.push(&entry);
-    }
-    out.set("cell_arrivals", &arrivals);
-    let mut completions = Array::<Variant>::new();
-    for ev in &events.path_completions {
-        let mut entry = logistics_path_completion_dict(ev);
-        completions.push(&entry);
-    }
-    out.set("path_completions", &completions);
-    out.set(
-        "completed_corridor_sids",
-        &vec_to_packed_i32(&events.completed_corridor_sids),
-    );
-    out.set("new_built_cells", &vec_to_packed_i32(&events.new_built_cells));
-    out.set("friendly_output_mult", events.friendly_output_mult);
-    out.set("hostile_output_mult", events.hostile_output_mult);
-    out.set("reassign_teams", &PackedByteArray::new());
-    out
-}
-
-fn logistics_step_events_dict_from_builder(events: &BuilderStepEvents) -> GdDictionary {
-    let mut out = GdDictionary::new();
-    out.set("visual_dirty", events.visual_dirty);
-    let mut arrivals = Array::<Variant>::new();
-    for ev in &events.cell_arrivals {
-        let mut entry = GdDictionary::new();
-        entry.set("sid", ev.sid);
-        entry.set("seg_from_idx", ev.seg_from_idx);
-        entry.set("kind", &GString::from(builders::kind_str(ev.kind)));
-        arrivals.push(&entry);
-    }
-    out.set("cell_arrivals", &arrivals);
-    let mut completions = Array::<Variant>::new();
-    for ev in &events.path_completions {
-        let mut entry = path_completion_dict(ev);
-        completions.push(&entry);
-    }
-    out.set("path_completions", &completions);
-    out.set(
-        "completed_corridor_sids",
-        &vec_to_packed_i32(&events.completed_corridor_sids),
-    );
-    out.set("new_built_cells", &PackedInt32Array::new());
-    out.set("friendly_output_mult", 1.0f32);
-    out.set("hostile_output_mult", 1.0f32);
-    let mut teams = PackedByteArray::new();
-    for t in &events.reassign_teams {
-        teams.push(*t);
-    }
-    out.set("reassign_teams", &teams);
-    out
-}
-
-fn logistics_path_completion_dict(ev: &logistics::PathCompletionEvent) -> GdDictionary {
-    let mut entry = GdDictionary::new();
-    entry.set("sid", ev.sid);
-    entry.set("gx", ev.gx);
-    entry.set("gy", ev.gy);
-    entry.set("team", ev.team);
-    entry.set("is_corridor_link", ev.is_corridor_link);
-    entry.set("kind", &GString::from(logistics_kind_str(ev.kind)));
-    entry
-}
-
-fn path_completion_dict(ev: &PathCompletionEvent) -> GdDictionary {
-    let mut entry = GdDictionary::new();
-    entry.set("sid", ev.sid);
-    entry.set("gx", ev.gx);
-    entry.set("gy", ev.gy);
-    entry.set("team", ev.team);
-    entry.set("is_corridor_link", ev.is_corridor_link);
-    entry.set("kind", &GString::from(builders::kind_str(ev.kind)));
-    entry
-}
-
-fn f32_triple_from_array(arr: &PackedFloat32Array) -> [f32; 3] {
-    [
-        arr.get(0).unwrap_or(0.0),
-        arr.get(1).unwrap_or(0.0),
-        arr.get(2).unwrap_or(0.0),
-    ]
-}
-
-fn claimable_delta_dict(delta: &ClaimableDelta) -> GdDictionary {
-    let mut d = GdDictionary::new();
-    d.set("indices", &vec_to_packed_i32(&delta.indices));
-    d.set("claimable", &vec_to_packed_byte(&delta.claimable));
-    d.set("owners", &vec_to_packed_byte(&delta.owners));
-    d.set("elevation", &vec_to_packed_f32(&delta.elevation));
-    d.set("flow_mult", &vec_to_packed_f32(&delta.terrain_flow_mult));
-    d.set("claim_mult", &vec_to_packed_f32(&delta.claim_ratio_mult));
-    d
-}
-
-fn world_edit_result_dict(result: &WorldEditResult) -> GdDictionary {
-    let mut d = GdDictionary::new();
-    d.set("changed", result.changed);
-    d.set("claimable_delta", &claimable_delta_dict(&result.claimable_delta));
-    let mut synced = Array::<Variant>::new();
-    for (sid, built) in &result.synced_updates {
-        let mut entry = GdDictionary::new();
-        entry.set("sid", *sid);
-        entry.set("corridor_synced_built", *built);
-        synced.push(&entry);
-    }
-    d.set("synced_updates", &synced);
-    d
-}
-
-fn corridor_specs_from_array(specs: Array<Variant>) -> Vec<CorridorPathSpec> {
-    let mut out = Vec::new();
-    for i in 0..specs.len() {
-        let Some(v) = specs.get(i) else {
-            continue;
-        };
-        let Ok(spec) = v.try_to::<GdDictionary>() else {
-            continue;
-        };
-        let sid: i32 = spec.get("sid").and_then(|v| v.try_to().ok()).unwrap_or(-1);
-        let team: u8 = spec.get("team").and_then(|v| v.try_to().ok()).unwrap_or(1);
-        let path: PackedInt32Array = spec
-            .get("path_keys")
-            .and_then(|v| v.try_to().ok())
-            .unwrap_or_default();
-        let built: i32 = spec
-            .get("built_cells")
-            .and_then(|v| v.try_to().ok())
-            .unwrap_or(0);
-        let synced: i32 = spec
-            .get("synced_cells")
-            .and_then(|v| v.try_to().ok())
-            .unwrap_or(1);
-        let keys: Vec<i32> = (0..path.len())
-            .map(|j| path.get(j).unwrap_or(-1))
-            .collect();
-        out.push(CorridorPathSpec {
-            sid,
-            team,
-            path_keys: keys,
-            built_cells: built,
-            synced_cells: synced,
-        });
-    }
-    out
-}
-
-fn spawners_from_dict(config: &GdDictionary) -> Vec<Spawner> {
-    let teams = config
-        .get("spawner_teams")
-        .and_then(|v| v.try_to::<PackedByteArray>().ok())
-        .unwrap_or_default();
-    let gx = config
-        .get("spawner_gx")
-        .and_then(|v| v.try_to::<PackedInt32Array>().ok())
-        .unwrap_or_default();
-    let gy = config
-        .get("spawner_gy")
-        .and_then(|v| v.try_to::<PackedInt32Array>().ok())
-        .unwrap_or_default();
-    let count = teams.len().min(gx.len()).min(gy.len());
-    let mut spawners = Vec::with_capacity(count);
-    for i in 0..count {
-        spawners.push(Spawner {
-            team: teams.get(i).unwrap_or(0),
-            gx: gx.get(i).unwrap_or(-1),
-            gy: gy.get(i).unwrap_or(-1),
-        });
-    }
-    spawners
-}
 
 /// Main simulation object exposed to GDScript.
 #[derive(GodotClass)]
@@ -407,7 +78,17 @@ struct TerritorySim {
     bomber_snap_gy: Vec<i32>,
     bomber_snap_search_scope: Vec<i32>,
     structure_store: StructureStore,
-    /// Change feed for Godot visuals — drain via pull_presentation_txn (main tables stay in Rust).
+    /// SCD1 per-domain epochs (docs/REQUEST_SCD1_VERSIONED_PULL.md).
+    domain_book: DomainBook,
+    /// Parallel to kernel.owners — last domain version when cell owner changed.
+    owner_cell_version: Vec<u64>,
+    /// Parallel to logistics built mask length — version when road cell became built.
+    road_cell_version: Vec<u64>,
+    /// Wallet domain version stamp.
+    wallet_version: u64,
+    /// Gap full-pull cooldown tracking (server-side helper for Godot; also used in tests).
+    last_full_pull_at: Option<Instant>,
+    /// Legacy change feed — not used on live SCD1 path (QA/goldens only).
     presentation_txn: PresentationTxn,
     world_session_cfg: WorldSessionConfig,
     world_session_enabled: bool,
@@ -586,6 +267,11 @@ impl TerritorySim {
                 .get("friendly_reachable")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or_default();
+            // SCD1: new world — bump sim generation and size cell version vectors.
+            self.domain_book.bump_sim_generation();
+            self.owner_cell_version = vec![0u64; tile_count];
+            self.road_cell_version = vec![0u64; tile_count];
+            self.wallet_version = 0;
             if fr.len() > 0 {
                 let hr: PackedByteArray = config
                     .get("hostile_reachable")
@@ -769,21 +455,33 @@ impl TerritorySim {
 
     #[func]
     fn structure_store_upsert(&mut self, spec: GdDictionary) -> bool {
-        let Some(record) = structure_record_from_dict(&spec) else {
+        let Some(mut record) = structure_record_from_dict(&spec) else {
             return false;
         };
+        let v = self.domain_book.touch(DomainId::Structures);
+        record.version = v;
         self.structure_store.upsert(record);
         true
     }
 
     #[func]
     fn structure_store_remove(&mut self, sid: i32) {
-        self.structure_store.remove(sid);
+        if self.structure_store.structures.contains_key(&sid) {
+            self.structure_store.remove(sid);
+            let _ = self.domain_book.touch(DomainId::Structures);
+        }
     }
 
     #[func]
     fn structure_store_patch_path_built(&mut self, sid: i32, path_built: f32) -> bool {
-        self.structure_store.patch_path_built(sid, path_built)
+        if !self.structure_store.patch_path_built(sid, path_built) {
+            return false;
+        }
+        let v = self.domain_book.touch(DomainId::Structures);
+        if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+            st.version = v;
+        }
+        true
     }
 
     #[func]
@@ -798,8 +496,18 @@ impl TerritorySim {
         } else {
             None
         };
-        self.structure_store
-            .patch_state(sid, state_from_str(state.to_string().as_str()), pb)
+        if !self.structure_store.patch_state(
+            sid,
+            state_from_str(state.to_string().as_str()),
+            pb,
+        ) {
+            return false;
+        }
+        let v = self.domain_book.touch(DomainId::Structures);
+        if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+            st.version = v;
+        }
+        true
     }
 
     #[func]
@@ -829,6 +537,260 @@ impl TerritorySim {
         let mut out = GdDictionary::new();
         out.set("structures", &structures);
         out.set("corridor_synced", &corridor_synced);
+        out
+    }
+
+    /// SCD1: domain high-water epoch for Godot last_version tracking.
+    #[func]
+    fn scd1_domain_epoch(&self, domain: GString) -> i64 {
+        DomainId::from_str(domain.to_string().as_str())
+            .map(|d| self.domain_book.epoch(d) as i64)
+            .unwrap_or(0)
+    }
+
+    #[func]
+    fn scd1_sim_generation(&self) -> i64 {
+        self.domain_book.sim_generation as i64
+    }
+
+    /// Pure allow-list decision for full pull (Policy 2). `hard_error` forces HardError.
+    #[func]
+    fn scd1_decide_full_pull(
+        &self,
+        last_version: i64,
+        domain: GString,
+        client_sim_gen: i64,
+        hard_error: bool,
+    ) -> GString {
+        let d = match DomainId::from_str(domain.to_string().as_str()) {
+            Some(x) => x,
+            None => return GString::from(""),
+        };
+        let high = self.domain_book.epoch(d);
+        let last = last_version.max(0) as u64;
+        let cgen = client_sim_gen.max(0) as u64;
+        match decide_full_pull(last, high, cgen, self.domain_book.sim_generation, hard_error) {
+            Some(r) => GString::from(r.as_str()),
+            None => GString::from(""),
+        }
+    }
+
+    /// Policy 3: whether a full pull is allowed now (3s cooldown).
+    #[func]
+    fn scd1_full_pull_cooldown_ok(&self) -> bool {
+        full_pull_allowed_by_cooldown(self.last_full_pull_at, Instant::now())
+    }
+
+    /// Record that a full pull ran (starts cooldown). Logs FULL_RESYNC (Policy 6).
+    #[func]
+    fn scd1_note_full_pull(&mut self, reason: GString) {
+        self.last_full_pull_at = Some(Instant::now());
+        godot_print!(
+            "FULL_RESYNC reason={} cooldown_secs={}",
+            reason,
+            FULL_PULL_COOLDOWN.as_secs()
+        );
+    }
+
+    /// SCD1 domain pull: full current rows with version > last_version (or all if full=true).
+    /// Returns { high_water, empty, full, sim_generation, rows|domain-specific packs }.
+    #[func]
+    fn pull_domain_since(&mut self, domain: GString, last_version: i64, force_full: bool) -> GdDictionary {
+        let mut out = GdDictionary::new();
+        let Some(d) = DomainId::from_str(domain.to_string().as_str()) else {
+            out.set("error", true);
+            out.set("empty", true);
+            out.set("high_water", 0i64);
+            return out;
+        };
+        let high = self.domain_book.epoch(d);
+        let last = last_version.max(0) as u64;
+        out.set("sim_generation", self.domain_book.sim_generation as i64);
+        out.set("high_water", high as i64);
+        out.set("domain", &GString::from(d.as_str()));
+        let full = force_full || last == 0;
+        out.set("full", full);
+        if !full && last >= high {
+            out.set("empty", true);
+            return out;
+        }
+        out.set("empty", false);
+        match d {
+            DomainId::Structures => {
+                let mut rows: Array<Variant> = Array::new();
+                let mut ids: Vec<i32> = self.structure_store.structures.keys().copied().collect();
+                ids.sort_unstable();
+                for id in ids {
+                    let Some(record) = self.structure_store.structures.get(&id) else {
+                        continue;
+                    };
+                    if !full && record.version <= last {
+                        continue;
+                    }
+                    let entry = structure_record_to_dict(record);
+                    rows.push(&entry);
+                }
+                // Persisted corridors for view (landing pins / ribbons).
+                let mut corridors: Array<Variant> = Array::new();
+                for (i, c) in self.structure_store.persisted_corridors.iter().enumerate() {
+                    let mut entry = GdDictionary::new();
+                    entry.set("id", -(i as i32 + 1));
+                    entry.set("team", c.team);
+                    entry.set("path_keys", &vec_to_packed_i32(&c.path_keys));
+                    entry.set("kind", &GString::from("corridor_link"));
+                    entry.set("state", &GString::from("active"));
+                    if let Some(&pk) = c.path_keys.last() {
+                        let gw = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(1).max(1);
+                        entry.set("gx", pk % gw);
+                        entry.set("gy", pk / gw);
+                    }
+                    corridors.push(&entry);
+                }
+                out.set("rows", &rows);
+                out.set("bridge_corridors", &corridors);
+                out.set("empty", rows.is_empty() && !full);
+            }
+            DomainId::Territory => {
+                let Some(kernel) = self.kernel.as_ref() else {
+                    out.set("empty", true);
+                    return out;
+                };
+                if self.owner_cell_version.len() != kernel.owners.len() {
+                    // Safety: treat as full owners dump.
+                }
+                let mut idxs: Vec<i32> = Vec::new();
+                let mut vals: Vec<u8> = Vec::new();
+                if full {
+                    for (i, &o) in kernel.owners.iter().enumerate() {
+                        idxs.push(i as i32);
+                        vals.push(o);
+                    }
+                } else {
+                    let n = kernel.owners.len().min(self.owner_cell_version.len());
+                    for i in 0..n {
+                        if self.owner_cell_version[i] > last {
+                            idxs.push(i as i32);
+                            vals.push(kernel.owners[i]);
+                        }
+                    }
+                }
+                out.set("indices", &vec_to_packed_i32(&idxs));
+                out.set("owners", &vec_to_packed_byte(&vals));
+                out.set("friendly_tiles", kernel.friendly_tiles);
+                out.set("hostile_tiles", kernel.hostile_tiles);
+                out.set("empty", idxs.is_empty());
+            }
+            DomainId::Roads => {
+                let mask_f = self.logistics_layer.built_mask(1);
+                let mask_h = self.logistics_layer.built_mask(2);
+                let mut idxs: Vec<i32> = Vec::new();
+                let mut teams: Vec<u8> = Vec::new();
+                if full {
+                    for i in 0..mask_f.len().max(mask_h.len()) {
+                        let bf = if i < mask_f.len() { mask_f[i] } else { 0 };
+                        let bh = if i < mask_h.len() { mask_h[i] } else { 0 };
+                        if bf != 0 || bh != 0 {
+                            idxs.push(i as i32);
+                            teams.push(if bf != 0 { 1 } else { 2 });
+                        }
+                    }
+                } else {
+                    let n = self.road_cell_version.len();
+                    for i in 0..n {
+                        if self.road_cell_version[i] <= last {
+                            continue;
+                        }
+                        let bf = if i < mask_f.len() { mask_f[i] } else { 0 };
+                        let bh = if i < mask_h.len() { mask_h[i] } else { 0 };
+                        if bf != 0 || bh != 0 {
+                            idxs.push(i as i32);
+                            teams.push(if bf != 0 { 1 } else { 2 });
+                        }
+                    }
+                }
+                out.set("indices", &vec_to_packed_i32(&idxs));
+                out.set("teams", &vec_to_packed_byte(&teams));
+                out.set("empty", idxs.is_empty());
+            }
+            // Agents/bombers are living-set domains: Godot replaces the full visual pool on apply.
+            // When the domain high-water advances, return *all* living units — not only rows with
+            // version > last. Filtering by row version drops stationary units and looks like teleport.
+            // empty=false whenever high > last (even with 0 living) so deaths clear the pool.
+            DomainId::Agents => {
+                let mut rows: Array<Variant> = Array::new();
+                if let Some(layer) = self.agents.as_ref() {
+                    for a in &layer.agents {
+                        if a.hp <= 0.0 {
+                            continue;
+                        }
+                        let mut e = GdDictionary::new();
+                        e.set("id", a.id as i32);
+                        e.set("team", a.team);
+                        e.set("gx", a.gx);
+                        e.set("gy", a.gy);
+                        e.set("hp", a.hp);
+                        e.set("version", a.version as i64);
+                        rows.push(&e);
+                    }
+                }
+                out.set("rows", &rows);
+                out.set("empty", rows.is_empty() && high <= last);
+            }
+            DomainId::Bombers => {
+                let mut rows: Array<Variant> = Array::new();
+                let mut bomb_gx = PackedInt32Array::new();
+                let mut bomb_gy = PackedInt32Array::new();
+                let mut bomb_teams = PackedByteArray::new();
+                if let Some(layer) = self.bombers.as_mut() {
+                    for b in &layer.bombers {
+                        if b.hp <= 0.0 {
+                            continue;
+                        }
+                        let mut e = GdDictionary::new();
+                        e.set("id", b.id as i32);
+                        e.set("team", b.team);
+                        e.set("gx", b.gx);
+                        e.set("gy", b.gy);
+                        e.set("hp", b.hp);
+                        e.set("search_scope", b.search_expand_limit as i32);
+                        e.set("version", b.version as i64);
+                        rows.push(&e);
+                    }
+                    // One-shot attack FX: drain pending drops with this living-set pull.
+                    let events = layer.take_bomb_events();
+                    for ev in &events {
+                        bomb_gx.push(ev.gx);
+                        bomb_gy.push(ev.gy);
+                        bomb_teams.push(ev.team);
+                    }
+                }
+                out.set("rows", &rows);
+                out.set("bomb_gx", &bomb_gx);
+                out.set("bomb_gy", &bomb_gy);
+                out.set("bomb_teams", &bomb_teams);
+                // Domain advance or pending bomb FX both require apply (may clear living set).
+                out.set(
+                    "empty",
+                    rows.is_empty() && bomb_teams.is_empty() && high <= last,
+                );
+            }
+            DomainId::Wallet => {
+                if !full && self.wallet_version <= last {
+                    out.set("empty", true);
+                    return out;
+                }
+                out.set(
+                    "friendly",
+                    &PackedFloat32Array::from(&self.resource_wallet.friendly[..]),
+                );
+                out.set(
+                    "hostile",
+                    &PackedFloat32Array::from(&self.resource_wallet.hostile[..]),
+                );
+                out.set("version", self.wallet_version as i64);
+                out.set("empty", false);
+            }
+        }
         out
     }
 
@@ -930,11 +892,13 @@ impl TerritorySim {
 
         self.content_tables
             .apply_to_logistics(&mut self.logistics_cfg, road_cells_per_sec);
-        self.logistics_cfg.reconcile_cells_per_frame = config
-            .get("reconcile_cells_per_frame")
-            .and_then(|v| v.try_to::<i32>().ok())
-            .unwrap_or(self.logistics_cfg.reconcile_cells_per_frame as i32)
-            as usize;
+        self.logistics_cfg.reconcile_cells_per_frame = clamp_reconcile_budget(
+            config
+                .get("reconcile_cells_per_frame")
+                .and_then(|v| v.try_to::<i32>().ok())
+                .unwrap_or(self.logistics_cfg.reconcile_cells_per_frame as i32)
+                .max(0) as usize,
+        );
         self.logistics_cfg.full_recal_interval_sec = config
             .get("full_recal_interval_sec")
             .and_then(|v| v.try_to().ok())
@@ -1052,6 +1016,9 @@ impl TerritorySim {
         let agents_ptr = self.agents.as_mut();
         let bombers_ptr = self.bombers.as_mut();
         let (events, friendly_aurelium_out) = if self.resource_wallet_enabled {
+            // Snapshot so any upkeep/spawn/spend mutates bump wallet SCD1 high-water.
+            let pre_f = self.resource_wallet.friendly;
+            let pre_h = self.resource_wallet.hostile;
             let events = tick_world_session(
                 kernel,
                 &mut self.structure_store,
@@ -1063,6 +1030,9 @@ impl TerritorySim {
                 &tables,
                 &cfg,
             );
+            if pre_f != self.resource_wallet.friendly || pre_h != self.resource_wallet.hostile {
+                self.wallet_version = self.domain_book.touch(DomainId::Wallet);
+            }
             (events, self.resource_wallet.friendly[0])
         } else {
             let mut wallet_au = friendly_aurelium;
@@ -1079,9 +1049,50 @@ impl TerritorySim {
             );
             (events, wallet_au)
         };
+        // SCD1: stamp structure versions for activates / destroys so pulls see BUILDING→ACTIVE.
+        if !events.activated_sids.is_empty()
+            || !events.destroyed_sids.is_empty()
+            || events.marker_dirty
+        {
+            let sv = self.domain_book.touch(DomainId::Structures);
+            for &sid in &events.activated_sids {
+                if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+                    st.version = sv;
+                }
+            }
+            for &sid in &events.activated_spawner_sids {
+                if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+                    st.version = sv;
+                }
+            }
+        }
+        // Living-set domains: spawn must advance high-water so the next pull includes new units.
+        if !events.spawned_barracks_sids.is_empty() {
+            let av = self.domain_book.touch(DomainId::Agents);
+            if let Some(agents) = self.agents.as_mut() {
+                for a in &mut agents.agents {
+                    if a.version == 0 {
+                        a.version = av;
+                    }
+                }
+            }
+        }
+        if !events.spawned_hangar_sids.is_empty() {
+            let bv = self.domain_book.touch(DomainId::Bombers);
+            if let Some(bombers) = self.bombers.as_mut() {
+                for b in &mut bombers.bombers {
+                    if b.version == 0 {
+                        b.version = bv;
+                    }
+                }
+            }
+        }
         world_session_events_dict(&events, friendly_aurelium_out)
     }
 
+    /// Configure logistics network (sole live road/path_built authority — A6/A7/C8).
+    /// Despite the historical name, this does **not** enable builder-bot path growth.
+    /// `builder_layer.legacy_path_growth_enabled` stays false; only logistics advances path_built.
     #[func]
     fn configure_builders(&mut self, config: GdDictionary, enabled: bool) {
         self.logistics_cfg = LogisticsConfig {
@@ -1105,10 +1116,13 @@ impl TerritorySim {
                 .get("outpost_max_health")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(10.0),
-            reconcile_cells_per_frame: config
-                .get("reconcile_cells_per_frame")
-                .and_then(|v| v.try_to::<i32>().ok())
-                .unwrap_or(648) as usize,
+            reconcile_cells_per_frame: clamp_reconcile_budget(
+                config
+                    .get("reconcile_cells_per_frame")
+                    .and_then(|v| v.try_to::<i32>().ok())
+                    .unwrap_or(logistics::LOGISTICS_RECONCILE_CELLS_PER_FRAME_DEFAULT as i32)
+                    .max(0) as usize,
+            ),
             full_recal_interval_sec: config
                 .get("full_recal_interval_sec")
                 .and_then(|v| v.try_to().ok())
@@ -1162,8 +1176,10 @@ impl TerritorySim {
             .get("enemy_home_gy")
             .and_then(|v| v.try_to().ok())
             .unwrap_or(0);
+        // Logistics sole authority — do not dual-step builders for path_built (A6/A7/C8).
         self.logistics_enabled = enabled;
-        self.builder_enabled = enabled;
+        self.builder_enabled = false;
+        self.builder_layer.legacy_path_growth_enabled = false;
         if self.logistics_enabled {
             self.logistics_layer.player_home = (self.player_home_gx, self.player_home_gy);
             self.logistics_layer.enemy_home = (self.enemy_home_gx, self.enemy_home_gy);
@@ -1183,6 +1199,7 @@ impl TerritorySim {
 
     #[func]
     fn builder_authority_enabled(&self) -> bool {
+        // Name is historical; reports logistics authority readiness.
         self.logistics_enabled && self.kernel.is_some()
     }
 
@@ -1240,11 +1257,15 @@ impl TerritorySim {
         // Logistics network has no idle-bot job assignment.
     }
 
+    /// Advance logistics road growth (sole path_built authority under live).
+    /// Never dual-steps the legacy builder bot layer (A6/A7/C8).
     #[func]
     fn builder_step(&mut self, dt: f32) -> GdDictionary {
         if !self.builder_authority_enabled() {
             return GdDictionary::new();
         }
+        // Guard: builders must not advance path_built while logistics is active.
+        debug_assert!(!self.builder_layer.legacy_path_growth_enabled);
         self.ensure_logistics_network();
         let (grid_w, grid_h) = self
             .kernel
@@ -1262,7 +1283,34 @@ impl TerritorySim {
             kernel.logistics_friendly_output_mult = events.friendly_output_mult;
             kernel.logistics_hostile_output_mult = events.hostile_output_mult;
         }
-        // Append logistics changes into the presentation transaction log (main table already updated).
+        // SCD1: stamp structure + road domain versions from logistics writes.
+        if !events.cell_arrivals.is_empty()
+            || !events.path_completions.is_empty()
+            || !events.new_built_cells.is_empty()
+        {
+            if !events.new_built_cells.is_empty() {
+                let rv = self.domain_book.touch(DomainId::Roads);
+                for &key in &events.new_built_cells {
+                    if key >= 0 && (key as usize) < self.road_cell_version.len() {
+                        self.road_cell_version[key as usize] = rv;
+                    }
+                }
+            }
+            if !events.cell_arrivals.is_empty() || !events.path_completions.is_empty() {
+                let sv = self.domain_book.touch(DomainId::Structures);
+                for ev in &events.cell_arrivals {
+                    if let Some(st) = self.structure_store.structures.get_mut(&ev.sid) {
+                        st.version = sv;
+                    }
+                }
+                for ev in &events.path_completions {
+                    if let Some(st) = self.structure_store.structures.get_mut(&ev.sid) {
+                        st.version = sv;
+                    }
+                }
+            }
+        }
+        // Legacy txn feed (not live SCD1 path).
         self.presentation_txn.merge_logistics(&events);
         self.presentation_txn
             .fill_path_built_from_arrivals(&self.structure_store, &events);
@@ -1345,6 +1393,7 @@ impl TerritorySim {
     ) {
         self.resource_wallet.friendly = f32_triple_from_array(&friendly);
         self.resource_wallet.hostile = f32_triple_from_array(&hostile);
+        self.wallet_version = self.domain_book.touch(DomainId::Wallet);
     }
 
     #[func]
@@ -1358,6 +1407,8 @@ impl TerritorySim {
         }
         self.resource_wallet
             .apply_delta(&f32_triple_from_array(&friendly_delta), &f32_triple_from_array(&hostile_delta));
+        // SCD1: any wallet mutation must bump domain high-water so pulls see income/spend.
+        self.wallet_version = self.domain_book.touch(DomainId::Wallet);
     }
 
     #[func]
@@ -1710,7 +1761,14 @@ impl TerritorySim {
         let Some(agents) = self.agents.as_mut() else {
             return false;
         };
-        agents.try_spawn(kernel, barracks_id, team, bx, by)
+        if !agents.try_spawn(kernel, barracks_id, team, bx, by) {
+            return false;
+        }
+        let v = self.domain_book.touch(DomainId::Agents);
+        if let Some(a) = agents.agents.last_mut() {
+            a.version = v;
+        }
+        true
     }
 
     #[func]
@@ -1756,7 +1814,14 @@ impl TerritorySim {
         let Some(bombers) = self.bombers.as_mut() else {
             return false;
         };
-        bombers.try_spawn(kernel, hangar_id, team, gx, gy)
+        if !bombers.try_spawn(kernel, hangar_id, team, gx, gy) {
+            return false;
+        }
+        let v = self.domain_book.touch(DomainId::Bombers);
+        if let Some(b) = bombers.bombers.last_mut() {
+            b.version = v;
+        }
+        true
     }
 
     #[func]
@@ -1857,18 +1922,98 @@ impl TerritorySim {
         if self.agents_enabled {
             if let Some(agents) = self.agents.as_mut() {
                 if agents.living_count() > 0 {
+                    // Snapshot positions; stamp SCD1 on move/death so living-set pulls refresh.
+                    let before: Vec<(u32, i32, i32, f32)> = agents
+                        .agents
+                        .iter()
+                        .map(|a| (a.id, a.gx, a.gy, a.hp))
+                        .collect();
+                    let before_count = before.len();
                     agents.tick(kernel);
+                    let mut any = agents.agents.len() != before_count;
+                    if any {
+                        let _ = self.domain_book.touch(DomainId::Agents);
+                    }
+                    for a in &mut agents.agents {
+                        if a.hp <= 0.0 {
+                            continue;
+                        }
+                        let changed = before
+                            .iter()
+                            .find(|(id, _, _, _)| *id == a.id)
+                            .map(|(_, gx, gy, hp)| *gx != a.gx || *gy != a.gy || (*hp - a.hp).abs() > 0.01)
+                            .unwrap_or(true);
+                        if changed {
+                            if !any {
+                                let _ = self.domain_book.touch(DomainId::Agents);
+                                any = true;
+                            }
+                            a.version = self.domain_book.epoch(DomainId::Agents);
+                        }
+                    }
                 }
             }
         }
         if self.bombers_enabled {
             if let Some(bombers) = self.bombers.as_mut() {
                 if bombers.living_count() > 0 {
+                    let before: Vec<(u32, i32, i32, f32)> = bombers
+                        .bombers
+                        .iter()
+                        .map(|b| (b.id, b.gx, b.gy, b.hp))
+                        .collect();
+                    let before_count = before.len();
+                    let bombs_before = bombers.pending_bomb_events.len();
                     bombers.tick(kernel);
+                    let bombed = bombers.pending_bomb_events.len() > bombs_before;
+                    let mut any = bombers.bombers.len() != before_count || bombed;
+                    if any {
+                        let _ = self.domain_book.touch(DomainId::Bombers);
+                    }
+                    for b in &mut bombers.bombers {
+                        if b.hp <= 0.0 {
+                            continue;
+                        }
+                        let changed = before
+                            .iter()
+                            .find(|(id, _, _, _)| *id == b.id)
+                            .map(|(_, gx, gy, hp)| *gx != b.gx || *gy != b.gy || (*hp - b.hp).abs() > 0.01)
+                            .unwrap_or(true);
+                        if changed {
+                            if !any {
+                                let _ = self.domain_book.touch(DomainId::Bombers);
+                                any = true;
+                            }
+                            b.version = self.domain_book.epoch(DomainId::Bombers);
+                        }
+                    }
                 }
             }
         }
         kernel.advance_round();
+        // Stamp territory cell versions for owner dirty this round (SCD1 pull source).
+        let (dirty_idx, dirty_val) = kernel.take_owner_dirty();
+        let (display_idx, display_vals) = kernel.take_display_dirty();
+        if !dirty_idx.is_empty() {
+            let tv = self.domain_book.touch(DomainId::Territory);
+            if self.owner_cell_version.len() < kernel.owners.len() {
+                self.owner_cell_version.resize(kernel.owners.len(), 0);
+            }
+            for &idx in &dirty_idx {
+                if idx >= 0 && (idx as usize) < self.owner_cell_version.len() {
+                    self.owner_cell_version[idx as usize] = tv;
+                }
+            }
+            // Keep legacy txn available for QA paths only.
+            self.presentation_txn.push_owner_delta(
+                dirty_idx,
+                dirty_val,
+                display_idx,
+                display_vals,
+                kernel.friendly_tiles,
+                kernel.hostile_tiles,
+            );
+        }
     }
 
     #[func]

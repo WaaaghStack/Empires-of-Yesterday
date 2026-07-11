@@ -1,12 +1,12 @@
 //! World-edit operations (beachhead, bridge corridors, claimable) — Phase 3 authority in Rust.
 
+use crate::flow_constants::BRIDGE_PRESSURE_FLOW_MULT;
 use crate::sim::{
     TerritoryKernel, OWNER_FRIENDLY, OWNER_NEUTRAL, OWNER_UNCLAIMABLE,
 };
 
 const HEIGHT_MAX: f32 = 100.0;
 const IMPASSABLE_MOVE_COST: f32 = 50.0;
-const BRIDGE_PRESSURE_FLOW_MULT: f32 = 2.8;
 
 #[derive(Clone, Debug, Default)]
 pub struct ClaimableDelta {

@@ -1,19 +1,53 @@
 # Rust GDExtension Integration (Empires of Yesterday)
 
-This document describes how to build and use the Rust native extension that accelerates territory conquest simulation, replay fluid bake, pressure codec, and tape packing.
+This document describes how to build and use the Rust native extension that accelerates territory conquest simulation, world session (structures/units), logistics, presentation transactions, replay fluid bake, pressure codec, and tape packing.
 
 ## Current Status
 
 - **Location:** `rust/empire_territory/`
 - **Godot class:** `TerritorySim` (RefCounted GDExtension)
-- **Modules:** `sim.rs` (simple-water kernel + active-set), `fluid_bake.rs` (replay display RGBA), `tape_codec.rs` (pressure v2 + EYTR v2 pack body)
 - **Packaging:** DLLs in `rust/empire_territory/bin/`, wired by `empire_territory.gdextension`
+- **Live Play contract:** WorldDataset authority + **SCD1 domain versioned pulls** (see DESIGN.md and `docs/REQUEST_SCD1_VERSIONED_PULL.md`). Live World Conquest expects this extension loaded. PresentationTxn is **not** the live paint path.
+
+### Authority modules (`rust/empire_territory/src/`)
+
+| Module | Role |
+|--------|------|
+| `lib.rs` | GDExtension entry, `TerritorySim` FFI surface (`pull_domain_since`, `scd1_*`) |
+| `domain_version.rs` | Per-domain epochs, gap full-pull allow-list + cooldown policy |
+| `sim.rs` | Territory kernel — gradient flow, inject, active-set / full-grid |
+| `structures.rs` | Structure store (outpost, barracks, hangar, corridor) + row `version` |
+| `world_session.rs` | Build timers, construction damage, barracks/hangar spawns, soldier upkeep tick |
+| `agents.rs` | Soldiers — march, aura, caps + row `version` |
+| `bombers.rs` | Bombers — strike plans, bomb, caps + row `version` |
+| `logistics.rs` | Shared road network, strain, path completion (replaces builder bots as authority) |
+| `builders.rs` | Legacy builder-agent path (presentation / compatibility; logistics owns live roads) |
+| `economy.rs` | Content tables (costs, drains, caps) mirrored from EconomyCatalog |
+| `resources.rs` | Resource wallet / haul credit authority |
+| `presentation_txn.rs` | **Legacy** change feed (QA only — not live Play paint) |
+| `world_edit.rs` | Structure placement / edit helpers under authority |
+| `route.rs` + `pathfind/` | Route planner, nav rules, battle nav |
+| `grid_query.rs` | Grid lookups for FFI / queries |
+| `fluid_bake.rs` | Replay display RGBA bake |
+| `tape_codec.rs` | Pressure v2 + EYTR v2 pack body |
+
+### Live SCD1 pull API (Godot)
+
+| Method | Role |
+|--------|------|
+| `pull_domain_since(domain, last_version, force_full)` | Full current rows with `version > last` (or full domain if `force_full` / start) |
+| `scd1_domain_epoch(domain)` | High-water for domain |
+| `scd1_sim_generation()` | Match generation (resets force seed) |
+| `scd1_decide_full_pull(...)` | Allow-list reason or empty (incremental) |
+| `scd1_note_full_pull(reason)` | Cooldown + `FULL_RESYNC` log |
+
+Domains: `territory`, `structures`, `roads`, `agents`, `bombers`, `wallet`. Client: `Scd1DomainPull.gd`. Harness: `scd1_version_pull_harness.gd`.
 
 ### Backend defaults (when extension is loaded)
 
 | Context | Default | Override |
 |---------|---------|----------|
-| World Conquest live sim | Rust | `BATTLE_TERRITORY_BACKEND=cpu` or `gpu` |
+| World Conquest live sim | Rust (WorldDataset) | `BATTLE_TERRITORY_BACKEND=cpu` or `gpu` (QA/harness only; GPU live fails WorldDataset assert) |
 | `build_replay_tape` (QA resolve) | Rust | `BATTLE_TERRITORY_BACKEND=cpu` forces GDScript |
 
 Live Rust sim uses **active-set** gradient (faster) and skips the adaptive second gradient pass. Resolve uses **full grid** plus adaptive double-pass when the frontier moves enough — for exact parity with CPU golden tests.
@@ -85,9 +119,12 @@ sim.advance_rounds(4)         # batch (resolve / tape)
 var synced := sim.sync_into_tile_control()  # owners, pressures, tile counts
 ```
 
-Other methods:
+Other methods (selection):
 
 - `get_owners()`, `get_pressure_friendly()`, `get_pressure_hostile()`
+- `pull_presentation_txn` / presentation delta consumers (live paint path)
+- `world_session_tick(dt, friendly_aurelium)` — structures + unit spawns under WorldDataset
+- `try_spawn_agent` / `try_spawn_bomber`, structure snapshots
 - `bake_fluid_rgba(w, h, land_mask, pf, ph, power_scale)` → `PackedByteArray` RGBA8
 - `bake_fluid_frames_parallel(frames_array)` → parallel batch bake (rayon)
 - `encode_pressure_v2(pressure)`, `decode_pressure_v2(blob)`
@@ -117,13 +154,15 @@ The Rust vs CPU owner parity check (16 rounds, world map, exact match) runs by d
 
 - Reload: close Godot, rebuild, reopen (or use GDExtension reload if your editor supports it).
 - `cargo check` for fast type-checking without linking a DLL.
-- Constants in `sim.rs` / `fluid_bake.rs` should match `BattleTileControl.gd` / `BattleTileFluidField.gd` for parity.
+- Constants in `sim.rs` / `fluid_bake.rs` / economy tables should match `BattleTileControl.gd` / `WorldConquestConfig.gd` / `EconomyCatalog.gd` for parity.
 - Resolve path expects **0 owner mismatches** vs CPU; active-set live path allows ≤8 tile drift (same as CPU active-set QA).
+- After Godot editor upgrades, rebuild gdext against the same major line (see DESIGN.md Godot version story).
 
 ## References
 
-- `DESIGN.md` §4 — hydrostatic territory model
-- `BattleTileControl.gd` — GDScript reference sim
+- `DESIGN.md` — mechanics, WorldDataset architecture, design locks
+- `BattleTileControl.gd` — GDScript reference sim (QA)
 - `BattleTileFluidField.gd` — fluid bake reference
 - `qa_runner.gd` — benches and golden tests
 - `PERFORMANCE.md` — territory perf program notes
+- `docs/INDEX.md` — doc map

@@ -1,6 +1,8 @@
 class_name UnitSimulationStore
 extends RefCounted
-## Packed unit data for 500–10k scale. No Node references in hot arrays.
+## LEGACY / QUARANTINED (C7): tactical-era packed unit store.
+## Live World Conquest soldiers/bombers live in Rust AgentLayer / BomberLayer via TerritorySim.
+## Do not wire this into WorldConquestScreen. Kept for reference and optional offline tools only.
 
 enum Side { FRIENDLY = 0, HOSTILE = 1 }
 enum Tier { DORMANT = 0, SIM_ONLY = 1, LITE = 2, FULL = 3 }

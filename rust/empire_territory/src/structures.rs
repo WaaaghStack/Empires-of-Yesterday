@@ -32,6 +32,8 @@ pub struct StructureRecord {
     /// Seconds left in BUILDING phase; < 0 when not building.
     pub build_remaining: f32,
     pub spawn_timer: f32,
+    /// SCD1 domain version stamp (structures epoch at last write).
+    pub version: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -195,7 +197,10 @@ impl StructureStore {
                     || record.state == STATE_BUILDING
                     || record.state == STATE_ACTIVE
             }
-            KIND_CORRIDOR_LINK => record.state == STATE_CONNECTING,
+            // ACTIVE allowed until Godot migrates the structure into bridge_corridors.
+            KIND_CORRIDOR_LINK => {
+                record.state == STATE_CONNECTING || record.state == STATE_ACTIVE
+            }
             _ => false,
         }
     }

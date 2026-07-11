@@ -1,4 +1,7 @@
-//! Shared per-team logistics network — timer road growth, strain, wave audit (replaces builder bots).
+//! Shared per-team logistics network — sole live road / path_built authority (A6/A7/C8).
+//!
+//! Replaces builder-bot path growth under World Conquest live. `builders` is legacy-only and
+//! must not advance `path_built` when this layer is active.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -11,6 +14,14 @@ use crate::structures::{
 
 const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+// --- Reconcile budget (B2): prefer regional/delta work; never thrash full network every frame. ---
+/// Default cells examined per team per frame during wave_audit / reconcile.
+pub const LOGISTICS_RECONCILE_CELLS_PER_FRAME_DEFAULT: usize = 512;
+/// Hard cap even if Godot config requests more (avoids 6k+ full-network thrash).
+pub const LOGISTICS_RECONCILE_CELLS_PER_FRAME_HARD_CAP: usize = 2048;
+/// Max regional frontier cells re-checked from grow queue / connecting paths per frame.
+pub const LOGISTICS_RECONCILE_REGIONAL_CAP: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct LogisticsConfig {
     pub road_cells_per_sec: f32,
@@ -18,6 +29,7 @@ pub struct LogisticsConfig {
     pub barracks_build_sec: f32,
     pub hangar_build_sec: f32,
     pub outpost_max_health: f32,
+    /// Per-frame cell budget for network reconcile (clamped by HARD_CAP).
     pub reconcile_cells_per_frame: usize,
     pub full_recal_interval_sec: f32,
     pub placement_heat_decay_per_sec: f32,
@@ -38,7 +50,7 @@ impl Default for LogisticsConfig {
             barracks_build_sec: 60.0,
             hangar_build_sec: 60.0,
             outpost_max_health: 10.0,
-            reconcile_cells_per_frame: 648,
+            reconcile_cells_per_frame: LOGISTICS_RECONCILE_CELLS_PER_FRAME_DEFAULT,
             full_recal_interval_sec: 25.0,
             placement_heat_decay_per_sec: 0.85,
             burst_base: 0.02,
@@ -50,6 +62,13 @@ impl Default for LogisticsConfig {
             strain_sensitivity: 1.0,
         }
     }
+}
+
+/// Clamp Godot-provided reconcile budget to hard cap (B2).
+pub fn clamp_reconcile_budget(requested: usize) -> usize {
+    requested
+        .max(1)
+        .min(LOGISTICS_RECONCILE_CELLS_PER_FRAME_HARD_CAP)
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +97,11 @@ pub struct LogisticsStepEvents {
     pub new_built_cells: Vec<i32>,
     pub friendly_output_mult: f32,
     pub hostile_output_mult: f32,
+    /// Network-wide road version (I9). Bumped **once** per step that changed the network,
+    /// never per-cell — avoids thrashing resource road caches / full structure snaps.
+    pub road_network_version: u32,
+    /// Cells examined by budgeted reconcile this frame (diagnostic / tests).
+    pub reconcile_cells_examined: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -397,11 +421,85 @@ impl TeamNetwork {
         }
     }
 
-    /// Partitioned target/built invariant repair. Intentionally empty until a real
-    /// check is implemented — must not burn `budget` on a no-op cursor walk.
-    fn wave_audit(&mut self, _budget: usize) {
-        // When implementing: walk `reconcile_cursor` over `tile_count` with real
-        // target-vs-built validation; do not reintroduce empty spin loops.
+    /// Budgeted target/built invariant repair (B2).
+    /// Prefer regional work (grow queue + planned frontier) then a hard-capped cursor
+    /// sweep — never thrash the full network every frame.
+    fn wave_audit(&mut self, budget: usize) -> usize {
+        let budget = clamp_reconcile_budget(budget);
+        if self.tile_count == 0 || budget == 0 {
+            return 0;
+        }
+        let mut examined = 0usize;
+
+        // Phase 1: regional — re-check grow queue front (cheap, high value).
+        let regional_cap = LOGISTICS_RECONCILE_REGIONAL_CAP.min(budget);
+        let queue_snapshot: Vec<i32> = self
+            .grow_queue
+            .iter()
+            .copied()
+            .take(regional_cap)
+            .collect();
+        for key in queue_snapshot {
+            if examined >= budget {
+                break;
+            }
+            examined += 1;
+            if key < 0 || (key as usize) >= self.tile_count {
+                self.grow_queued.remove(&key);
+                continue;
+            }
+            let ui = key as usize;
+            // Built cells should not stay planned/queued.
+            if self.built[ui] != 0 {
+                self.planned[ui] = 0;
+                self.grow_queued.remove(&key);
+                self.cell_grow_progress.remove(&key);
+                continue;
+            }
+            // Not a target and not planned → drop from queue.
+            if self.target[ui] == 0 && self.planned[ui] == 0 {
+                self.grow_queued.remove(&key);
+                continue;
+            }
+            // Ensure planned stays consistent with target for active fronts.
+            if self.target[ui] != 0 && self.planned[ui] == 0 && self.built[ui] == 0 {
+                self.planned[ui] = 1;
+            }
+        }
+        // Compact queue after removals.
+        if examined > 0 {
+            self.grow_queue
+                .retain(|k| self.grow_queued.contains(k));
+        }
+
+        // Phase 2: cursor sweep over remaining budget (partitioned full-grid progress).
+        let mut remaining = budget.saturating_sub(examined);
+        while remaining > 0 && self.tile_count > 0 {
+            if self.reconcile_cursor >= self.tile_count {
+                self.reconcile_cursor = 0;
+            }
+            let ui = self.reconcile_cursor;
+            self.reconcile_cursor += 1;
+            remaining -= 1;
+            examined += 1;
+
+            // target ⊇ built: anything built is a permanent target.
+            if self.built[ui] != 0 {
+                self.target[ui] = 1;
+                self.planned[ui] = 0;
+                continue;
+            }
+            // planned without target and not adjacent to built frontier → clear stale plan.
+            if self.planned[ui] != 0 && self.target[ui] == 0 {
+                let key = ui as i32;
+                if !self.adjacent_to_built(key) {
+                    self.planned[ui] = 0;
+                    self.grow_queued.remove(&key);
+                    self.cell_grow_progress.remove(&key);
+                }
+            }
+        }
+        examined
     }
 }
 
@@ -411,6 +509,8 @@ pub struct LogisticsLayer {
     pub hostile: Option<TeamNetwork>,
     pub player_home: (i32, i32),
     pub enemy_home: (i32, i32),
+    /// Monotonic network-wide version (I9). Never bumped per cell.
+    pub road_network_version: u32,
 }
 
 impl LogisticsLayer {
@@ -561,6 +661,8 @@ impl LogisticsLayer {
             self.configure(tile_count, grid_w, grid_h, cfg);
         }
 
+        let network_changed_before_cells = result.new_built_cells.len();
+        let network_changed_before_done = result.path_completions.len();
         for team in [OWNER_FRIENDLY, OWNER_HOSTILE] {
             self.step_team(dt, store, cfg, team, &mut result);
         }
@@ -578,6 +680,13 @@ impl LogisticsLayer {
                 n.effective_output_mult(n.compute_ongoing_strain(store, OWNER_HOSTILE, cfg), cfg)
             })
             .unwrap_or(1.0);
+        // I9: bump network version once per step that changed roads/completions — not per cell.
+        let network_grew = result.new_built_cells.len() > network_changed_before_cells
+            || result.path_completions.len() > network_changed_before_done;
+        if network_grew {
+            self.road_network_version = self.road_network_version.wrapping_add(1);
+        }
+        result.road_network_version = self.road_network_version;
         result
     }
 
@@ -604,7 +713,9 @@ impl LogisticsLayer {
             net.full_recal_timer = cfg.full_recal_interval_sec;
             net.rebuild_target_from_store(store, team);
         }
-        net.wave_audit(cfg.reconcile_cells_per_frame);
+        let examined = net.wave_audit(cfg.reconcile_cells_per_frame);
+        result.reconcile_cells_examined =
+            result.reconcile_cells_examined.saturating_add(examined as u32);
 
         let connecting_sids: Vec<i32> = store
             .structures
@@ -812,7 +923,12 @@ fn on_path_completed(
     st.path_built = path_len as f32;
     let kind = st.kind;
     let is_corridor_link = kind == KIND_CORRIDOR_LINK;
-    if !is_corridor_link {
+    if is_corridor_link {
+        // Land bridges have no BUILDING phase — leave CONNECTING and Godot would pulse forever
+        // while the full road ribbon is already drawn (classic bridge "haunting" blink).
+        st.state = crate::structures::STATE_ACTIVE;
+        st.build_remaining = 0.0;
+    } else {
         let build_sec = build_sec_for_kind(kind, cfg);
         st.state = crate::structures::STATE_BUILDING;
         st.build_remaining = build_sec;
@@ -858,6 +974,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.configure(16, 16, 16, &cfg);
@@ -897,6 +1014,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.upsert(StructureRecord {
             id: 2,
@@ -912,6 +1030,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.configure(256, 16, 16, &cfg);
@@ -947,6 +1066,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.upsert(StructureRecord {
             id: 2,
@@ -962,6 +1082,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.configure(256, 16, 16, &cfg);
@@ -1002,6 +1123,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.configure(16, 16, 16, &cfg);
@@ -1021,6 +1143,57 @@ mod tests {
             store.structures.get(&8).unwrap().state,
             STATE_BUILDING,
             "structure should enter building phase"
+        );
+    }
+
+    #[test]
+    fn land_bridge_completes_to_active_not_connecting() {
+        // Regression: corridor path-complete left state CONNECTING → eternal pulse with full ribbon.
+        let mut layer = LogisticsLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            ..Default::default()
+        };
+        let cfg = LogisticsConfig::default();
+        let mut store = StructureStore::default();
+        let path = vec![0, 1, 2, 3];
+        store.upsert(StructureRecord {
+            id: 42,
+            team: OWNER_FRIENDLY,
+            kind: KIND_CORRIDOR_LINK,
+            state: STATE_CONNECTING,
+            gx: 3,
+            gy: 0,
+            path_keys: path.clone(),
+            path_built: 1.0,
+            path_len: 4,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        layer.configure(16, 16, 16, &cfg);
+        layer.register_terminal(42, &mut store, OWNER_FRIENDLY, 16, &cfg);
+        let mut done = false;
+        for _ in 0..40 {
+            let frame = layer.step_frame(1.0, &mut store, 16, 16, &cfg);
+            if !frame.path_completions.is_empty() || !frame.completed_corridor_sids.is_empty() {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "land bridge should path-complete");
+        let st = store.structures.get(&42).expect("corridor still in store");
+        assert_eq!(
+            st.state,
+            crate::structures::STATE_ACTIVE,
+            "corridor must leave CONNECTING so markers stop pulsing"
+        );
+        assert!(
+            (st.path_built - 4.0).abs() < 0.01,
+            "path_built should be full length"
         );
     }
 
@@ -1048,6 +1221,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.configure(16, 16, 16, &cfg);
@@ -1068,6 +1242,83 @@ mod tests {
             4.0,
             "path_built should match full path"
         );
+    }
+
+    #[test]
+    fn reconcile_budget_is_hard_capped() {
+        assert_eq!(
+            clamp_reconcile_budget(LOGISTICS_RECONCILE_CELLS_PER_FRAME_HARD_CAP * 10),
+            LOGISTICS_RECONCILE_CELLS_PER_FRAME_HARD_CAP
+        );
+        assert_eq!(
+            clamp_reconcile_budget(0),
+            1,
+            "zero budget still examines at least one cell when called"
+        );
+    }
+
+    #[test]
+    fn wave_audit_respects_per_frame_budget() {
+        let mut layer = LogisticsLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            ..Default::default()
+        };
+        let mut cfg = LogisticsConfig::default();
+        cfg.reconcile_cells_per_frame = 64;
+        layer.configure(256, 16, 16, &cfg);
+        let mut store = StructureStore::default();
+        store.ready = true;
+        let frame = layer.step_frame(0.016, &mut store, 16, 16, &cfg);
+        // Two teams × budget, but hard-capped and never full tile_count thrash.
+        assert!(
+            frame.reconcile_cells_examined as usize
+                <= clamp_reconcile_budget(cfg.reconcile_cells_per_frame) * 2
+        );
+        assert!(frame.reconcile_cells_examined > 0);
+    }
+
+    #[test]
+    fn road_network_version_bumps_once_not_per_cell() {
+        let mut layer = LogisticsLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            ..Default::default()
+        };
+        let cfg = LogisticsConfig::default();
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 1,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_CONNECTING,
+            gx: 3,
+            gy: 0,
+            path_keys: vec![0, 1, 2, 3],
+            path_built: 1.0,
+            path_len: 4,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        layer.configure(16, 16, 16, &cfg);
+        layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
+        let v0 = layer.road_network_version;
+        let frame = layer.step_frame(1.0, &mut store, 16, 16, &cfg);
+        if !frame.new_built_cells.is_empty() {
+            // Even if multiple cells completed in one step, version advances by 1.
+            assert_eq!(frame.road_network_version, v0.wrapping_add(1));
+            assert_eq!(layer.road_network_version, frame.road_network_version);
+        }
+        // Idle step must not thrash version.
+        let v1 = layer.road_network_version;
+        let idle = layer.step_frame(0.016, &mut store, 16, 16, &cfg);
+        if idle.new_built_cells.is_empty() && idle.path_completions.is_empty() {
+            assert_eq!(idle.road_network_version, v1);
+        }
     }
 }
 

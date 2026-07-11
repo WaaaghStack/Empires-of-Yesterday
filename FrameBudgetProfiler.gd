@@ -112,4 +112,40 @@ func summary() -> Dictionary:
 		"p99_ms": percentile(0.99),
 		"min_fps": min_fps(),
 		"last_ms": _last_frame_ms,
+		"phases": last_phase_ms(),
+		"likely_bottleneck": likely_bottleneck(),
 	}
+
+
+## G6: rough CPU-phase bottleneck tag for field diagnostics (F3 / spike logs).
+## Screen wires this; no production behavior change.
+func likely_bottleneck() -> String:
+	if _phase_ms.is_empty():
+		if _last_frame_ms > SPIKE_MS:
+			return "unknown_over_budget"
+		return "ok"
+	var best_key: String = ""
+	var best_ms: float = -1.0
+	for key in _phase_ms.keys():
+		var ms: float = float(_phase_ms[key])
+		if ms > best_ms:
+			best_ms = ms
+			best_key = str(key)
+	if _last_frame_ms > SPIKE_MS and best_ms > 0.0:
+		return "likely_cpu:%s" % best_key
+	if best_ms > SPIKE_MS * 0.5:
+		return "likely_cpu:%s" % best_key
+	return "ok"
+
+
+## One-line HUD/diagnostic string (p50/p95/p99 + bottleneck).
+func hud_line() -> String:
+	if _frame_times_ms.is_empty():
+		return "cpu n/a"
+	return "cpu p50=%.1f p95=%.1f p99=%.1f last=%.1f %s" % [
+		percentile(0.50),
+		percentile(0.95),
+		percentile(0.99),
+		_last_frame_ms,
+		likely_bottleneck(),
+	]

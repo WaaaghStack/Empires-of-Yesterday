@@ -270,7 +270,10 @@ static func on_path_completed(st: Dictionary) -> Dictionary:
 	st["path_built"] = float(path_len)
 	var kind: String = str(st.get("kind", ""))
 	var is_corridor_link: bool = kind == OutpostBuildLib.KIND_CORRIDOR_LINK
-	if not is_corridor_link:
+	if is_corridor_link:
+		# Land bridges: ACTIVE immediately (no build timer). Leaving CONNECTING pulses forever.
+		st["state"] = OutpostBuildLib.STATE_ACTIVE
+	else:
 		st["state"] = OutpostBuildLib.STATE_BUILDING
 		st["build_remaining"] = OutpostBuildLib.build_sec_for_kind(kind)
 	return {
@@ -284,6 +287,9 @@ static func on_path_completed(st: Dictionary) -> Dictionary:
 
 
 ## One simulation tick: bot travel, arrivals, path completion, building timers.
+## A6/A7/C8: under WORLD_DATASET_BUILDER_AUTHORITY, hard-refuses unless allow_legacy.
+## Live play must use BattleTerritorySim.builder_step (Rust logistics) — never this path.
+## Selfchecks pass allow_legacy=true to exercise the offline GDScript kernel.
 static func step_frame(
 	dt: float,
 	bots: Array,
@@ -292,6 +298,7 @@ static func step_frame(
 	grid_w: int,
 	map_data = null,
 	tile_control = null,
+	allow_legacy: bool = false,
 ) -> Dictionary:
 	var result := {
 		"visual_dirty": false,
@@ -300,7 +307,15 @@ static func step_frame(
 		"completed_corridor_sids": [],
 		"reassign_teams": [],
 		"building_timer_result": {},
+		"refused": false,
 	}
+	if CFG.WORLD_DATASET_BUILDER_AUTHORITY and not allow_legacy:
+		# Hard refuse: Rust owns path_built / completions under live builder authority.
+		result["refused"] = true
+		push_error(
+			"BuilderAgentLib.step_frame refused: WORLD_DATASET_BUILDER_AUTHORITY is on (A6/A7/C8) — use Rust builder_step"
+		)
+		return result
 	if dt <= 0.0 or bots.is_empty():
 		return result
 	var travel_sec: float = cell_travel_sec()
@@ -471,7 +486,7 @@ static func run_selfcheck() -> Dictionary:
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
 		var frame: Dictionary = step_frame(
-			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null
+			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null, true
 		)
 		for ev: Dictionary in frame.get("cell_arrivals", []):
 			cells += 1
@@ -530,7 +545,7 @@ static func run_chain_selfcheck() -> Dictionary:
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
 		var frame: Dictionary = step_frame(
-			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null
+			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null, true
 		)
 		if str(bot.get("state", "")) == STATE_RETURNING:
 			var still_connecting: int = 0

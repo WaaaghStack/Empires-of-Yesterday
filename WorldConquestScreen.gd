@@ -16,6 +16,10 @@ const OutpostConstructionQueueLib := preload("res://OutpostConstructionQueue.gd"
 const BuilderAgentLib := preload("res://BuilderAgentLib.gd")
 const EnemyStrategyLib := preload("res://EnemyStrategy.gd")
 const EconomyLib := preload("res://EconomyLib.gd")
+const WorldDatasetAssertLib := preload("res://WorldDatasetAssert.gd")
+const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend.gd")
+const PresentationApplyLib := preload("res://WorldConquestPresentationApply.gd")
+const Scd1DomainPullLib := preload("res://Scd1DomainPull.gd")
 
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
@@ -58,6 +62,10 @@ var _enemy_supply: float = 0.0
 var _enemy_ai_clock: float = 0.0
 var _enemy_ai_difficulty: int = CFG.ENEMY_AI_DEFAULT_DIFFICULTY
 var _enemy_ai_action_queue: Array[Dictionary] = []
+## A1/E8: set when live WorldDataset entry fails (missing DLL / assert).
+var _world_dataset_entry_failed: bool = false
+## SCD1 versioned domain pulls (live paint — replaces PresentationTxn).
+var _scd1_pull: Scd1DomainPullLib = Scd1DomainPullLib.new()
 var _sim_time: float = 0.0
 var _paused: bool = false
 var _speed_mult: float = 1.0
@@ -278,7 +286,22 @@ func _setup_world_visuals(map_id: String) -> void:
 	_refresh_resource_deposits()
 	_resource_links_dirty = true
 	_init_builder_agents()
+	# E8: full live contract after logistics/wallet homes are configured (not at enable_rust_live).
+	_assert_world_dataset_after_setup()
 	_on_play_area_resized(true)
+
+
+## E8: run WorldDatasetAssert once builders + mirror mode are ready for play.
+func _assert_world_dataset_after_setup() -> void:
+	if territory_sim == null or not CFG.world_dataset_require_live():
+		return
+	if not territory_sim.use_rust_for_live():
+		_world_dataset_entry_failed = true
+		push_error("WorldDataset FAIL CLOSED: Rust live not active after setup")
+		return
+	if not WorldDatasetAssertLib.validate_or_fail(territory_sim, battle_data):
+		_world_dataset_entry_failed = true
+		push_error("WorldDatasetAssert.validate_or_fail failed after full setup")
 
 
 func _warm_route_planner_at_load() -> void:
@@ -304,6 +327,9 @@ func _warm_route_planner_at_load() -> void:
 func _process(delta: float) -> void:
 	# Perf: skip FrameBudgetProfiler during bootstrap loading (reset_samples after _loading=false).
 	if _loading:
+		return
+	# A1: do not advance dual-sim / play loop when live entry failed closed.
+	if _world_dataset_entry_failed:
 		return
 	if _battle_finished or battle_data == null or territory_sim == null:
 		return
@@ -459,19 +485,52 @@ func request_outpost_visual_refresh(roads: bool, markers: bool, sid: int = -1) -
 
 
 func _setup_territory_backend() -> void:
+	# G4/A9: reject GPU env for World Conquest.
+	BattleTerritoryRustBackendLib.reject_gpu_env_for_world_conquest()
 	var backend_env: String = OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower()
 	if backend_env == "cpu":
+		# Explicit CPU only for QA/debug; live require_live forbids dual-sim without opt-in.
+		if (
+			CFG.world_dataset_require_live()
+			and OS.get_environment("BATTLE_ALLOW_CPU_UNDER_LIVE") != "1"
+		):
+			push_error(
+				"WorldDataset FAIL CLOSED: BATTLE_TERRITORY_BACKEND=cpu while world_dataset_require_live() — set BATTLE_ALLOW_CPU_UNDER_LIVE=1 only for intentional QA."
+			)
+			_world_dataset_entry_failed = true
 		territory_sim.set_live_backend(false)
 		territory_sim.refresh_world_dataset_mirror_mode()
 		RunLog.info("World Conquest using CPU territory backend (BATTLE_TERRITORY_BACKEND=cpu)")
 		return
 	if backend_env == "gpu":
-		push_warning(
+		push_error(
 			"World Conquest ignores BATTLE_TERRITORY_BACKEND=gpu — use Rust or cpu."
 		)
 	if territory_sim.enable_rust_live():
 		territory_sim.refresh_world_dataset_mirror_mode()
-		RunLog.info("World Conquest using Rust territory backend (WorldDataset live)")
+		# Full WorldDatasetAssert runs after configure_builders (see _assert_world_dataset_after_setup).
+		# Early entry only fails closed when enable_rust_live itself failed.
+		if territory_sim.world_dataset_failed():
+			_world_dataset_entry_failed = true
+			push_error(
+				"WorldDataset FAIL CLOSED after enable_rust_live: %s"
+				% str(territory_sim.world_dataset_error)
+			)
+			return
+		if _scd1_pull != null:
+			_scd1_pull.reset_for_new_match()
+		RunLog.info("World Conquest using Rust territory backend (WorldDataset live + SCD1 pulls)")
+		return
+	# A1/G3: fail closed when live requires Rust but DLL missing — no silent CPU dual-sim.
+	if CFG.world_dataset_require_live() or territory_sim.world_dataset_failed():
+		_world_dataset_entry_failed = true
+		var err: String = str(territory_sim.world_dataset_error)
+		push_error(
+			"WorldDataset FAIL CLOSED: Rust TerritorySim required for live play. %s" % err
+		)
+		RunLog.info("World Conquest FAILED: Rust extension not loaded (live contract)")
+		if status_label:
+			status_label.text = "WorldDataset FAIL CLOSED — Rust DLL required"
 		return
 	territory_sim.set_live_backend(false)
 	territory_sim.refresh_world_dataset_mirror_mode()
@@ -534,26 +593,41 @@ func _placement_cost_hint(kind: String) -> String:
 func _pay_placement_cost(kind: String) -> bool:
 	if not EconomyLib.can_afford_build(_supply, _friendly_resources, kind):
 		return false
-	var paid: Dictionary = EconomyLib.pay_build(_supply, _friendly_resources, kind)
-	_supply = float(paid.get("supply", _supply))
-	var res: Array = paid.get("resources", _friendly_resources)
-	for i in range(mini(CFG.RESOURCE_TYPE_COUNT, res.size())):
-		_friendly_resources[i] = float(res[i])
-	if _resource_wallet_active():
-		_sync_resource_wallet_to_rust()
+	var cost: Vector4 = EconomyLib.placement_cost(kind)
+	_supply -= cost.x
+	# SCD1 wallet: spend via Rust delta only (do not Godot-author absolute balances).
+	if _resource_wallet_active() and territory_sim != null:
+		territory_sim.apply_resource_tick_delta(
+			[-cost.y, -cost.z, -cost.w],
+			[0.0, 0.0, 0.0],
+		)
+		_pull_resource_wallet_from_rust()
+	else:
+		var paid: Dictionary = EconomyLib.pay_build(_supply + cost.x, _friendly_resources, kind)
+		_supply = float(paid.get("supply", _supply))
+		var res: Array = paid.get("resources", _friendly_resources)
+		for i in range(mini(CFG.RESOURCE_TYPE_COUNT, res.size())):
+			_friendly_resources[i] = float(res[i])
 	return true
 
 
 func _pay_enemy_placement_cost(kind: String) -> bool:
 	if not EconomyLib.can_afford_build(_enemy_supply, _hostile_resources, kind):
 		return false
-	var paid: Dictionary = EconomyLib.pay_build(_enemy_supply, _hostile_resources, kind)
-	_enemy_supply = float(paid.get("supply", _enemy_supply))
-	var res: Array = paid.get("resources", _hostile_resources)
-	for i in range(mini(CFG.RESOURCE_TYPE_COUNT, res.size())):
-		_hostile_resources[i] = float(res[i])
+	var cost: Vector4 = EconomyLib.placement_cost(kind)
+	_enemy_supply -= cost.x
 	if _resource_wallet_active() and territory_sim != null:
-		_sync_resource_wallet_to_rust()
+		territory_sim.apply_resource_tick_delta(
+			[0.0, 0.0, 0.0],
+			[-cost.y, -cost.z, -cost.w],
+		)
+		_pull_resource_wallet_from_rust()
+	else:
+		var paid: Dictionary = EconomyLib.pay_build(_enemy_supply + cost.x, _hostile_resources, kind)
+		_enemy_supply = float(paid.get("supply", _enemy_supply))
+		var res: Array = paid.get("resources", _hostile_resources)
+		for i in range(mini(CFG.RESOURCE_TYPE_COUNT, res.size())):
+			_hostile_resources[i] = float(res[i])
 	return true
 
 
@@ -1133,10 +1207,19 @@ func _enqueue_owner_delta_dict(d: Dictionary) -> void:
 	_last_overlay_delta_count = display_idxs.size()
 
 
-## One live-frame presentation pull after sim + builders (owners always; structures/units on demand).
+## SCD1 live paint: per-domain versioned pulls (replaces PresentationTxn dual-feed).
 func _flush_live_presentation_delta(delta: float) -> void:
 	if not _live_rust_presentation() or territory_sim.finished:
 		return
+	if _scd1_pull == null:
+		_scd1_pull = Scd1DomainPullLib.new()
+	var sim = territory_sim
+	# Non-unit domains every frame. Agents/bombers only when the visual rate is due —
+	# otherwise last_version advances on unused pulls and intermediate moves are dropped.
+	_apply_scd1_territory(_scd1_pull.pull_domain(sim, "territory", ""))
+	_apply_scd1_structures(_scd1_pull.pull_domain(sim, "structures", ""))
+	_apply_scd1_roads(_scd1_pull.pull_domain(sim, "roads", ""))
+	_apply_scd1_wallet(_scd1_pull.pull_domain(sim, "wallet", ""))
 	_soldier_visual_clock += delta
 	_bomber_visual_clock += delta
 	var soldier_due: bool = (
@@ -1153,63 +1236,165 @@ func _flush_live_presentation_delta(delta: float) -> void:
 			or _bomber_visual_clock >= 1.0 / CFG.BOMBER_VISUAL_UPDATES_PER_SEC
 		)
 	)
-	# Full structure table dump only when explicitly dirty (placement/activate/destroy).
-	# Normal road growth uses path_built_* transaction fields from the Rust change feed.
-	var want_structures: bool = _presentation_structures_dirty and _structure_authority_active()
-	var pres: Dictionary = territory_sim.pull_presentation_delta({
-		"structures": want_structures,
-		"agents": soldier_due,
-		"bombers": bomber_due,
-	})
-	if CFG.OVERLAY_OWNERS_ONLY:
-		_enqueue_owner_delta_dict(pres.get("owners", {}))
-	# Apply structure field transactions (main table stays in Rust).
-	_apply_structure_field_txn(pres)
-	if want_structures:
-		_structure_snapshot_pull_count += 1
-		var snap: Dictionary = pres.get("structures", {})
-		if not snap.is_empty():
-			_apply_structure_snapshot_dict(snap, _presentation_structure_merge)
-		_presentation_structures_dirty = false
-		_presentation_structure_merge.clear()
-	# Road cells: only from txn when builder did not already queue them this frame.
-	# Avoid double-pending the same logistics cells (builder_step events are the live road feed).
-	if not _builder_authority_active():
-		for cell_key in pres.get("new_road_cells", PackedInt32Array()):
-			_network_road_pending.append(int(cell_key))
-	var marker_dirty: PackedInt32Array = pres.get("marker_dirty_sids", PackedInt32Array())
-	if marker_dirty.size() > 0:
-		_outpost_marker_dirty = true
 	if soldier_due:
 		_soldier_visual_clock = 0.0
 		_soldier_visual_dirty = false
-		if globe_map != null:
-			var agents: Dictionary = pres.get("agents", {})
-			globe_map.sync_soldiers(
-				agents.get("teams", PackedByteArray()),
-				agents.get("gx", PackedInt32Array()),
-				agents.get("gy", PackedInt32Array()),
-			)
-	elif not territory_sim.agents_ready() and globe_map != null:
-		globe_map.sync_soldiers(PackedByteArray(), PackedInt32Array(), PackedInt32Array())
+		_apply_scd1_agents(_scd1_pull.pull_domain(sim, "agents", ""))
 	if bomber_due:
 		_bomber_visual_clock = 0.0
 		_bomber_visual_dirty = false
-		if globe_map != null:
-			var bombers: Dictionary = pres.get("bombers", {})
-			globe_map.sync_bombers(
-				bombers.get("teams", PackedByteArray()),
-				bombers.get("gx", PackedInt32Array()),
-				bombers.get("gy", PackedInt32Array()),
-				bombers.get("search_scope", PackedInt32Array()),
-			)
-			globe_map.play_bomb_drops(
-				bombers.get("bomb_teams", PackedByteArray()),
-				bombers.get("bomb_gx", PackedInt32Array()),
-				bombers.get("bomb_gy", PackedInt32Array()),
-			)
-	elif not territory_sim.bombers_ready() and globe_map != null:
-		globe_map.sync_bombers(PackedByteArray(), PackedInt32Array(), PackedInt32Array())
+		_apply_scd1_bombers(_scd1_pull.pull_domain(sim, "bombers", ""))
+	_presentation_structures_dirty = false
+	_presentation_structure_merge.clear()
+
+
+func _apply_scd1_territory(batch: Dictionary) -> void:
+	if batch.is_empty() or bool(batch.get("empty", true)):
+		return
+	if bool(batch.get("full_denied_cooldown", false)):
+		return
+	var idxs: PackedInt32Array = batch.get("indices", PackedInt32Array())
+	var owners: PackedByteArray = batch.get("owners", PackedByteArray())
+	if idxs.is_empty():
+		return
+	if _outpost_construction_queue != null:
+		_outpost_construction_queue.enqueue_overlay_delta(idxs, owners)
+		_outpost_construction_queue.request_gpu_upload()
+	_maybe_log_perf_action("gpu_upload", {"cells": idxs.size()}, 2.0)
+	if territory_sim != null and territory_sim.rust_field != null:
+		territory_sim.rust_field.friendly_tiles = int(
+			batch.get("friendly_tiles", territory_sim.rust_field.friendly_tiles)
+		)
+		territory_sim.rust_field.hostile_tiles = int(
+			batch.get("hostile_tiles", territory_sim.rust_field.hostile_tiles)
+		)
+
+
+func _apply_scd1_structures(batch: Dictionary) -> void:
+	if batch.is_empty() or bool(batch.get("full_denied_cooldown", false)):
+		return
+	if bool(batch.get("empty", true)) and not bool(batch.get("full", false)):
+		return
+	var rows: Array = batch.get("rows", [])
+	if battle_data == null:
+		return
+	var dirty_sids: Array = []
+	if bool(batch.get("full", false)):
+		_structure_snapshot_pull_count += 1
+		battle_data.placed_structures.clear()
+		for row in rows:
+			if row is Dictionary:
+				battle_data.placed_structures.append((row as Dictionary).duplicate())
+				dirty_sids.append(int(row.get("id", -1)))
+	else:
+		var by_id: Dictionary = {}
+		for st in battle_data.placed_structures:
+			if st is Dictionary:
+				by_id[int(st.get("id", -1))] = st
+		for row in rows:
+			if not row is Dictionary:
+				continue
+			var r: Dictionary = row
+			var sid: int = int(r.get("id", -1))
+			if sid < 0:
+				continue
+			if by_id.has(sid):
+				var dst: Dictionary = by_id[sid]
+				for k in r.keys():
+					dst[k] = r[k]
+			else:
+				battle_data.placed_structures.append(r.duplicate())
+			dirty_sids.append(sid)
+	# Budget: only refresh markers for changed sids (full empty list rebuild only on full seed).
+	if globe_map != null and dirty_sids.size() > 0:
+		if bool(batch.get("full", false)):
+			_refresh_markers([])
+		else:
+			_refresh_markers(dirty_sids)
+
+
+func _apply_scd1_roads(batch: Dictionary) -> void:
+	if batch.is_empty() or bool(batch.get("empty", true)):
+		return
+	if bool(batch.get("full_denied_cooldown", false)):
+		return
+	var idxs: PackedInt32Array = batch.get("indices", PackedInt32Array())
+	for i in range(idxs.size()):
+		_network_road_pending.append(int(idxs[i]))
+	_drain_network_road_visuals()
+
+
+func _apply_scd1_agents(batch: Dictionary) -> void:
+	if globe_map == null:
+		return
+	# empty=true → no domain advance; keep prior living-set visuals.
+	if batch.is_empty() or bool(batch.get("empty", true)):
+		if not territory_sim.agents_ready():
+			globe_map.sync_soldiers(PackedByteArray(), PackedInt32Array(), PackedInt32Array())
+		return
+	# Non-empty batch is the full living set (Rust living-set domain contract).
+	var rows: Array = batch.get("rows", [])
+	var teams := PackedByteArray()
+	var gx := PackedInt32Array()
+	var gy := PackedInt32Array()
+	teams.resize(rows.size())
+	gx.resize(rows.size())
+	gy.resize(rows.size())
+	for i in range(rows.size()):
+		var r: Dictionary = rows[i]
+		teams[i] = int(r.get("team", 1))
+		gx[i] = int(r.get("gx", 0))
+		gy[i] = int(r.get("gy", 0))
+	globe_map.sync_soldiers(teams, gx, gy)
+
+
+func _apply_scd1_bombers(batch: Dictionary) -> void:
+	if globe_map == null:
+		return
+	if batch.is_empty() or bool(batch.get("empty", true)):
+		if not territory_sim.bombers_ready():
+			globe_map.sync_bombers(PackedByteArray(), PackedInt32Array(), PackedInt32Array())
+		return
+	# Non-empty batch is the full living set (+ optional one-shot bomb FX).
+	var rows: Array = batch.get("rows", [])
+	var teams := PackedByteArray()
+	var gx := PackedInt32Array()
+	var gy := PackedInt32Array()
+	var scope := PackedInt32Array()
+	teams.resize(rows.size())
+	gx.resize(rows.size())
+	gy.resize(rows.size())
+	scope.resize(rows.size())
+	for i in range(rows.size()):
+		var r: Dictionary = rows[i]
+		teams[i] = int(r.get("team", 1))
+		gx[i] = int(r.get("gx", 0))
+		gy[i] = int(r.get("gy", 0))
+		scope[i] = int(r.get("search_scope", 0))
+	globe_map.sync_bombers(teams, gx, gy, scope)
+	var bomb_teams: PackedByteArray = batch.get("bomb_teams", PackedByteArray())
+	var bomb_gx: PackedInt32Array = batch.get("bomb_gx", PackedInt32Array())
+	var bomb_gy: PackedInt32Array = batch.get("bomb_gy", PackedInt32Array())
+	if not bomb_teams.is_empty():
+		globe_map.play_bomb_drops(bomb_teams, bomb_gx, bomb_gy)
+
+
+func _apply_scd1_wallet(batch: Dictionary) -> void:
+	if batch.is_empty() or bool(batch.get("full_denied_cooldown", false)):
+		return
+	# empty=true means no version advance — keep prior mirror (do not clear).
+	if bool(batch.get("empty", true)) and not bool(batch.get("full", false)):
+		return
+	if bool(batch.get("error", false)):
+		return
+	var friendly: PackedFloat32Array = batch.get("friendly", PackedFloat32Array())
+	var hostile: PackedFloat32Array = batch.get("hostile", PackedFloat32Array())
+	if friendly.is_empty() and hostile.is_empty():
+		return
+	for i in range(mini(3, friendly.size())):
+		_friendly_resources[i] = friendly[i]
+	for i in range(mini(3, hostile.size())):
+		_hostile_resources[i] = hostile[i]
 
 
 func _refresh_markers(changed_sids: Array = []) -> void:
@@ -1594,15 +1779,22 @@ func _resource_wallet_active() -> bool:
 	return territory_sim != null and territory_sim.resource_wallet_active()
 
 
+## SCD1: do not push Godot-authored absolute balances as wallet truth.
+## Spends/income must use apply_resource_tick_delta on Rust; this is a read mirror only.
 func _sync_resource_wallet_to_rust() -> void:
-	if not _resource_wallet_active() or territory_sim == null:
-		return
-	territory_sim.sync_resource_balances(_friendly_resources, _hostile_resources)
+	# Intentionally no-op under SCD1 live wallet — Godot does not author balances.
+	return
 
 
+## Mirror wallet from SCD1 domain pull only under live (no parallel get_resource_balances paint path).
 func _pull_resource_wallet_from_rust() -> void:
 	if not _resource_wallet_active() or territory_sim == null:
 		return
+	if _live_rust_presentation() and _scd1_pull != null:
+		var batch: Dictionary = _scd1_pull.pull_domain(territory_sim, "wallet", "")
+		_apply_scd1_wallet(batch)
+		return
+	# Non-live / CPU: direct balance read from backend.
 	var wallet: Dictionary = territory_sim.pull_resource_balances()
 	if wallet.is_empty():
 		return
@@ -1619,17 +1811,14 @@ func _on_rust_builder_cell_arrival(ev_var: Variant) -> void:
 	var path_sid: int = int(ev.get("sid", -1))
 	var kind: String = str(ev.get("kind", ""))
 	var seg_from: int = int(ev.get("seg_from_idx", 0))
-	# Keep render-cache path_built in lockstep for road MultiMesh (do not wait on snapshot).
+	# SCD1: under live builder authority, path_built comes only from domain pulls — do not invent.
+	if _builder_authority_active() or _structure_authority_active():
+		return
 	var st: Dictionary = _find_structure_by_sid(path_sid)
 	if not st.is_empty():
 		st["path_built"] = BuilderAgentLib.path_built_after_seg(seg_from)
 		if kind.is_empty():
 			kind = str(st.get("kind", ""))
-	# Do NOT bump _road_network_version per cell — that invalidates resource road caches
-	# every frame during CONNECTING and tanks FPS. Path-complete / activate bump instead.
-	# Under builder logistics authority, network MultiMesh already draws from new_built_cells.
-	if _builder_authority_active():
-		return
 	if _outpost_construction_queue != null:
 		_outpost_construction_queue.on_cell_advanced(path_sid)
 
@@ -1648,8 +1837,11 @@ func _on_rust_builder_path_completed(ev_var: Variant) -> void:
 	if kind == OutpostBuildLib.KIND_SPAWNER:
 		_resource_links_dirty = true
 		_structure_sources_version += 1
-	# Main table already left CONNECTING in Rust. Mirror onto render cache from the event
-	# (PresentationTxn also carries state/path_built the same frame). No full structure dump.
+	# SCD1 live: do not invent path_built/state on Godot cache — domain pull applies Rust truth.
+	if _builder_authority_active() or _structure_authority_active():
+		if _outpost_construction_queue != null:
+			_outpost_construction_queue.on_path_completed(done_sid, gx, gy, team, is_corridor_link)
+		return
 	var st: Dictionary = _find_structure_by_sid(done_sid)
 	if not st.is_empty():
 		var plen: int = int(st.get("path_len", 0))
@@ -1672,17 +1864,48 @@ func _on_rust_builder_path_completed(ev_var: Variant) -> void:
 
 
 func _pull_structure_render_cache(merge_by_sid: Dictionary = {}) -> void:
-	## Immediate cache sync (placement/destroy). Prefer _request_structure_presentation_refresh in ticks.
+	## SCD1 live: never get_structure_snapshot dual-feed. All callers (place/destroy/world-edit/builder)
+	## hit this choke-point and are redirected to versioned domain pull (REQUEST lock).
+	if _live_rust_presentation() and _structure_authority_active():
+		# Same-frame paint: merge any local placement rows, then SCD1 structures pull.
+		for sid_k in merge_by_sid.keys():
+			var row = merge_by_sid[sid_k]
+			if row is Dictionary:
+				_scd1_merge_structure_row(row as Dictionary)
+		_presentation_structures_dirty = true
+		for sid_k2 in merge_by_sid.keys():
+			_presentation_structure_merge[sid_k2] = merge_by_sid[sid_k2]
+		if _scd1_pull == null:
+			_scd1_pull = Scd1DomainPullLib.new()
+		if territory_sim != null:
+			var batch: Dictionary = _scd1_pull.pull_domain(territory_sim, "structures", "")
+			_apply_scd1_structures(batch)
+		return
+	# Non-live / CPU parity only.
 	if territory_sim != null:
 		territory_sim.pull_structure_render_cache(merge_by_sid)
 
 
+## Upsert one structure dict into battle_data.placed_structures by id (SCD1 same-frame place).
+func _scd1_merge_structure_row(row: Dictionary) -> void:
+	if battle_data == null:
+		return
+	var sid: int = int(row.get("id", -1))
+	if sid < 0:
+		return
+	for i in range(battle_data.placed_structures.size()):
+		var st = battle_data.placed_structures[i]
+		if st is Dictionary and int(st.get("id", -1)) == sid:
+			for k in row.keys():
+				st[k] = row[k]
+			return
+	battle_data.placed_structures.append(row.duplicate())
+
+
 func _request_structure_presentation_refresh(merge_by_sid: Dictionary = {}) -> void:
-	## Defer full structure table dump into once-per-frame pull (rare: place/activate/destroy).
+	## Live SCD1: mark dirty + optional same-frame structures pull (via gated _pull helper).
 	if _live_rust_presentation() and _structure_authority_active():
-		_presentation_structures_dirty = true
-		for sid_k in merge_by_sid.keys():
-			_presentation_structure_merge[sid_k] = merge_by_sid[sid_k]
+		_pull_structure_render_cache(merge_by_sid)
 		return
 	_pull_structure_render_cache(merge_by_sid)
 
@@ -1707,15 +1930,29 @@ func _apply_structure_field_txn(pres: Dictionary) -> void:
 		if st2.is_empty():
 			continue
 		var code: int = int(state_vals[j])
+		var prev: String = str(st2.get("state", ""))
+		var next_state: String = prev
 		match code:
 			0:
-				st2["state"] = OutpostBuildLib.STATE_CONNECTING
+				next_state = OutpostBuildLib.STATE_CONNECTING
 			1:
-				st2["state"] = OutpostBuildLib.STATE_BUILDING
+				next_state = OutpostBuildLib.STATE_BUILDING
 			2:
-				st2["state"] = OutpostBuildLib.STATE_ACTIVE
+				next_state = OutpostBuildLib.STATE_ACTIVE
 			_:
 				pass
+		# Never thrash finished structures back to CONNECTING (land-bridge pulse bug).
+		# Once path is fully built / BUILDING / ACTIVE, reject CONNECTING regressions.
+		if next_state == OutpostBuildLib.STATE_CONNECTING:
+			var plen: int = OutpostBuildLib.path_len_from_structure(st2)
+			var pbuilt: float = float(st2.get("path_built", 0.0))
+			if (
+				prev == OutpostBuildLib.STATE_BUILDING
+				or prev == OutpostBuildLib.STATE_ACTIVE
+				or (plen > 0 and pbuilt + 0.001 >= float(plen))
+			):
+				continue
+		st2["state"] = next_state
 		# Table says road finished / state changed — refresh that marker immediately
 		# so we do not keep the CONNECTING blink after path is complete.
 		marker_sids.append(int(state_sids[j]))
@@ -1764,8 +2001,9 @@ func _tick_world_session(dt: float) -> void:
 	if battle_data == null or territory_sim == null or dt <= 0.0:
 		return
 	var au_idx: int = ResourceLib.TYPE_AURELIUM
+	# SCD1: pass mirror of Rust wallet (read); session spends inside Rust when wallet active.
 	if _resource_wallet_active():
-		_sync_resource_wallet_to_rust()
+		_pull_resource_wallet_from_rust()
 	var result: Dictionary = territory_sim.tick_world_session(dt, _friendly_resources[au_idx])
 	if result.is_empty():
 		return
@@ -1994,15 +2232,26 @@ func _tick_soldier_economy(dt: float) -> void:
 		return
 	var au_idx: int = ResourceLib.TYPE_AURELIUM
 	var upkeep: float = float(living) * EconomyLib.soldier_upkeep_aurelium_per_sec() * dt
-	var wallet: float = _friendly_resources[au_idx]
-	var paid: float = minf(upkeep, wallet)
-	_friendly_resources[au_idx] = wallet - paid
 	if _resource_wallet_active():
-		_sync_resource_wallet_to_rust()
-	var deficit: float = upkeep - paid
-	if deficit > 0.0 and upkeep > 0.0:
-		var frac: float = deficit / upkeep
-		territory_sim.agent_deficit_dps.x = CFG.SOLDIER_UPKEEP_DEFICIT_DPS * frac
+		# SCD1: upkeep is a Rust wallet delta; mirror from pull after.
+		var wallet: float = _friendly_resources[au_idx]
+		var paid: float = minf(upkeep, wallet)
+		var deltas: Array = [0.0, 0.0, 0.0]
+		deltas[au_idx] = -paid
+		territory_sim.apply_resource_tick_delta(deltas, [0.0, 0.0, 0.0])
+		_pull_resource_wallet_from_rust()
+		var deficit: float = upkeep - paid
+		if deficit > 0.0 and upkeep > 0.0:
+			territory_sim.agent_deficit_dps.x = CFG.SOLDIER_UPKEEP_DEFICIT_DPS * (deficit / upkeep)
+		else:
+			territory_sim.agent_deficit_dps.x = 0.0
+		return
+	var wallet2: float = _friendly_resources[au_idx]
+	var paid2: float = minf(upkeep, wallet2)
+	_friendly_resources[au_idx] = wallet2 - paid2
+	var deficit2: float = upkeep - paid2
+	if deficit2 > 0.0 and upkeep > 0.0:
+		territory_sim.agent_deficit_dps.x = CFG.SOLDIER_UPKEEP_DEFICIT_DPS * (deficit2 / upkeep)
 	else:
 		territory_sim.agent_deficit_dps.x = 0.0
 
@@ -2037,7 +2286,13 @@ func _tick_barracks_spawns(dt: float) -> void:
 		var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
 		territory_sim.sync_agent_nav()
 		if territory_sim.try_spawn_soldier(bid, team, gx, gy):
-			_friendly_resources[au_idx] -= spawn_cost
+			if _resource_wallet_active():
+				var deltas: Array = [0.0, 0.0, 0.0]
+				deltas[au_idx] = -spawn_cost
+				territory_sim.apply_resource_tick_delta(deltas, [0.0, 0.0, 0.0])
+				_pull_resource_wallet_from_rust()
+			else:
+				_friendly_resources[au_idx] -= spawn_cost
 			st["spawn_timer"] = timer - CFG.BARRACKS_SPAWN_INTERVAL_SEC
 			_soldier_visual_dirty = true
 
@@ -2075,15 +2330,18 @@ func _drain_enemy_ai_queue() -> void:
 			_enemy_ai_action_queue.push_front(action)
 			return
 		_ensure_route_portals_for_team(BattleTileControlLib.OWNER_HOSTILE, _enemy_home)
-		# Full pathfind for real supply routes; never place AI standalone (no supply path).
-		# Cheap capped search first (allow_astar=false); fall back to full A* if needed.
+		# B1: budgeted pathfind first; full A* only if EnemyStrategy rate-limits allow (no free unbounded fallback).
+		# Never place AI standalone (no supply path).
+		var full_n: int = int(action.get("full_astar_attempts", 0))
+		var age: float = float(action.get("plan_age_sec", 0.0))
 		var sid: int = debug_place_outpost_at(
 			target, kind, BattleTileControlLib.OWNER_HOSTILE, false, false
 		)
-		if sid < 0:
+		if sid < 0 and EnemyStrategyLib.route_allow_full_astar(age, full_n):
 			sid = debug_place_outpost_at(
 				target, kind, BattleTileControlLib.OWNER_HOSTILE, true, false
 			)
+			action["full_astar_attempts"] = full_n + 1
 		if sid >= 0:
 			_pay_enemy_placement_cost(kind)
 			_maybe_log_perf_action(
@@ -2484,34 +2742,60 @@ func _complete_corridor_link_by_id(sid: int) -> void:
 			idx = i
 			break
 	if idx < 0:
+		# Already migrated to bridge_corridors (idempotent).
 		return
 	var gx: int = int(st.get("gx", 0))
 	var gy: int = int(st.get("gy", 0))
-	battle_data.bridge_corridors.append({
-		"id": sid,
-		"team": int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)),
-		"gx": gx,
-		"gy": gy,
-		"path_keys": st.get("path_keys", PackedInt32Array()),
-	})
-	if _structure_authority_active():
-		if territory_sim != null and territory_sim.rust_field != null:
-			territory_sim.rust_field.structure_store_remove(sid)
-			territory_sim.rust_field.sync_structure_store_from_map(battle_data)
-		_pull_structure_render_cache()
-	elif idx >= 0:
-		battle_data.placed_structures.remove_at(idx)
-		if territory_sim != null and territory_sim.rust_field != null:
-			territory_sim.rust_field.sync_structure_store_from_map(battle_data)
-	_sync_bridge_corridors_to_sim(true, true, true)  # corridor link: force owner visual for new land
+	# Stop CONNECTING pulse immediately — land bridges have no BUILDING phase.
+	var plen: int = OutpostBuildLib.path_len_from_structure(st)
+	if plen <= 0:
+		plen = int(st.get("path_len", 0))
+	var path_keys: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+	if path_keys.is_empty() and globe_map != null and globe_map.has_method("_packed_path_keys"):
+		# Keep ribbon continuity if path only lived in globe path cache.
+		pass
+	st["state"] = OutpostBuildLib.STATE_ACTIVE
+	st["path_built"] = float(maxi(plen, 1))
+	st["path_len"] = maxi(plen, path_keys.size())
+	# Persist full ribbon under bridge_corridors (structure pin removed below; road + landing stay).
+	var already_bridged: bool = false
+	for bc in battle_data.bridge_corridors:
+		if bc is Dictionary and int(bc.get("id", -1)) == sid:
+			already_bridged = true
+			# Refresh path if we have a fuller one now.
+			if path_keys.size() > PackedInt32Array(bc.get("path_keys", PackedInt32Array())).size():
+				bc["path_keys"] = path_keys
+			break
+	if not already_bridged:
+		battle_data.bridge_corridors.append({
+			"id": sid,
+			"team": int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)),
+			"gx": gx,
+			"gy": gy,
+			"path_keys": path_keys.duplicate(),
+			"path_len": maxi(plen, path_keys.size()),
+			"path_built": float(maxi(plen, path_keys.size())),
+			"state": OutpostBuildLib.STATE_ACTIVE,
+			"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
+		})
+	# Drop from placed_structures so CONNECTING pulse cannot stick; road cache keeps sid via bridge_corridors.
+	battle_data.placed_structures.remove_at(idx)
+	if territory_sim != null and territory_sim.rust_field != null:
+		territory_sim.rust_field.structure_store_remove(sid)
+		# Sync store from map (structures without this corridor + bridge_corridors list). Avoid full
+		# pull_structure_render_cache — it rewrites placed_structures and is expensive mid-game.
+		territory_sim.rust_field.sync_structure_store_from_map(battle_data)
+	# Claimable / beachhead: force once for this corridor (not every sim tick).
+	_sync_bridge_corridors_to_sim(false, true, true)
 	_extend_beachhead_at_landing(st, gx, gy)
 	_structure_sources_version += 1
 	_road_network_version += 1
 	_resource_links_dirty = true
 	_invalidate_hover_path_cache()
+	# Ensure full ribbon is painted for this sid and solid landing marker is shown.
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
-	_refresh_outpost_visuals(true, true)
+	_refresh_outpost_visuals(true, true, [sid], [])
 
 
 func _tick_outpost_construction_damage(
@@ -2555,7 +2839,14 @@ func _destroy_outpost(sid: int, skip_rust_remove: bool = false) -> void:
 		return
 	if not skip_rust_remove and territory_sim != null and territory_sim.rust_field != null:
 		territory_sim.rust_field.structure_store_remove(sid)
+	# Always drop from render cache under SCD1; incremental pulls do not emit deletions.
 	if _structure_authority_active() or skip_rust_remove:
+		if battle_data != null:
+			for j in range(battle_data.placed_structures.size() - 1, -1, -1):
+				var st2 = battle_data.placed_structures[j]
+				if st2 is Dictionary and int(st2.get("id", -1)) == sid:
+					battle_data.placed_structures.remove_at(j)
+					break
 		_pull_structure_render_cache()
 	_cancel_builder_job_for_sid(sid)
 	if was_barracks and territory_sim != null:
@@ -2820,9 +3111,15 @@ func _update_hud() -> void:
 	_watch_fps_drops(int(fps))
 	if _show_perf_hud and perf_hud_label:
 		perf_hud_label.visible = true
-		perf_hud_label.text = perf_build_hud_text(gather_perf_and_action_context())
+		var perf_txt: String = perf_build_hud_text(gather_perf_and_action_context())
+		if _frame_profiler != null and _frame_profiler.has_method("hud_line"):
+			perf_txt += "\n" + str(_frame_profiler.hud_line())
+		perf_hud_label.text = perf_txt
 	elif perf_hud_label:
 		perf_hud_label.visible = false
+	if _world_dataset_entry_failed:
+		status_label.text = "WorldDataset FAIL CLOSED — fix Rust DLL / live flags"
+		return
 	status_label.text = (
 		"World Conquest  |  %s  |  x%.0f  |  soldiers %d/%d  |  FPS %d  |  drag globe · scroll zoom"
 		% [

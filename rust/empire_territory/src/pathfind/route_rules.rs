@@ -204,7 +204,9 @@ pub struct RouteRuleOutcome {
     pub reject: i32,
 }
 
-/// Cheap path budget when allow_astar=false (hover / responsive AI): thin corridors only.
+// I8: allow_astar=false must NOT hard-reject. It runs a capped pathfind (hover / AI).
+// ROUTE_REJECT_ASTAR_DISABLED means "cheap budget exhausted" — callers may retry with full A*.
+/// Cheap path budget when allow_astar=false: thin corridors only (still searches).
 const CHEAP_CORRIDOR_WIDTHS: &[i32] = &[2, 4, 8, 16, 32];
 const CHEAP_CORRIDOR_PER_BAND_MAX_EXPAND: usize = 2_048;
 const CHEAP_FULL_SEARCH_MAX_EXPAND: usize = 4_000;
@@ -257,7 +259,7 @@ pub fn run_route_rule_with_reject(
     }
 
     let sources = &portal.source_keys;
-    // allow_astar=false: still search, but with a tight expand budget (hover/AI responsive).
+    // I8: allow_astar=false still runs capped multi-source pathfind (never hard-reject here).
     // allow_astar=true: full corridor ladder + full expand (player click placement).
     let (widths, band_cap, full_cap) = if allow_astar {
         (
@@ -272,6 +274,8 @@ pub fn run_route_rule_with_reject(
             CHEAP_FULL_SEARCH_MAX_EXPAND,
         )
     };
+    // Pathfind expand caps always apply (B5) — multi-source search is bounded by full_cap.
+    debug_assert!(full_cap > 0 && band_cap > 0);
     for &ctx in rule.attempts {
         if let Some(result) = kernel.find_path_corridor_widening(
             snapshot,
@@ -303,7 +307,7 @@ pub fn run_route_rule_with_reject(
         reject: if allow_astar {
             ROUTE_REJECT_NO_PATH
         } else {
-            // Distinct code when cheap budget failed (callers may retry with full A*).
+            // Cheap budget exhausted after a real search attempt — not a hard disable (I8).
             ROUTE_REJECT_ASTAR_DISABLED
         },
     })
@@ -504,5 +508,64 @@ mod tests {
         .expect("rule outcome");
         assert_eq!(r.reject, ROUTE_REJECT_INFEASIBLE);
         assert!(r.path.is_none());
+    }
+
+    /// I8: allow_astar=false must still pathfind (capped), not hard-reject before search.
+    #[test]
+    fn allow_astar_false_still_finds_short_path() {
+        let w = 5i32;
+        let h = 3i32;
+        let n = (w * h) as usize;
+        // Single connected landmass on top row.
+        let mut land_mask = vec![0u8; n];
+        let mut land_comp = vec![-1i32; n];
+        for gx in 0..w {
+            let idx = gx as usize; // gy=0
+            land_mask[idx] = 1;
+            land_comp[idx] = 0;
+        }
+        let snap = RouteSnapshot {
+            grid_w: w,
+            grid_h: h,
+            wrap_longitude: false,
+            land_mask,
+            bridge_mask: vec![0u8; n],
+            land_comp,
+        };
+        let mut portal = PortalGraph::default();
+        portal.source_keys.push(0);
+        portal.source_land_comp.push(0);
+        portal.infra_reach.push(vec![0]);
+        let mut kernel = SearchKernel::new(n);
+        let r = run_route_rule_with_reject(
+            &mut kernel,
+            &snap,
+            &portal,
+            4,
+            0,
+            ROUTE_RULE_SUPPLY_OUTPOST,
+            false, // capped pathfind — must still succeed on a short land route
+        )
+        .expect("rule outcome");
+        assert_eq!(
+            r.reject, ROUTE_REJECT_NONE,
+            "allow_astar=false must not hard-reject feasible short routes"
+        );
+        let (path, stats) = r.path.expect("path under cheap budget");
+        assert!(!path.path.is_empty());
+        assert!(
+            stats.expand_count <= CHEAP_FULL_SEARCH_MAX_EXPAND
+                || stats.expand_count <= CHEAP_CORRIDOR_PER_BAND_MAX_EXPAND,
+            "expand_count={} must respect cheap caps",
+            stats.expand_count
+        );
+    }
+
+    #[test]
+    fn pathfind_caps_are_positive() {
+        assert!(CORRIDOR_PER_BAND_MAX_EXPAND > 0);
+        assert!(DEFAULT_FULL_SEARCH_MAX_EXPAND > 0);
+        assert!(CHEAP_FULL_SEARCH_MAX_EXPAND > 0);
+        assert!(CHEAP_CORRIDOR_PER_BAND_MAX_EXPAND > 0);
     }
 }

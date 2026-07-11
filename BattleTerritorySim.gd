@@ -27,7 +27,8 @@ const BACKEND_CPU := 0
 const BACKEND_GPU := 1
 const BACKEND_RUST := 2
 
-## Full-map pressure sums are expensive in GDScript; refresh at most once per ~sim-second.
+## Full-map pressure sums are expensive; refresh at most once per ~sim-second (B10/I2).
+## Do not lower this to 1 under live — full get_pressure_* FFI every step is forbidden.
 const POWER_TOTALS_REFRESH_ROUNDS := 14
 
 var battle_data = null
@@ -37,6 +38,8 @@ var rust_field: BattleTerritoryRustBackendLib
 var backend: int = BACKEND_CPU
 var gpu_live_ready: bool = false
 var rust_live_ready: bool = false
+## A1/G3: non-empty when WorldDataset live was required but Rust failed (fail-closed).
+var world_dataset_error: String = ""
 var round_index: int = 0
 var sim_time: float = 0.0
 var step_dt: float = BattlePacingLib.SIM_ROUND_SECONDS
@@ -119,6 +122,7 @@ func setup(
 	_decisive_hold_sec = 0.0
 	_power_totals = Vector2.ZERO
 	_power_totals_round = -0x7FFFFFFF
+	world_dataset_error = ""
 	_prev_friendly = _tiles_owned_by_player()
 	_prev_hostile = _tiles_owned_by_enemy()
 	_apply_max_rounds_for_context()
@@ -132,20 +136,84 @@ func use_rust_for_live() -> bool:
 	return backend == BACKEND_RUST
 
 
+## A1/G3: World Conquest play under world_dataset_live requires Rust — no dual-sim.
+func world_dataset_require_live() -> bool:
+	return (
+		_resolve_context == "world_conquest"
+		and WorldConquestConfigLib.world_dataset_require_live()
+	)
+
+
+func world_dataset_failed() -> bool:
+	return not world_dataset_error.is_empty()
+
+
+func _fail_world_dataset_live(reason: String) -> void:
+	world_dataset_error = reason
+	rust_live_ready = false
+	rust_field = null
+	gpu_live_ready = false
+	gpu_field = null
+	backend = BACKEND_CPU
+	push_error(
+		(
+			"WorldDataset FAIL CLOSED: %s — no CPU dual-sim under live contract (A1/G3)"
+			% reason
+		)
+	)
+	refresh_world_dataset_mirror_mode()
+
+
 func set_live_backend(use_gpu: bool) -> void:
+	# A9/G4/C9: GPU never selected for World Conquest / world_dataset_live.
+	if use_gpu and (
+		_resolve_context == "world_conquest" or WorldConquestConfigLib.world_dataset_live()
+	):
+		push_error(
+			"World Conquest rejects GPU territory backend (BATTLE_TERRITORY_BACKEND=gpu ignored) (A9/G4/C9)"
+		)
+		use_gpu = false
 	if use_gpu:
 		backend = BACKEND_GPU
-	elif rust_live_ready:
+		return
+	if rust_live_ready and rust_field != null and rust_field.ready:
 		backend = BACKEND_RUST
-	else:
-		backend = BACKEND_CPU
+		gpu_live_ready = false
+		gpu_field = null
+		refresh_world_dataset_mirror_mode()
+		return
+	# A1/G3: under live contract, do not silently adopt CPU dual-sim.
+	if world_dataset_require_live():
+		if world_dataset_error.is_empty():
+			_fail_world_dataset_live("set_live_backend without Rust under world_dataset_live")
+		else:
+			backend = BACKEND_CPU
+			gpu_live_ready = false
+			gpu_field = null
+			refresh_world_dataset_mirror_mode()
+		return
+	backend = BACKEND_CPU
+	refresh_world_dataset_mirror_mode()
 
 
 func enable_gpu_live() -> bool:
-	if _resolve_context == "world_conquest":
-		backend = BACKEND_CPU if not rust_live_ready else BACKEND_RUST
+	# A9/G4/C9: GPU live forced off for World Conquest and world_dataset_live.
+	if _resolve_context == "world_conquest" or WorldConquestConfigLib.world_dataset_live():
 		gpu_live_ready = false
 		gpu_field = null
+		var env: String = OS.get_environment("BATTLE_TERRITORY_BACKEND").to_lower()
+		if env == "gpu":
+			push_error(
+				"World Conquest rejects BATTLE_TERRITORY_BACKEND=gpu — use Rust (A9/G4/C9)"
+			)
+		if rust_live_ready:
+			backend = BACKEND_RUST
+		elif world_dataset_require_live():
+			if world_dataset_error.is_empty():
+				_fail_world_dataset_live("GPU backend requested under world_dataset_live")
+		else:
+			backend = BACKEND_CPU
+		refresh_world_dataset_mirror_mode()
 		return false
 	if battle_data == null or tile_control == null:
 		return false
@@ -170,8 +238,19 @@ func enable_gpu_live() -> bool:
 
 func enable_rust_live() -> bool:
 	if battle_data == null or tile_control == null:
+		if world_dataset_require_live():
+			_fail_world_dataset_live("enable_rust_live missing battle_data/tile_control")
 		return false
+	world_dataset_error = ""
+	# A9/G4: reject GPU env explicitly when entering WC rust path.
+	if _resolve_context == "world_conquest":
+		BattleTerritoryRustBackendLib.reject_gpu_env_for_world_conquest()
 	if not BattleTerritoryRustBackendLib.extension_available():
+		if world_dataset_require_live():
+			_fail_world_dataset_live(
+				"TerritorySim GDExtension not loaded (Rust DLL missing) (A1/G3)"
+			)
+			return false
 		backend = BACKEND_CPU
 		rust_live_ready = false
 		return false
@@ -188,8 +267,13 @@ func enable_rust_live() -> bool:
 			_configure_world_agents()
 		refresh_world_dataset_mirror_mode()
 	else:
-		backend = BACKEND_CPU
 		rust_field = null
+		if world_dataset_require_live():
+			_fail_world_dataset_live(
+				"Rust TerritorySim setup_from_dict failed — no CPU dual-sim (A1/G3)"
+			)
+			return false
+		backend = BACKEND_CPU
 		push_warning(
 			"BattleTerritoryRustBackend: Rust init failed; using CPU territory sim."
 		)
@@ -215,6 +299,8 @@ func set_resolve_context(context: String) -> void:
 	_resolve_context = context
 	if battle_data != null:
 		_apply_max_rounds_for_context()
+	# A2/A3: freeze Godot grid mirror as soon as WC live contract is selected.
+	refresh_world_dataset_mirror_mode()
 
 
 func _apply_max_rounds_for_context() -> void:
@@ -247,6 +333,20 @@ func apply_viewer_resolve_cap() -> void:
 func advance_dt(delta: float, max_steps: int = 12) -> Dictionary:
 	if finished or battle_data == null or tile_control == null:
 		return {"steps": 0, "finished": finished, "sim_time": sim_time}
+	# A1/I1: never dual-sim on CPU when WorldDataset live is required.
+	if world_dataset_require_live():
+		if backend != BACKEND_RUST or rust_field == null or not rust_field.ready:
+			if world_dataset_error.is_empty():
+				_fail_world_dataset_live("advance_dt without Rust live backend")
+			return {
+				"steps": 0,
+				"finished": finished,
+				"sim_time": sim_time,
+				"error": world_dataset_error,
+			}
+	# I6/B12: never exceed SIM_MAX_STEPS_PER_FRAME under WC (callers may pass larger caps).
+	if _resolve_context == "world_conquest":
+		max_steps = mini(max_steps, WorldConquestConfigLib.SIM_MAX_STEPS_PER_FRAME)
 	_dt_accum += delta
 	var steps_to_run: int = 0
 	while _dt_accum >= step_dt and steps_to_run < max_steps:
@@ -344,20 +444,18 @@ func claim_ratio_mult_at(idx: int) -> float:
 
 
 func pressure_friendly_at(idx: int) -> float:
+	# B10/I2: prefer per-cell query — never full-layer get_pressure_* for a single cell.
 	if use_rust_for_live() and rust_field != null and rust_field.ready:
-		var layers: PackedFloat32Array = rust_field.get_pressure_friendly()
-		if idx >= 0 and idx < layers.size():
-			return layers[idx]
+		return rust_field.pressure_friendly_at(idx)
 	if tile_control != null and idx >= 0 and idx < tile_control.pressure_friendly.size():
 		return tile_control.pressure_friendly[idx]
 	return 0.0
 
 
 func pressure_hostile_at(idx: int) -> float:
+	# B10/I2: prefer per-cell query — never full-layer get_pressure_* for a single cell.
 	if use_rust_for_live() and rust_field != null and rust_field.ready:
-		var layers: PackedFloat32Array = rust_field.get_pressure_hostile()
-		if idx >= 0 and idx < layers.size():
-			return layers[idx]
+		return rust_field.pressure_hostile_at(idx)
 	if tile_control != null and idx >= 0 and idx < tile_control.pressure_hostile.size():
 		return tile_control.pressure_hostile[idx]
 	return 0.0
@@ -632,6 +730,44 @@ func get_builder_visual_snapshot() -> Dictionary:
 
 
 ## One presentation pull after sim ticks (owners + optional structure/unit snaps).
+## A10: prefer delta consumers over full snaps. opts keys (all default false):
+##   structures (bool) — full structure table dump (set ONLY when presentation-dirty; B11/I5)
+##   agents (bool) — agent visual snapshot
+##   bombers (bool) — bomber visual snapshot
+## Field transactions (path_built_*, state_*, new_road_cells) always return without full dump.
+## SCD1 live paint API (replaces PresentationTxn on live path).
+func pull_domain_since(domain: String, last_version: int, force_full: bool = false) -> Dictionary:
+	if rust_field == null or not rust_live_ready:
+		return {"empty": true, "error": true, "domain": domain}
+	if rust_field.has_method("pull_domain_since"):
+		return rust_field.pull_domain_since(domain, last_version, force_full)
+	return {"empty": true, "error": true, "domain": domain}
+
+
+func scd1_domain_epoch(domain: String) -> int:
+	if rust_field == null or not rust_field.has_method("scd1_domain_epoch"):
+		return 0
+	return int(rust_field.scd1_domain_epoch(domain))
+
+
+func scd1_sim_generation() -> int:
+	if rust_field == null or not rust_field.has_method("scd1_sim_generation"):
+		return 0
+	return int(rust_field.scd1_sim_generation())
+
+
+func scd1_decide_full_pull(last_version: int, domain: String, client_sim_gen: int, hard_error: bool = false) -> String:
+	if rust_field == null or not rust_field.has_method("scd1_decide_full_pull"):
+		return "start" if last_version == 0 else ""
+	return str(rust_field.scd1_decide_full_pull(last_version, domain, client_sim_gen, hard_error))
+
+
+func scd1_note_full_pull(reason: String) -> void:
+	if rust_field != null and rust_field.has_method("scd1_note_full_pull"):
+		rust_field.scd1_note_full_pull(reason)
+
+
+## LEGACY / QA only — not live SCD1 paint.
 func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
 	if rust_field == null or not rust_live_ready:
 		return {}
@@ -674,10 +810,12 @@ func world_dataset_live_active() -> bool:
 func refresh_world_dataset_mirror_mode() -> void:
 	if tile_control == null:
 		return
+	# A2/A3: under GRID_AUTHORITY + world_dataset_live, Godot grid is never authoritative.
+	# Freeze even if Rust failed so CPU propagation cannot dual-write (fail-closed).
 	tile_control.grid_mirror_frozen = (
 		_resolve_context == "world_conquest"
+		and WorldConquestConfigLib.WORLD_DATASET_GRID_AUTHORITY
 		and WorldConquestConfigLib.world_dataset_live()
-		and grid_authority_active()
 	)
 
 
@@ -747,8 +885,20 @@ func _configure_world_session() -> void:
 func advance_round() -> void:
 	if finished or battle_data == null or tile_control == null:
 		return
+	# A1/I1: refuse CPU dual-sim when WorldDataset live is required.
+	if world_dataset_require_live():
+		if backend != BACKEND_RUST or rust_field == null or not rust_field.ready:
+			if world_dataset_error.is_empty():
+				_fail_world_dataset_live("advance_round without Rust live backend")
+			return
+		if backend == BACKEND_GPU:
+			push_error("World Conquest advance_round refused GPU backend (A9/G4)")
+			return
 	round_index += 1
 	if backend == BACKEND_GPU and gpu_field != null and gpu_field.ready:
+		if _resolve_context == "world_conquest" or WorldConquestConfigLib.world_dataset_live():
+			push_error("World Conquest refuses GPU step_round (A9/G4/C9)")
+			return
 		gpu_field.step_round(tile_control)
 		if gpu_field.readback_owners_if_due(round_index):
 			gpu_field.copy_owners_to_cpu_buffer(tile_control.owners)
@@ -757,6 +907,7 @@ func advance_round() -> void:
 	elif backend == BACKEND_RUST and rust_field != null and rust_field.ready:
 		rust_field.step_round(tile_control)
 	else:
+		# grid_mirror_frozen no-ops CPU propagation under live contract (A2/A3).
 		tile_control.propagate_round_territory(battle_data)
 	_check_conquest()
 
@@ -969,6 +1120,8 @@ func power_totals() -> Vector2:
 	return _power_totals
 
 
+## Full pressure layers — expensive FFI. Callers must rate-limit (see POWER_TOTALS_REFRESH_ROUNDS).
+## B10/I2: do not call every sim step for overlay/HUD; prefer owner deltas / power_totals cache.
 func _live_pressure_arrays() -> Dictionary:
 	if use_rust_for_live() and rust_field != null and rust_field.ready:
 		return {

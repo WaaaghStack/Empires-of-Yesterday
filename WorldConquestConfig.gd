@@ -19,8 +19,9 @@ const INCOME_PER_TILE_PER_SEC := 0.8
 
 ## Discrete sim step (~14/sec); internal only — UI shows sim time.
 const SIM_DT := 1.0 / 14.0
+## I6/B12: hard cap on sim catch-up steps per frame (never uncapped while-loops).
 const SIM_MAX_STEPS_PER_FRAME := 4
-## When the prior _process frame exceeded this budget, sim catch-up is capped to 1 step.
+## When the prior _process frame exceeded this budget, sim catch-up is capped to 1 step (I6).
 const FRAME_BUDGET_MS := 16.0
 ## Max ownership overlay cells applied to the globe per frame (remainder queued).
 const OVERLAY_DELTA_CELLS_PER_FRAME := 48
@@ -28,7 +29,8 @@ const OVERLAY_UPDATES_PER_SEC := 3.0
 ## Partitioned anti-drift sweep: compare Rust owner vs globe cache per frame.
 ## Full 360×180 pass ≈ 68 s at 16/frame @ 60 fps (halved when prior frame exceeded budget).
 const OVERLAY_RECONCILE_CELLS_PER_FRAME := 16
-## Globe tint from tile ownership only — skips pressure FFI and peak scans.
+## Globe tint from tile ownership only — skips full pressure/R8 FFI every step (B10/I2/I3).
+## Live path uses pull_presentation_delta owner deltas; never reintroduce per-step full pressure pulls.
 const OVERLAY_OWNERS_ONLY := true
 const SOLDIER_VISUAL_UPDATES_PER_SEC := 4.0
 ## Max soldier BFS replans per sim tick (global budget across all units).
@@ -87,7 +89,7 @@ const MAX_MARKER_SIDS_PER_FRAME := 1
 const BRIDGE_SURFACE_LIFT := 3.4
 ## Safety cap for route search (bidirectional); avoids multi-second ocean floods.
 const OUTPOST_PATHFIND_MAX_EXPAND := 12000
-## Hover preview: greedy bridge only (no A*); keeps cursor responsive on long routes.
+## B9: Hover preview uses greedy bridge only (no A*); keep false for responsive cursor on long routes.
 const OUTPOST_HOVER_ALLOW_ASTAR := false
 ## Max 3D segments drawn for placement preview (subsample longer bridge paths).
 const OUTPOST_PREVIEW_MAX_SEGMENTS := 48
@@ -95,7 +97,7 @@ const OUTPOST_PREVIEW_MAX_SEGMENTS := 48
 const OUTPOST_HOVER_REPLAN_SEC := 0.32
 ## Rust route planner on the preloaded world snapshot — sole placement pathfinder.
 const ROUTE_RUST_ONLY := true
-## Async Rust route on click (keeps main thread responsive during A*).
+## B9: Async Rust route on click (keeps main thread responsive during A*) — keep true.
 const ROUTE_ASYNC_PLACEMENT := true
 const ROUTE_HOVER_PREVIEW := false
 ## One-time setup_map + portal build during loading (avoids hitch on first build-button press).
@@ -145,8 +147,12 @@ const SOLDIER_INFRA_MOVE_MULT := 3.0
 const SOLDIER_AURA_PRESSURE := 0.48
 const SOLDIER_SHOOT_ERODE_PER_SEC := 24.0
 const SOLDIER_UPKEEP_DEFICIT_DPS := 2.5
-## Pressure flow multiplier on built bridge water cells (vs land).
+## Canonical bridge pressure flow mult (A11/A12/C15).
+## MUST match rust/empire_territory/src/world_edit.rs `BRIDGE_PRESSURE_FLOW_MULT`.
+## Design target is 2.8 (obsolete docs mentioned 0.92 — that value is wrong).
 const BRIDGE_PRESSURE_FLOW_MULT := 2.8
+## Design-target constant used by assert_canonical_constants() (must equal BRIDGE_PRESSURE_FLOW_MULT).
+const BRIDGE_PRESSURE_FLOW_MULT_DESIGN_TARGET := 2.8
 
 ## Win: all claimable land, or enemy cumulative power reaches zero.
 const CONQUEST_LAND_FRAC := 1.0
@@ -157,13 +163,19 @@ const ZERO_POWER_VICTORY_EPS := 0.5
 const WORLD_DATASET_WARN_SLOW_OVERLAY := true
 ## Production live contract: all authority flags true. Do not introduce partial live modes.
 ## Individual flags remain for explicit CPU/QA harnesses only — not for runtime toggles mid-match.
+## A2: under GRID_AUTHORITY live, tile_control.grid_mirror_frozen must be true (no dual grid writes).
 const WORLD_DATASET_GRID_AUTHORITY := true
+## A4/C5: Rust structure store is sole path_built / state authority under live.
 const WORLD_DATASET_STRUCTURE_AUTHORITY := true
 const WORLD_DATASET_WORLD_SESSION_TICK := true
+## A6/A7/C8: when true, BuilderAgentLib.step_frame hard-refuses (Rust logistics owns construction).
 const WORLD_DATASET_BUILDER_AUTHORITY := true
+## A8: when true, resource balances live in Rust wallet; GDScript holds presentation mirrors only.
 const WORLD_DATASET_RESOURCE_WALLET := true
-## QA: assert single-source WorldDataset invariants during validate runs.
+## QA: assert single-source WorldDataset invariants during validate runs (E8).
 const WORLD_DATASET_QA_ASSERTS := true
+## B11/I5: never full-structure-snap every frame; pull_presentation_delta structures only when dirty.
+const PRESENTATION_STRUCTURES_ONLY_WHEN_DIRTY := true
 
 
 ## True when Play uses the single Rust live world (presentation is pull_presentation_delta).
@@ -175,6 +187,24 @@ static func world_dataset_live() -> bool:
 		and WORLD_DATASET_BUILDER_AUTHORITY
 		and WORLD_DATASET_RESOURCE_WALLET
 	)
+
+
+## A1/G3: production contract requires Rust live — no silent CPU dual-sim for World Conquest play.
+static func world_dataset_require_live() -> bool:
+	return world_dataset_live()
+
+
+## A12/C15: shared-constant sanity (Godot side). Rust must match BRIDGE_PRESSURE_FLOW_MULT.
+static func assert_canonical_constants() -> bool:
+	if not is_equal_approx(BRIDGE_PRESSURE_FLOW_MULT, BRIDGE_PRESSURE_FLOW_MULT_DESIGN_TARGET):
+		push_error(
+			(
+				"WorldConquestConfig: BRIDGE_PRESSURE_FLOW_MULT=%.4f != design target %.4f (A12)"
+				% [BRIDGE_PRESSURE_FLOW_MULT, BRIDGE_PRESSURE_FLOW_MULT_DESIGN_TARGET]
+			)
+		)
+		return false
+	return true
 
 const CAMERA_ORBIT_SPEED := 0.35
 const CAMERA_PITCH_MIN := -1.2

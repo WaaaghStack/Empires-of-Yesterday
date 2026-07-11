@@ -66,6 +66,8 @@ pub struct Bomber {
     pub gy: i32,
     pub hp: f32,
     pub orphan: bool,
+    /// SCD1 bombers domain version stamp.
+    pub version: u64,
     pub goal_gx: i32,
     pub goal_gy: i32,
     pub step_gx: i32,
@@ -175,6 +177,7 @@ impl BomberLayer {
             gy,
             hp: self.config.max_hp,
             orphan: false,
+            version: 0,
             goal_gx: gx,
             goal_gy: gy,
             step_gx: -1,

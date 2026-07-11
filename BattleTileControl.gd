@@ -90,6 +90,9 @@ var claimable_tile_count: int = 0
 var force_full_grid_gradient: bool = false
 var use_active_set: bool = false
 ## When true, CPU territory propagation is disabled — Rust owns grid truth (WC live).
+## A2/A3: BattleTerritorySim.refresh_world_dataset_mirror_mode sets this true under
+## WORLD_DATASET_GRID_AUTHORITY + world_dataset_live (even if Rust fails — fail-closed).
+## Guards: propagate_round_territory, propagate_round, sync_bridge_corridors_*.
 var grid_mirror_frozen: bool = false
 
 # Ping-pong buffers to avoid allocations during diffusion (helps viewer fallback perf)

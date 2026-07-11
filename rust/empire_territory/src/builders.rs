@@ -1,4 +1,11 @@
-//! Builder bots — path growth along outpost corridors (Phase 8).
+//! Builder bots — **legacy only** (A6 / A7 / C8).
+//!
+//! Live World Conquest uses [`crate::logistics`] as the **sole** road / `path_built` authority.
+//! Under live, FFI `configure_builders` / `builder_step` wire logistics only; this module must
+//! not dual-step path growth.
+//!
+//! `BuilderLayer::step_frame` refuses to advance `path_built` unless
+//! `legacy_path_growth_enabled` is explicitly set (unit tests / offline harnesses only).
 
 use crate::sim::{OWNER_FRIENDLY, OWNER_HOSTILE};
 use crate::structures::{
@@ -66,6 +73,9 @@ pub struct BuilderLayer {
     pub queue_hostile: Vec<i32>,
     pub player_home: (i32, i32),
     pub enemy_home: (i32, i32),
+    /// When false (default), `step_frame` does **not** mutate `path_built` (logistics owns it).
+    /// Set true only for legacy unit tests / offline builder harnesses.
+    pub legacy_path_growth_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -477,6 +487,16 @@ impl BuilderLayer {
         if dt <= 0.0 || self.bots.is_empty() {
             return result;
         }
+        // A6/A7/C8: logistics is sole path_built authority under live. Default is off.
+        if !self.legacy_path_growth_enabled {
+            // Optional visual orbit only — never advance corridors.
+            for bot in &mut self.bots {
+                if bot.state == STATE_IDLE {
+                    bot.orbit_angle += cfg.orbit_speed * dt;
+                }
+            }
+            return result;
+        }
         let travel_sec = cell_travel_sec(cfg);
         let bot_count = self.bots.len();
         for bi in 0..bot_count {
@@ -731,6 +751,8 @@ mod tests {
         let mut layer = BuilderLayer {
             player_home: (0, 0),
             enemy_home: (8, 8),
+            // Explicit opt-in: unit test exercises legacy path growth only.
+            legacy_path_growth_enabled: true,
             ..Default::default()
         };
         let cfg = BuilderConfig::default();
@@ -750,6 +772,7 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            version: 0,
         });
         store.ready = true;
         layer.enqueue_job(1, OWNER_FRIENDLY);
@@ -764,10 +787,57 @@ mod tests {
                 || store.structures.get(&1).map(|s| s.state).unwrap_or(STATE_CONNECTING)
                     == crate::structures::STATE_BUILDING
             {
-                assert!(cells >= 2);
+                assert!(
+                    cells >= 1 || store.structures.get(&1).unwrap().path_built >= 4.0,
+                    "legacy growth should advance path or complete with arrivals"
+                );
                 return;
             }
         }
         panic!("builder selfcheck stuck");
+    }
+
+    #[test]
+    fn builders_do_not_advance_path_built_when_legacy_growth_disabled() {
+        let mut layer = BuilderLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            legacy_path_growth_enabled: false,
+            ..Default::default()
+        };
+        let cfg = BuilderConfig::default();
+        layer.init_bots(&cfg);
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 1,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_CONNECTING,
+            gx: 3,
+            gy: 0,
+            path_keys: vec![0, 1, 2, 3],
+            path_built: 1.0,
+            path_len: 4,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        layer.enqueue_job(1, OWNER_FRIENDLY);
+        layer.assign_builder_jobs(&store, 16, &cfg, -1);
+        for _ in 0..120 {
+            let frame = layer.step_frame(1.0 / 60.0, &mut store, 16, &cfg);
+            assert!(
+                frame.cell_arrivals.is_empty(),
+                "legacy-disabled builders must not emit path growth"
+            );
+        }
+        assert_eq!(
+            store.structures.get(&1).unwrap().path_built,
+            1.0,
+            "path_built must stay untouched when logistics is the authority"
+        );
     }
 }
