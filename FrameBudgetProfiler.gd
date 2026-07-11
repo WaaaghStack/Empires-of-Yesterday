@@ -88,6 +88,20 @@ static func budget_allows_catchup(prior_frame_ms: float, threshold_ms: float = S
 	return prior_frame_ms <= threshold_ms
 
 
+## Snapshot of last frame phase timings (ms). Empty if no phases recorded.
+func last_phase_ms() -> Dictionary:
+	return _phase_ms.duplicate()
+
+
+func phase_summary_line() -> String:
+	if _phase_ms.is_empty():
+		return ""
+	var parts: PackedStringArray = PackedStringArray()
+	for key in _phase_ms.keys():
+		parts.append("%s=%.2fms" % [str(key), float(_phase_ms[key])])
+	return " ".join(parts)
+
+
 func summary() -> Dictionary:
 	if _frame_times_ms.is_empty():
 		return {}
@@ -97,4 +111,5 @@ func summary() -> Dictionary:
 		"p95_ms": percentile(0.95),
 		"p99_ms": percentile(0.99),
 		"min_fps": min_fps(),
+		"last_ms": _last_frame_ms,
 	}

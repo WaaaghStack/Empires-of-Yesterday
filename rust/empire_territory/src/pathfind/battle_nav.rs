@@ -100,6 +100,14 @@ impl<'a> BattleNavView<'a> {
         self.kernel.owners[idx] != self.team
     }
 
+    /// Air strike target: any land not owned by this team (no claimable check).
+    pub fn is_air_strike_goal(&self, idx: usize) -> bool {
+        if !self.is_land_cell(idx) {
+            return false;
+        }
+        self.kernel.owners[idx] != self.team
+    }
+
     /// True when standing here would not take territory damage this tick.
     fn territory_dps_would_be_zero(&self, idx: usize) -> bool {
         let owner = self.kernel.owners[idx];
@@ -190,7 +198,10 @@ impl NavGraph for BattleNavView<'_> {
         self.kernel.wrap_longitude
     }
 
-    fn passable(&self, idx: usize, _ctx: RouteContext) -> bool {
+    fn passable(&self, idx: usize, ctx: RouteContext) -> bool {
+        if ctx.flight_mode {
+            return idx < self.kernel.tile_count;
+        }
         self.is_passable_cell(idx)
     }
 

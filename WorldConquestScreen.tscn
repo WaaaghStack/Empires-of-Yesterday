@@ -197,6 +197,11 @@ layout_mode = 2
 toggle_mode = true
 text = "Barracks (400)"
 
+[node name="HangarButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+toggle_mode = true
+text = "Hangar (400)"
+
 [node name="CorridorLinkButton" type="Button" parent="HUD/HBox"]
 layout_mode = 2
 toggle_mode = true

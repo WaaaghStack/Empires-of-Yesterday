@@ -57,6 +57,8 @@ pub struct TerritoryKernel {
     pub wrap_longitude: bool,
     pub home_inject_enabled: bool,
     pub spawner_inject_interval_rounds: i32,
+    pub logistics_friendly_output_mult: f32,
+    pub logistics_hostile_output_mult: f32,
     territory_round_index: u32,
     // World-edit terrain + reachability (Phase 3 — Rust authority during WC play)
     pub(crate) passable_mask: Vec<u8>,
@@ -145,6 +147,8 @@ impl TerritoryKernel {
             wrap_longitude,
             home_inject_enabled: true,
             spawner_inject_interval_rounds: 10,
+            logistics_friendly_output_mult: 1.0,
+            logistics_hostile_output_mult: 1.0,
             territory_round_index: 0,
             active_indices: Vec::new(),
             active_seen: vec![0; tile_count],
@@ -196,10 +200,24 @@ impl TerritoryKernel {
         self.advance_territory_round();
     }
 
+    /// Run soldier agents and/or bombers then territory propagation (world conquest).
+    pub fn advance_round_with_combat(
+        &mut self,
+        agents: Option<&mut crate::agents::AgentLayer>,
+        bombers: Option<&mut crate::bombers::BomberLayer>,
+    ) {
+        if let Some(agents) = agents {
+            agents.tick(self);
+        }
+        if let Some(bombers) = bombers {
+            bombers.tick(self);
+        }
+        self.advance_territory_round();
+    }
+
     /// Run soldier agents then territory propagation (world conquest).
     pub fn advance_round_with_agents(&mut self, agents: &mut crate::agents::AgentLayer) {
-        agents.tick(self);
-        self.advance_territory_round();
+        self.advance_round_with_combat(Some(agents), None);
     }
 
     fn advance_territory_round(&mut self) {
@@ -210,8 +228,16 @@ impl TerritoryKernel {
         self.territory_round_index = self.territory_round_index.saturating_add(1);
 
         if self.home_inject_enabled && self.should_inject_pressure_sources_this_round() {
-            self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
-            self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
+            self.inject_home(
+                self.player_home_idx,
+                self.friendly_spawn_rate * self.logistics_friendly_output_mult,
+                true,
+            );
+            self.inject_home(
+                self.enemy_home_idx,
+                self.hostile_spawn_rate * self.logistics_hostile_output_mult,
+                false,
+            );
         }
         if self.should_inject_pressure_sources_this_round() {
             self.inject_placed_spawners();
@@ -327,9 +353,9 @@ impl TerritoryKernel {
                 continue;
             }
             let amount = if sp.team == OWNER_FRIENDLY {
-                self.friendly_spawn_rate
+                self.friendly_spawn_rate * self.logistics_friendly_output_mult
             } else {
-                self.hostile_spawn_rate
+                self.hostile_spawn_rate * self.logistics_hostile_output_mult
             };
             let is_friendly = sp.team == OWNER_FRIENDLY;
             // Pump adjacent tiles — not the spawner cell (so the tile under it can flip).

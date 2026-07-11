@@ -90,7 +90,9 @@ static func tick(
 	# Hubs only change when structures/bridges change — cache per network version
 	# instead of rebuilding every frame.
 	if _hubs_cache_version != network_key:
-		_hubs_cache = OutpostBuildLib.operational_sources(structures, player_home, map_data)
+		_hubs_cache = OutpostBuildLib.resource_supply_hubs(
+			structures, player_home, map_data, BattleTileControlLib.OWNER_FRIENDLY
+		)
 		_hubs_cache_version = network_key
 	var friendly_hubs: Array[Vector2i] = _hubs_cache
 	var hostile_hubs: Array[Vector2i] = []
@@ -263,7 +265,9 @@ static func _road_cells_for_team_cached(
 	var cache_key: String = "t%d" % team
 	if _roads_cache.has(cache_key):
 		return _roads_cache[cache_key]
-	var built: Dictionary = OutpostBuildLib.road_cells_for_team(map_data, structures, team)
+	var built: Dictionary = OutpostBuildLib.road_cells_for_team(
+		map_data, structures, team
+	)
 	_roads_cache[cache_key] = built
 	return built
 
@@ -280,24 +284,14 @@ static func _plan_link_path(
 	h: int,
 ) -> PackedInt32Array:
 	var start_key: int = _key(gx, gy, w)
-	var targets: Dictionary = {}
-	if roads.is_empty():
-		for hub in hubs:
-			if hub.x >= 0:
-				targets[_key(hub.x, hub.y, w)] = true
-	else:
-		for rk in roads.keys():
-			targets[rk] = true
-		for hub in hubs:
-			if hub.x < 0:
-				continue
-			var hk: int = _key(hub.x, hub.y, w)
-			if roads.has(hk):
-				targets[hk] = true
-	if targets.is_empty():
+	var hub_targets: Dictionary = {}
+	for hub in hubs:
+		if hub.x >= 0:
+			hub_targets[_key(hub.x, hub.y, w)] = true
+	if roads.is_empty() and hub_targets.is_empty():
 		return PackedInt32Array()
 	var goal_key: int = _bfs_to_targets(
-		map_data, grid, start_key, team, roads, targets, w, h
+		map_data, grid, start_key, team, roads, hub_targets, w, h
 	)
 	if goal_key < 0:
 		return PackedInt32Array()
@@ -372,7 +366,7 @@ static func _bfs_to_targets(
 	while head < _bfs_queue.size():
 		var cur: int = _bfs_queue[head]
 		head += 1
-		if targets.has(cur):
+		if targets.has(cur) or (not roads.is_empty() and roads.has(cur)):
 			return cur
 		var cx: int = cur % w
 		var cy: int = cur / w

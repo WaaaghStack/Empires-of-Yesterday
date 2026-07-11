@@ -7,6 +7,7 @@ use crate::world_edit::CorridorPathSpec;
 pub const KIND_SPAWNER: u8 = 0;
 pub const KIND_BARRACKS: u8 = 1;
 pub const KIND_CORRIDOR_LINK: u8 = 2;
+pub const KIND_HANGAR: u8 = 3;
 pub const KIND_OTHER: u8 = 255;
 
 pub const STATE_CONNECTING: u8 = 0;
@@ -53,6 +54,7 @@ pub fn kind_from_str(kind: &str) -> u8 {
         "spawner" => KIND_SPAWNER,
         "barracks" => KIND_BARRACKS,
         "corridor_link" => KIND_CORRIDOR_LINK,
+        "hangar" => KIND_HANGAR,
         _ => KIND_OTHER,
     }
 }
@@ -71,6 +73,7 @@ pub fn kind_to_str(kind: u8) -> &'static str {
         KIND_SPAWNER => "spawner",
         KIND_BARRACKS => "barracks",
         KIND_CORRIDOR_LINK => "corridor_link",
+        KIND_HANGAR => "hangar",
         _ => "other",
     }
 }
@@ -187,7 +190,7 @@ impl StructureStore {
             return false;
         }
         match record.kind {
-            KIND_SPAWNER | KIND_BARRACKS => {
+            KIND_SPAWNER | KIND_BARRACKS | KIND_HANGAR => {
                 record.state == STATE_CONNECTING
                     || record.state == STATE_BUILDING
                     || record.state == STATE_ACTIVE
@@ -239,9 +242,9 @@ impl StructureStore {
 }
 
 pub fn is_corridor_path_kind(kind: u8) -> bool {
-    kind == KIND_SPAWNER || kind == KIND_BARRACKS || kind == KIND_CORRIDOR_LINK
+    kind == KIND_SPAWNER || kind == KIND_BARRACKS || kind == KIND_HANGAR || kind == KIND_CORRIDOR_LINK
 }
 
 pub fn has_build_phase(kind: u8) -> bool {
-    kind == KIND_SPAWNER || kind == KIND_BARRACKS
+    kind == KIND_SPAWNER || kind == KIND_BARRACKS || kind == KIND_HANGAR
 }

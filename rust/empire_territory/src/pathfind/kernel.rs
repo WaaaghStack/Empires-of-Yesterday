@@ -73,6 +73,8 @@ pub struct RouteContext {
     pub max_expand: usize,
     /// When set, only cells inside the tube around sx,sy→gx,gy are searchable.
     pub corridor: Option<CorridorBand>,
+    /// Flight units: passable over any in-bounds cell (water, mountains, enemy land).
+    pub flight_mode: bool,
 }
 
 impl RouteContext {
@@ -99,6 +101,7 @@ impl RouteContext {
             water_step,
             max_expand: crate::route::MAX_PATHFIND_EXPAND,
             corridor: None,
+            flight_mode: false,
         }
     }
 

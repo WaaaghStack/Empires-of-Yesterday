@@ -4,6 +4,7 @@ extends RefCounted
 const BattleMapDataLib := preload("res://BattleMapData.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+const EconomyLib := preload("res://EconomyLib.gd")
 
 const STATE_CONNECTING := "connecting"
 const STATE_BUILDING := "building"
@@ -11,11 +12,17 @@ const STATE_ACTIVE := "active"
 
 const KIND_SPAWNER := "spawner"
 const KIND_BARRACKS := "barracks"
+const KIND_HANGAR := "hangar"
 const KIND_CORRIDOR_LINK := "corridor_link"
 
 
 static func is_corridor_path_kind(kind: String) -> bool:
-	return kind == KIND_SPAWNER or kind == KIND_BARRACKS or kind == KIND_CORRIDOR_LINK
+	return (
+		kind == KIND_SPAWNER
+		or kind == KIND_BARRACKS
+		or kind == KIND_HANGAR
+		or kind == KIND_CORRIDOR_LINK
+	)
 
 
 static func is_pressure_spawner_kind(kind: String) -> bool:
@@ -23,13 +30,11 @@ static func is_pressure_spawner_kind(kind: String) -> bool:
 
 
 static func has_build_phase(kind: String) -> bool:
-	return kind == KIND_SPAWNER or kind == KIND_BARRACKS
+	return kind == KIND_SPAWNER or kind == KIND_BARRACKS or kind == KIND_HANGAR
 
 
 static func build_sec_for_kind(kind: String) -> float:
-	if kind == KIND_BARRACKS:
-		return WorldConquestConfigLib.BARRACKS_BUILD_SEC
-	return WorldConquestConfigLib.OUTPOST_BUILD_SEC
+	return EconomyLib.build_sec_for_kind(kind)
 
 const _DIRS: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -134,8 +139,11 @@ static func pack_infra_mask_for_team(map_data, structures: Array, team: int) -> 
 	return infra_mask
 
 
-static func operational_sources(
-	structures: Array, home: Vector2i, map_data = null, team: int = BattleTileControlLib.OWNER_FRIENDLY
+static func resource_supply_hubs(
+	structures: Array,
+	home: Vector2i,
+	map_data = null,
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Array[Vector2i]:
 	var out: Array[Vector2i] = []
 	var seen: Dictionary = {}
@@ -169,6 +177,95 @@ static func operational_sources(
 				continue
 			seen[key] = true
 			out.append(Vector2i(bx, by))
+	return out
+
+
+static func operational_sources(
+	structures: Array,
+	home: Vector2i,
+	map_data = null,
+	team: int = BattleTileControlLib.OWNER_FRIENDLY,
+	network_built: PackedByteArray = PackedByteArray(),
+) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	var key: String = ""
+	if home.x >= 0:
+		out.append(home)
+		seen["%d,%d" % [home.x, home.y]] = true
+	for st: Dictionary in structures:
+		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+			continue
+		if str(st.get("kind", "")) != "spawner":
+			continue
+		if str(st.get("state", STATE_ACTIVE)) != STATE_ACTIVE:
+			continue
+		var pt: Vector2i = Vector2i(int(st.get("gx", 0)), int(st.get("gy", 0)))
+		key = "%d,%d" % [pt.x, pt.y]
+		if seen.has(key):
+			continue
+		seen[key] = true
+		out.append(pt)
+	if map_data != null:
+		for corridor: Dictionary in map_data.bridge_corridors:
+			if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+				continue
+			var bx: int = int(corridor.get("gx", -1))
+			var by: int = int(corridor.get("gy", -1))
+			if bx < 0:
+				continue
+			key = "%d,%d" % [bx, by]
+			if seen.has(key):
+				continue
+			seen[key] = true
+			out.append(Vector2i(bx, by))
+	out.append_array(connecting_road_frontiers(map_data, structures, team, seen, network_built))
+	return out
+
+
+static func path_prefix_built_len(path: PackedInt32Array, built_mask: PackedByteArray) -> int:
+	if path.is_empty():
+		return 0
+	var n: int = 0
+	for key: int in path:
+		if key < 0 or key >= built_mask.size() or built_mask[key] == 0:
+			break
+		n += 1
+	return maxi(n, 1)
+
+
+## Road tips of in-progress outposts — allows branching while earlier roads are still building.
+static func connecting_road_frontiers(
+	map_data,
+	structures: Array,
+	team: int,
+	seen: Dictionary,
+	network_built: PackedByteArray = PackedByteArray(),
+) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	if map_data == null:
+		return out
+	var w: int = map_data.grid_width
+	for st: Dictionary in structures:
+		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
+			continue
+		var kind: String = str(st.get("kind", ""))
+		if not is_corridor_path_kind(kind) or kind == KIND_CORRIDOR_LINK:
+			continue
+		if str(st.get("state", STATE_CONNECTING)) != STATE_CONNECTING:
+			continue
+		var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+		if packed.is_empty():
+			continue
+		var built: int = int(floor(float(st.get("path_built", 1.0))))
+		built = clampi(built, 1, packed.size())
+		var frontier_key: int = packed[built - 1]
+		var pt: Vector2i = grid_from_packed_key(frontier_key, w)
+		var dedupe: String = "%d,%d" % [pt.x, pt.y]
+		if seen.has(dedupe):
+			continue
+		seen[dedupe] = true
+		out.append(pt)
 	return out
 
 
@@ -407,8 +504,25 @@ static func needs_bridge_route(
 	return true
 
 
+static func merge_infra_masks(base: PackedByteArray, extra: PackedByteArray) -> PackedByteArray:
+	if base.is_empty():
+		return extra
+	if extra.is_empty():
+		return base
+	var n: int = mini(base.size(), extra.size())
+	for i in range(n):
+		if extra[i] != 0:
+			base[i] = 1
+	return base
+
+
 ## Road/outpost routing cells: built outpost paths plus completed land-bridge corridors.
-static func road_cells_for_team(map_data, structures: Array, team: int) -> Dictionary:
+static func road_cells_for_team(
+	map_data,
+	structures: Array,
+	team: int,
+	network_built: PackedByteArray = PackedByteArray(),
+) -> Dictionary:
 	var out: Dictionary = {}
 	for st: Dictionary in structures:
 		if int(st.get("team", 0)) != team:

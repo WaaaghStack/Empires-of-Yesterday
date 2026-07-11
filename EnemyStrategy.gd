@@ -5,6 +5,7 @@ extends RefCounted
 ## callers execute via existing placement + builder job queues.
 
 const CFG := preload("res://WorldConquestConfig.gd")
+const EconomyLib := preload("res://EconomyLib.gd")
 const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
@@ -31,7 +32,7 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 	if owners.is_empty():
 		return []
 	var enemy_supply: float = float(snapshot.get("enemy_supply", 0.0))
-	if enemy_supply < float(CFG.SPAWNER_COST_SUPPLY):
+	if enemy_supply < EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER):
 		return []
 	var connecting: int = int(snapshot.get("connecting_hostile", 0))
 	if connecting >= CFG.ENEMY_AI_MAX_CONCURRENT_BUILDS:

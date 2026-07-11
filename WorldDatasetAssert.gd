@@ -56,3 +56,13 @@ static func _check_structure_cache(territory_sim, battle_data, issues: PackedStr
 		var rust_pb: float = float(rust_st.get("path_built", -1.0))
 		if absf(gd_pb - rust_pb) > 0.01:
 			issues.append("path_built mismatch sid=%d gd=%.2f rust=%.2f" % [sid, gd_pb, rust_pb])
+		var gd_state: String = str(gd_st.get("state", ""))
+		var rust_state: String = str(rust_st.get("state", ""))
+		if gd_state != "" and rust_state != "" and gd_state != rust_state:
+			issues.append(
+				"state mismatch sid=%d gd=%s rust=%s" % [sid, gd_state, rust_state]
+			)
+		var gd_kind: String = str(gd_st.get("kind", ""))
+		var rust_kind: String = str(rust_st.get("kind", ""))
+		if gd_kind != "" and rust_kind != "" and gd_kind != rust_kind:
+			issues.append("kind mismatch sid=%d gd=%s rust=%s" % [sid, gd_kind, rust_kind])

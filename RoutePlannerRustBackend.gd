@@ -61,7 +61,9 @@ func update_infra(map_data, structures: Array) -> bool:
 	)
 
 
-func update_infra_for_team(map_data, structures: Array, team: int) -> bool:
+func update_infra_for_team(
+	map_data, structures: Array, team: int, network_built: PackedByteArray = PackedByteArray()
+) -> bool:
 	if not ready or _planner == null or map_data == null:
 		return false
 	if not _planner.has_method("update_infra_mask"):
@@ -69,6 +71,8 @@ func update_infra_for_team(map_data, structures: Array, team: int) -> bool:
 	var infra: PackedByteArray = OutpostBuildLib.pack_infra_mask_for_team(
 		map_data, structures, team
 	)
+	if not network_built.is_empty():
+		infra = OutpostBuildLib.merge_infra_masks(infra, network_built)
 	if infra.is_empty():
 		return false
 	return bool(_planner.call("update_infra_mask", infra))

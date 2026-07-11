@@ -88,20 +88,25 @@ The objective is **total conquest**: own every reachable claimable land tile, or
 ```mermaid
 flowchart LR
   Gen[EarthMapGenerator] --> MapData[BattleMapData]
-  MapData --> TC[BattleTileControl CPU truth]
-  TC --> Rust[TerritorySim Rust GDExtension]
-  TC --> Gpu[BattleTerritoryGpuField]
-  Rust --> Screen[WorldConquestScreen]
-  Gpu --> Screen
-  TC --> Screen
-  Screen --> Globe[EarthGlobeMap / EarthGlobeMesh 3D]
-  Screen --> Overlay[BattleTileOwnershipOverlay]
+  MapData --> Rust[TerritorySim main tables]
+  Rust --> Txn[PresentationTxn change feed]
+  Txn --> Screen[WorldConquestScreen render cache]
+  Screen --> Globe[EarthGlobeMap 3D]
+  Rust -.QA only.-> TC[BattleTileControl CPU parity]
 ```
 
-- `BattleTerritorySim` drives rounds (`SIM_DT` = 1/14 s, ≤ 8 steps/frame); `BattleTileControl` holds CPU truth.
-- The **Rust backend** mirrors propagation in `rust/empire_territory` (see `RUST.md`); state syncs back into `BattleTileControl` each step so GDScript systems (placement, resources, HUD) read one source.
-- The **GPU backend** runs flow in compute shaders (`shaders/territory/*.glsl`) with throttled owner readback.
-- Bridge/claimable changes are synced to the active backend (throttled by `BRIDGE_BACKEND_SYNC_INTERVAL_SEC`).
+### Authoritative model (60 FPS contract)
+
+| Layer | Owns | Godot role |
+|-------|------|------------|
+| **Main tables (Rust)** | owners, pressure, structures, logistics built cells, agents | Never re-scanned every frame for paint |
+| **PresentationTxn (Rust)** | deltas since last pull: owner cells, path_built patches, new road cells, marker dirty | Drained once/frame via `pull_presentation_txn` |
+| **Render cache (GDScript)** | `placed_structures` dicts, MultiMesh instances, ownership texture | Apply txn only; full structure snapshot is rare (place/activate/destroy) |
+
+- Live sim steps and logistics write **main tables** and append **transactions**.
+- Visuals read **transactions**, not the whole world table.
+- `BattleTileControl` / full snapshots remain for QA parity and rare rebuilds — not the live paint path.
+- See `rust/empire_territory/src/presentation_txn.rs` and `PERFORMANCE.md`.
 
 ### Win / end conditions
 

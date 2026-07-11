@@ -57,8 +57,21 @@ const OVERLAY_GPU_UPLOAD_MAX_HZ := 30.0
 const MIN_SPAWNER_SPACING_CELLS := 6
 ## Outpost must link by road from HQ or nearest active outpost, then finish construction.
 const OUTPOST_BUILD_SEC := 5.0
-const OUTPOST_ROAD_CELLS_PER_SEC := 1.0
-## Flying builder bots per home base (player + enemy); future scaling hooks here.
+const OUTPOST_ROAD_CELLS_PER_SEC := 2.0
+## Each connecting route feeds its own road front at this rate (parallel when routes diverge).
+## Shared logistics network — timer road growth (replaces builder bots).
+const LOGISTICS_RECONCILE_CELLS_PER_FRAME := 6480
+const LOGISTICS_FULL_RECAL_SEC := 25.0
+const LOGISTICS_PLACEMENT_HEAT_DECAY := 0.85
+const LOGISTICS_BURST_BASE := 0.02
+const LOGISTICS_BURST_RATIO := 1.35
+const LOGISTICS_DRAIN_SPAWNER := 0.04
+const LOGISTICS_DRAIN_BARRACKS := 0.06
+const LOGISTICS_DRAIN_HANGAR := 0.06
+const LOGISTICS_DRAIN_CORRIDOR := 0.03
+const LOGISTICS_STRAIN_SENSITIVITY := 1.0
+const MAX_NETWORK_ROAD_CELLS_PER_FRAME := 24
+## Legacy builder visuals (unused when logistics authority is on).
 const BUILDER_BOTS_PER_HOME := 4
 const BUILDER_SURFACE_LIFT := 2.85
 const BUILDER_ORBIT_RADIUS_CELLS := 3.5
@@ -102,6 +115,28 @@ const BARRACKS_SPAWN_INTERVAL_SEC := 10.0
 const BARRACKS_MAX_ACTIVE_UNITS := 5
 const GLOBAL_SOLDIER_CAP := 100
 const SOLDIER_SPAWN_AURELIUM_COST := 3.0
+## Hangar — same economy as barracks; spawns bombers (Aurelium).
+const HANGAR_COST_SUPPLY := 400
+const HANGAR_BUILD_SEC := 60.0
+const HANGAR_SPAWN_INTERVAL_SEC := 10.0
+const HANGAR_MAX_ACTIVE_UNITS := 5
+const GLOBAL_BOMBER_CAP := 100
+const BOMBER_SPAWN_AURELIUM_COST := 3.0
+const BOMBER_MAX_HP := 100.0
+const BOMBER_ORPHAN_DPS := 1.0
+const BOMBER_MOVE_CELLS_PER_SEC := 2.0
+const BOMBER_INFRA_MOVE_MULT := 3.0
+const BOMBER_BOMB_POWER := 1000.0
+const BOMBER_BOMB_INTERVAL_SEC := 10.0
+const BOMBER_VISUAL_UPDATES_PER_SEC := 4.0
+## Flight altitude lift — ~10× peak mountain visual (HEIGHT_SCALE * 10).
+const BOMBER_SURFACE_LIFT := HEIGHT_SCALE * 10.0
+## Strike pathfind starts local, widening on miss (BFS cell budgets).
+const BOMBER_SEARCH_EXPAND_INITIAL := 5000
+const BOMBER_SEARCH_EXPAND_STEP := 5000
+const BOMBER_SEARCH_EXPAND_MAX := 40000
+## Force a fresh route evaluation after this many seconds on the same plan.
+const BOMBER_PLAN_REEVAL_SEC := 25.0
 const SOLDIER_UPKEEP_AURELIUM_PER_SEC := 0.15
 const SOLDIER_MAX_HP := 40.0
 const SOLDIER_ORPHAN_DPS := 4.0
@@ -120,20 +155,18 @@ const MAX_SIM_TIME_SEC := 7200.0
 const ZERO_POWER_VICTORY_EPS := 0.5
 ## Log when the slow GDScript owner→display overlay path runs during Rust live play.
 const WORLD_DATASET_WARN_SLOW_OVERLAY := true
-## Rust kernel owns owners/claimable/reachability during WC live — skip GDScript grid mirror writes.
+## Production live contract: all authority flags true. Do not introduce partial live modes.
+## Individual flags remain for explicit CPU/QA harnesses only — not for runtime toggles mid-match.
 const WORLD_DATASET_GRID_AUTHORITY := true
-## Rust structure store owns outpost/corridor sim state — GDScript placed_structures is render cache.
 const WORLD_DATASET_STRUCTURE_AUTHORITY := true
-## Building timers, construction damage, and barracks spawns in one Rust world_session_tick.
 const WORLD_DATASET_WORLD_SESSION_TICK := true
-## Builder job queues, path_built growth, and bot travel in Rust (GDScript visuals only).
 const WORLD_DATASET_BUILDER_AUTHORITY := true
-## Resource balances stored in Rust dataset; deposit tick still computed in GDScript.
 const WORLD_DATASET_RESOURCE_WALLET := true
 ## QA: assert single-source WorldDataset invariants during validate runs.
 const WORLD_DATASET_QA_ASSERTS := true
 
 
+## True when Play uses the single Rust live world (presentation is pull_presentation_delta).
 static func world_dataset_live() -> bool:
 	return (
 		WORLD_DATASET_GRID_AUTHORITY

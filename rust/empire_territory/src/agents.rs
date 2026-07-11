@@ -134,6 +134,10 @@ impl AgentLayer {
         self.agents.len() as u32
     }
 
+    pub fn living_count_for_team(&self, team: u8) -> u32 {
+        self.agents.iter().filter(|a| a.team == team).count() as u32
+    }
+
     pub fn living_for_barracks(&self, barracks_id: i32) -> u32 {
         *self.living_by_barracks.get(&barracks_id).unwrap_or(&0)
     }

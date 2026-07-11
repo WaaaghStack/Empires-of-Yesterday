@@ -115,7 +115,7 @@ fn path_len_from_record(st: &StructureRecord) -> i32 {
 }
 
 fn build_sec_for_kind(kind: u8, cfg: &BuilderConfig) -> f32 {
-    if kind == crate::structures::KIND_BARRACKS {
+    if kind == crate::structures::KIND_BARRACKS || kind == crate::structures::KIND_HANGAR {
         cfg.barracks_build_sec
     } else {
         cfg.outpost_build_sec

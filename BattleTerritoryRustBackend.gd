@@ -217,6 +217,13 @@ func step_rounds(
 	_apply_owners_delta_to_tile_control(tile_control)
 
 
+func set_home_inject_enabled(enabled: bool) -> void:
+	if not ready or _sim == null:
+		return
+	if _sim.has_method("set_home_inject_enabled"):
+		_sim.call("set_home_inject_enabled", enabled)
+
+
 func consume_owner_overlay_delta() -> Dictionary:
 	var out := {
 		"indices": last_display_delta_indices,
@@ -228,6 +235,63 @@ func consume_owner_overlay_delta() -> Dictionary:
 	last_display_delta_values = PackedByteArray()
 	last_owner_delta_indices = PackedInt32Array()
 	last_owner_delta_values = PackedByteArray()
+	return out
+
+
+## Single presentation pull for a live frame (consume-only; does not advance sim).
+## Prefer Rust presentation transaction log (main tables stay in Rust; this is the change feed).
+func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
+	# Defaults false: callers must opt in. Avoid accidental full structure/agent FFI every frame.
+	var include_structures: bool = bool(opts.get("structures", false))
+	var include_agents: bool = bool(opts.get("agents", false))
+	var include_bombers: bool = bool(opts.get("bombers", false))
+	var out := {
+		"owners": {},
+		"friendly_tiles": friendly_tiles,
+		"hostile_tiles": hostile_tiles,
+		"structures": {},
+		"agents": {},
+		"bombers": {},
+		# Structure field transactions (path_built / state) — apply without full table dump.
+		"path_built_sids": PackedInt32Array(),
+		"path_built_vals": PackedFloat32Array(),
+		"state_sids": PackedInt32Array(),
+		"state_vals": PackedByteArray(),
+		"new_road_cells": PackedInt32Array(),
+		"completed_sids": PackedInt32Array(),
+		"marker_dirty_sids": PackedInt32Array(),
+		"structures_dirty": false,
+	}
+	if ready and _sim != null and _sim.has_method("pull_presentation_txn"):
+		var txn: Dictionary = _sim.call("pull_presentation_txn", include_structures)
+		out["owners"] = txn.get("owners", {})
+		out["friendly_tiles"] = int(txn.get("friendly_tiles", friendly_tiles))
+		out["hostile_tiles"] = int(txn.get("hostile_tiles", hostile_tiles))
+		friendly_tiles = int(out["friendly_tiles"])
+		hostile_tiles = int(out["hostile_tiles"])
+		out["path_built_sids"] = txn.get("path_built_sids", PackedInt32Array())
+		out["path_built_vals"] = txn.get("path_built_vals", PackedFloat32Array())
+		out["state_sids"] = txn.get("state_sids", PackedInt32Array())
+		out["state_vals"] = txn.get("state_vals", PackedByteArray())
+		out["new_road_cells"] = txn.get("new_road_cells", PackedInt32Array())
+		out["completed_sids"] = txn.get("completed_sids", PackedInt32Array())
+		out["marker_dirty_sids"] = txn.get("marker_dirty_sids", PackedInt32Array())
+		out["structures_dirty"] = bool(txn.get("structures_dirty", false))
+		if include_structures:
+			out["structures"] = txn.get("structures", {})
+		# Clear legacy last_* buffers so dual consume cannot double-apply owners.
+		last_display_delta_indices = PackedInt32Array()
+		last_display_delta_values = PackedByteArray()
+		last_owner_delta_indices = PackedInt32Array()
+		last_owner_delta_values = PackedByteArray()
+	else:
+		out["owners"] = consume_owner_overlay_delta()
+		if include_structures and structure_authority_enabled():
+			out["structures"] = get_structure_snapshot()
+	if include_agents and ready and _sim != null and _sim.has_method("get_agent_snapshot"):
+		out["agents"] = _sim.call("get_agent_snapshot")
+	if include_bombers and ready and _sim != null and _sim.has_method("get_bomber_snapshot"):
+		out["bombers"] = _sim.call("get_bomber_snapshot")
 	return out
 
 
@@ -622,6 +686,12 @@ func configure_world_session(cfg: Dictionary, enabled: bool) -> void:
 	_sim.call("configure_world_session", cfg, enabled)
 
 
+func configure_content_tables(cfg: Dictionary) -> void:
+	if not ready or _sim == null or not _sim.has_method("configure_content_tables"):
+		return
+	_sim.call("configure_content_tables", cfg)
+
+
 func world_session_enabled() -> bool:
 	if not ready or _sim == null or not _sim.has_method("world_session_enabled"):
 		return false
@@ -670,6 +740,18 @@ func get_builder_visual_snapshot() -> Dictionary:
 	if not ready or _sim == null or not _sim.has_method("get_builder_visual_snapshot"):
 		return {}
 	return _sim.call("get_builder_visual_snapshot")
+
+
+func get_network_built_mask(team: int) -> PackedByteArray:
+	if not ready or _sim == null or not _sim.has_method("get_network_built_mask"):
+		return PackedByteArray()
+	return _sim.call("get_network_built_mask", team)
+
+
+func get_logistics_strain() -> Dictionary:
+	if not ready or _sim == null or not _sim.has_method("get_logistics_strain"):
+		return {}
+	return _sim.call("get_logistics_strain")
 
 
 func configure_resource_wallet(enabled: bool) -> void:
@@ -768,7 +850,7 @@ static func _structure_qualifies_for_corridor_sync(st: Dictionary) -> bool:
 	var kind: String = str(st.get("kind", ""))
 	if not OutpostBuildLib.is_corridor_path_kind(kind):
 		return false
-	if kind == OutpostBuildLib.KIND_SPAWNER or kind == OutpostBuildLib.KIND_BARRACKS:
+	if kind == OutpostBuildLib.KIND_SPAWNER or kind == OutpostBuildLib.KIND_BARRACKS or kind == OutpostBuildLib.KIND_HANGAR:
 		var state: String = str(st.get("state", OutpostBuildLib.STATE_ACTIVE))
 		return (
 			state == OutpostBuildLib.STATE_CONNECTING
@@ -1009,4 +1091,57 @@ func get_agent_snapshot() -> Dictionary:
 		return {}
 	if _sim.has_method("get_agent_snapshot"):
 		return _sim.call("get_agent_snapshot")
+	return {}
+
+
+func configure_bombers(cfg: Dictionary) -> bool:
+	if not ready or _sim == null or not _sim.has_method("configure_bombers"):
+		return false
+	return bool(_sim.call("configure_bombers", cfg))
+
+
+func bombers_active() -> bool:
+	if not ready or _sim == null:
+		return false
+	if _sim.has_method("bombers_active"):
+		return bool(_sim.call("bombers_active"))
+	return false
+
+
+func notify_hangar_destroyed(hangar_id: int) -> void:
+	if not ready or _sim == null:
+		return
+	if _sim.has_method("notify_hangar_destroyed"):
+		_sim.call("notify_hangar_destroyed", hangar_id)
+
+
+func try_spawn_bomber(hangar_id: int, team: int, gx: int, gy: int) -> bool:
+	if not ready or _sim == null:
+		return false
+	if _sim.has_method("try_spawn_bomber"):
+		return bool(_sim.call("try_spawn_bomber", hangar_id, team, gx, gy))
+	return false
+
+
+func bomber_living_count() -> int:
+	if not ready or _sim == null:
+		return 0
+	if _sim.has_method("bomber_living_count"):
+		return int(_sim.call("bomber_living_count"))
+	return 0
+
+
+func bomber_living_for_hangar(hangar_id: int) -> int:
+	if not ready or _sim == null:
+		return 0
+	if _sim.has_method("bomber_living_for_hangar"):
+		return int(_sim.call("bomber_living_for_hangar", hangar_id))
+	return 0
+
+
+func get_bomber_snapshot() -> Dictionary:
+	if not ready or _sim == null:
+		return {}
+	if _sim.has_method("get_bomber_snapshot"):
+		return _sim.call("get_bomber_snapshot")
 	return {}

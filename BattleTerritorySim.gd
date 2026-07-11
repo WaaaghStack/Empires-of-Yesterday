@@ -11,6 +11,7 @@ const BattleTileFluidFieldLib := preload("res://BattleTileFluidField.gd")
 const BattlePerfProfilerLib := preload("res://BattlePerfProfiler.gd")
 const BattleMapDataLib := preload("res://BattleMapData.gd")
 const WorldConquestOutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
+const EconomyLib := preload("res://EconomyLib.gd")
 const MAX_ROUNDS_DEFAULT := 4800
 const DOMINANCE_FRAC := 0.92
 const DOMINANCE_ROUNDS := 10
@@ -495,23 +496,100 @@ func _configure_world_agents() -> void:
 	})
 	sync_agent_nav()
 	_configure_world_session()
+	_configure_world_bombers()
 	_configure_builders_and_wallet()
+	_configure_content_tables()
+
+
+func _configure_content_tables() -> void:
+	if rust_field == null:
+		return
+	EconomyLib.ensure_loaded(RunState.economy_pack_id)
+	if rust_field.has_method("configure_content_tables"):
+		rust_field.configure_content_tables(EconomyLib.export_rust_bundle())
+
+
+func _configure_world_bombers() -> void:
+	if rust_field == null:
+		return
+	var cfg := WorldConquestConfigLib
+	rust_field.configure_bombers({
+		"global_cap": cfg.GLOBAL_BOMBER_CAP,
+		"per_hangar_cap": cfg.HANGAR_MAX_ACTIVE_UNITS,
+		"max_hp": cfg.BOMBER_MAX_HP,
+		"move_cells_per_sec": cfg.BOMBER_MOVE_CELLS_PER_SEC,
+		"infra_move_mult": cfg.BOMBER_INFRA_MOVE_MULT,
+		"bomb_power": cfg.BOMBER_BOMB_POWER,
+		"bomb_interval_sec": cfg.BOMBER_BOMB_INTERVAL_SEC,
+		"orphan_dps": cfg.BOMBER_ORPHAN_DPS,
+		"step_dt": cfg.SIM_DT,
+		"replans_per_tick": cfg.SOLDIER_REPLANS_PER_TICK,
+		"replan_fallback_rounds": cfg.SOLDIER_REPLAN_FALLBACK_ROUNDS,
+		"search_expand_initial": cfg.BOMBER_SEARCH_EXPAND_INITIAL,
+		"search_expand_step": cfg.BOMBER_SEARCH_EXPAND_STEP,
+		"search_expand_max": cfg.BOMBER_SEARCH_EXPAND_MAX,
+		"plan_reeval_sec": cfg.BOMBER_PLAN_REEVAL_SEC,
+	})
+	sync_agent_nav()
+
+
+func bombers_ready() -> bool:
+	if rust_field == null:
+		return false
+	return rust_field.bombers_active()
+
+
+func notify_hangar_destroyed(hangar_id: int) -> void:
+	if rust_field != null:
+		rust_field.notify_hangar_destroyed(hangar_id)
+
+
+func bomber_living_count() -> int:
+	if rust_field == null:
+		return 0
+	return rust_field.bomber_living_count()
+
+
+func bomber_living_for_hangar(hangar_id: int) -> int:
+	if rust_field == null:
+		return 0
+	return rust_field.bomber_living_for_hangar(hangar_id)
+
+
+func try_spawn_bomber(hangar_id: int, team: int, gx: int, gy: int) -> bool:
+	if rust_field == null:
+		return false
+	return rust_field.try_spawn_bomber(hangar_id, team, gx, gy)
+
+
+func get_bomber_snapshot() -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.get_bomber_snapshot()
 
 
 func configure_builders(player_home: Vector2i, enemy_home: Vector2i) -> void:
 	if rust_field == null:
 		return
+	EconomyLib.ensure_loaded(RunState.economy_pack_id)
 	var cfg := WorldConquestConfigLib
 	rust_field.configure_builders(
 		{
 			"road_cells_per_sec": cfg.OUTPOST_ROAD_CELLS_PER_SEC,
-			"bots_per_home": cfg.BUILDER_BOTS_PER_HOME,
-			"orbit_radius_cells": cfg.BUILDER_ORBIT_RADIUS_CELLS,
-			"orbit_speed": cfg.BUILDER_ORBIT_SPEED,
-			"return_sec": cfg.BUILDER_RETURN_SEC,
-			"outpost_build_sec": cfg.OUTPOST_BUILD_SEC,
-			"barracks_build_sec": cfg.BARRACKS_BUILD_SEC,
+			"outpost_build_sec": EconomyLib.build_sec_for_kind(WorldConquestOutpostBuildLib.KIND_SPAWNER),
+			"barracks_build_sec": EconomyLib.build_sec_for_kind(WorldConquestOutpostBuildLib.KIND_BARRACKS),
+			"hangar_build_sec": EconomyLib.build_sec_for_kind(WorldConquestOutpostBuildLib.KIND_HANGAR),
 			"outpost_max_health": cfg.OUTPOST_MAX_HEALTH,
+			"reconcile_cells_per_frame": cfg.LOGISTICS_RECONCILE_CELLS_PER_FRAME,
+			"full_recal_interval_sec": cfg.LOGISTICS_FULL_RECAL_SEC,
+			"placement_heat_decay_per_sec": cfg.LOGISTICS_PLACEMENT_HEAT_DECAY,
+			"burst_base": cfg.LOGISTICS_BURST_BASE,
+			"burst_ratio": cfg.LOGISTICS_BURST_RATIO,
+			"structure_drain_spawner": cfg.LOGISTICS_DRAIN_SPAWNER,
+			"structure_drain_barracks": cfg.LOGISTICS_DRAIN_BARRACKS,
+			"structure_drain_hangar": cfg.LOGISTICS_DRAIN_HANGAR,
+			"structure_drain_corridor": cfg.LOGISTICS_DRAIN_CORRIDOR,
+			"strain_sensitivity": cfg.LOGISTICS_STRAIN_SENSITIVITY,
 			"player_home_gx": player_home.x,
 			"player_home_gy": player_home.y,
 			"enemy_home_gx": enemy_home.x,
@@ -523,6 +601,8 @@ func configure_builders(player_home: Vector2i, enemy_home: Vector2i) -> void:
 
 func builder_authority_active() -> bool:
 	if rust_field == null or not WorldConquestConfigLib.WORLD_DATASET_BUILDER_AUTHORITY:
+		return false
+	if not WorldConquestConfigLib.WORLD_DATASET_STRUCTURE_AUTHORITY:
 		return false
 	return rust_field.builder_authority_enabled()
 
@@ -549,6 +629,25 @@ func get_builder_visual_snapshot() -> Dictionary:
 	if rust_field == null:
 		return {}
 	return rust_field.get_builder_visual_snapshot()
+
+
+## One presentation pull after sim ticks (owners + optional structure/unit snaps).
+func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
+	if rust_field == null or not rust_live_ready:
+		return {}
+	return rust_field.pull_presentation_delta(opts)
+
+
+func get_network_built_mask(team: int) -> PackedByteArray:
+	if rust_field == null:
+		return PackedByteArray()
+	return rust_field.get_network_built_mask(team)
+
+
+func get_logistics_strain() -> Dictionary:
+	if rust_field == null:
+		return {}
+	return rust_field.get_logistics_strain()
 
 
 func resource_wallet_active() -> bool:
@@ -635,6 +734,11 @@ func _configure_world_session() -> void:
 			"barracks_max_active": cfg.BARRACKS_MAX_ACTIVE_UNITS,
 			"global_soldier_cap": cfg.GLOBAL_SOLDIER_CAP,
 			"soldier_spawn_cost": cfg.SOLDIER_SPAWN_AURELIUM_COST,
+			"hangar_build_sec": cfg.HANGAR_BUILD_SEC,
+			"hangar_spawn_interval": cfg.HANGAR_SPAWN_INTERVAL_SEC,
+			"hangar_max_active": cfg.HANGAR_MAX_ACTIVE_UNITS,
+			"global_bomber_cap": cfg.GLOBAL_BOMBER_CAP,
+			"bomber_spawn_cost": cfg.BOMBER_SPAWN_AURELIUM_COST,
 		},
 		cfg.WORLD_DATASET_WORLD_SESSION_TICK and cfg.WORLD_DATASET_STRUCTURE_AUTHORITY,
 	)

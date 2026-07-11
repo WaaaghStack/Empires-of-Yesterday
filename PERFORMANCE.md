@@ -22,6 +22,7 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 |------|--------|
 | World Conquest live step (Rust backend) | < 8 ms/step (`BATTLE_WORLD_CONQUEST_BENCH=1` gate in `qa_runner.gd`) |
 | World Conquest 60 Hz frame (sim + overlay FFI) | p99 < 16 ms, min FPS ≥ 58 (`BATTLE_FPS_BENCH=1`) |
+| Mid-game presentation (12 structures, live screen) | p99 ≤ 20 ms always-on QA (`_validate_midgame_presentation_fps`) |
 | CPU resolve, 96×72 fixture | `resolve_ms < 3000` (legacy QA gate) |
 | Overlay refresh (pressure mode) | `OVERLAY_UPDATES_PER_SEC` = 3 Hz |
 | Soldier dot refresh | `SOLDIER_VISUAL_UPDATES_PER_SEC` = 4 Hz |
@@ -63,8 +64,11 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | **SubViewport when visible** | `WorldConquestScreen` `UPDATE_WHEN_VISIBLE` | Skips 3D render when play area hidden |
 | **Surface position LUT** | `EarthGlobeMap._surface_lut` | Soldiers/markers/roads skip per-frame trig |
 | **Road/link segment pools** | `EarthGlobeMap._road_seg_pool`, `_link_seg_pool` | Reuses `MeshInstance3D` nodes |
+| **Incremental road MultiMesh** | `EarthGlobeMap._append_road_multimesh_transforms` | Path/network growth appends instances only; full rewrite only on remove/reset |
+| **PresentationTxn (live)** | `presentation_txn.rs` + `pull_presentation_txn` | Rust main tables + change feed; Godot applies path_built/road/owner deltas only |
+| **Event-driven route portals** | `WorldConquestScreen._ensure_route_portals_for_team` | Rebuild when versions or active team change — not on every place/pathfind |
 | **Dirty-flag maintenance** | `WorldConquestScreen._has_active_construction`, `_bridges_repaired` | Skips outpost/bridge loops when idle |
-| **Frame phase profiler** | `FrameBudgetProfiler.gd` | Always samples `_process` ms for F3 HUD; spike logging when `BATTLE_FRAME_BUDGET_LOG=1` |
+| **Frame phase profiler** | `FrameBudgetProfiler.gd` | Always samples `_process` ms for F3 HUD; spike logging when `BATTLE_FRAME_BUDGET_LOG=1`; fps_drop tags `likely_cpu`/`likely_gpu` + phase dump |
 | Globe meshes coarser than sim grid | `GLOBE_MESH_W/H` 144×72, `FLUID_MESH_W/H` 180×90 | GPU budget independent of sim resolution |
 | GPU compute backend (optional) | `BattleTerritoryGpuField.gd`, `shaders/territory/*.glsl` | Flow on GPU; throttled owner readback; skips `pack_display` when owners-only |
 
@@ -110,7 +114,7 @@ Hot paths emit `RunLog.info` / `warn` lines with an `action=` prefix plus fps/cp
 | `action=gpu_upload` | Pending owner texture flush committed |
 | `action=roads` | Road mesh sync |
 | `action=markers` | Structure marker refresh |
-| `action=fps_drop` | Sustained FPS &lt; 42 (existing drop watcher) |
+| `action=fps_drop` | Sustained FPS &lt; 42; `note=likely_cpu` if CPU p99/last &gt; 12 ms else `likely_gpu`; includes `phases=` when available |
 
 Written to `logs/latest_run.txt` with the usual 0.25 s batch flush.
 

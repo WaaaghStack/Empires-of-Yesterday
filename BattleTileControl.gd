@@ -702,7 +702,7 @@ func sync_bridge_corridors_from_map(map_data, force_full: bool = false) -> bool:
 		var kind: String = str(st.get("kind", ""))
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(kind):
 			continue
-		if kind == WorldConquestOutpostBuildLib.KIND_SPAWNER or kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+		if kind == WorldConquestOutpostBuildLib.KIND_SPAWNER or kind == WorldConquestOutpostBuildLib.KIND_BARRACKS or kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
 			var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
 			if (
 				state != WorldConquestOutpostBuildLib.STATE_CONNECTING

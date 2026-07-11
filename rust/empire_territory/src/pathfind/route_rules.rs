@@ -204,6 +204,11 @@ pub struct RouteRuleOutcome {
     pub reject: i32,
 }
 
+/// Cheap path budget when allow_astar=false (hover / responsive AI): thin corridors only.
+const CHEAP_CORRIDOR_WIDTHS: &[i32] = &[2, 4, 8, 16, 32];
+const CHEAP_CORRIDOR_PER_BAND_MAX_EXPAND: usize = 2_048;
+const CHEAP_FULL_SEARCH_MAX_EXPAND: usize = 4_000;
+
 pub fn run_route_rule_with_reject(
     kernel: &mut SearchKernel,
     snapshot: &RouteSnapshot,
@@ -214,12 +219,6 @@ pub fn run_route_rule_with_reject(
     allow_astar: bool,
 ) -> Option<RouteRuleOutcome> {
     let rule = rule_by_id(rule_id)?;
-    if !allow_astar {
-        return Some(RouteRuleOutcome {
-            path: None,
-            reject: ROUTE_REJECT_ASTAR_DISABLED,
-        });
-    }
 
     let goal = snapshot.cell_index(target_gx, target_gy);
     if goal < 0 {
@@ -258,8 +257,21 @@ pub fn run_route_rule_with_reject(
     }
 
     let sources = &portal.source_keys;
-    let widths = corridor_widths_for(rule.id);
-    let full_cap = full_search_max_expand(rule.id);
+    // allow_astar=false: still search, but with a tight expand budget (hover/AI responsive).
+    // allow_astar=true: full corridor ladder + full expand (player click placement).
+    let (widths, band_cap, full_cap) = if allow_astar {
+        (
+            corridor_widths_for(rule.id),
+            CORRIDOR_PER_BAND_MAX_EXPAND,
+            full_search_max_expand(rule.id),
+        )
+    } else {
+        (
+            CHEAP_CORRIDOR_WIDTHS,
+            CHEAP_CORRIDOR_PER_BAND_MAX_EXPAND,
+            CHEAP_FULL_SEARCH_MAX_EXPAND,
+        )
+    };
     for &ctx in rule.attempts {
         if let Some(result) = kernel.find_path_corridor_widening(
             snapshot,
@@ -267,7 +279,7 @@ pub fn run_route_rule_with_reject(
             goal,
             ctx,
             widths,
-            CORRIDOR_PER_BAND_MAX_EXPAND,
+            band_cap,
         ) {
             return Some(RouteRuleOutcome {
                 path: Some(result),
@@ -288,7 +300,12 @@ pub fn run_route_rule_with_reject(
     }
     Some(RouteRuleOutcome {
         path: None,
-        reject: ROUTE_REJECT_NO_PATH,
+        reject: if allow_astar {
+            ROUTE_REJECT_NO_PATH
+        } else {
+            // Distinct code when cheap budget failed (callers may retry with full A*).
+            ROUTE_REJECT_ASTAR_DISABLED
+        },
     })
 }
 

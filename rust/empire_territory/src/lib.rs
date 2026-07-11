@@ -1,10 +1,14 @@
 //! Empire Territory Sim — Rust GDExtension for high-performance territory conquest simulation.
 
 mod agents;
+mod bombers;
 mod builders;
+mod economy;
 mod fluid_bake;
 mod grid_query;
+mod logistics;
 mod pathfind;
+mod presentation_txn;
 mod resources;
 mod route;
 mod sim;
@@ -13,14 +17,21 @@ mod tape_codec;
 mod world_edit;
 mod world_session;
 
+use economy::{
+    fill_structure_row, f32_at, i32_at, u32_at, ContentTables, MAX_KINDS, RESOURCE_SLOTS,
+};
 use fluid_bake::bake_fluid_rgba;
 use godot::builtin::Variant;
 use godot::prelude::*;
 use rayon::prelude::*;
 use std::sync::Arc;
 use agents::{AgentConfig, AgentLayer};
+use bombers::{BomberConfig, BomberLayer};
 use builders::{
     work_grid_pos, BuilderConfig, BuilderLayer, BuilderStepEvents, PathCompletionEvent,
+};
+use logistics::{
+    kind_str as logistics_kind_str, LogisticsConfig, LogisticsLayer, LogisticsStepEvents,
 };
 use resources::ResourceWallet;
 use route::{
@@ -32,6 +43,7 @@ use structures::{
 };
 use sim::{Spawner, TerritoryKernel};
 use tape_codec::{decode_pressure_v2, encode_pressure_v2, pack_territory_tape_v2};
+use presentation_txn::PresentationTxn;
 use world_edit::{ClaimableDelta, CorridorPathSpec, WorldEditResult};
 use world_session::{tick_world_session, WorldSessionConfig, WorldSessionEvents};
 
@@ -172,6 +184,8 @@ fn world_session_events_dict(events: &WorldSessionEvents, friendly_aurelium: f32
     let mut out = GdDictionary::new();
     out.set("friendly_aurelium", friendly_aurelium);
     out.set("friendly_aurelium_spent", events.friendly_aurelium_spent);
+    out.set("friendly_deficit_dps", events.friendly_deficit_dps);
+    out.set("hostile_deficit_dps", events.hostile_deficit_dps);
     out.set("needs_sim_sync", events.needs_sim_sync);
     out.set("marker_dirty", events.marker_dirty);
     out.set("activated_sids", &vec_to_packed_i32(&events.activated_sids));
@@ -184,10 +198,47 @@ fn world_session_events_dict(events: &WorldSessionEvents, friendly_aurelium: f32
         "spawned_barracks_sids",
         &vec_to_packed_i32(&events.spawned_barracks_sids),
     );
+    out.set(
+        "spawned_hangar_sids",
+        &vec_to_packed_i32(&events.spawned_hangar_sids),
+    );
     out
 }
 
 fn builder_step_events_dict(events: &BuilderStepEvents) -> GdDictionary {
+    logistics_step_events_dict_from_builder(events)
+}
+
+fn logistics_step_events_dict(events: &LogisticsStepEvents) -> GdDictionary {
+    let mut out = GdDictionary::new();
+    out.set("visual_dirty", events.visual_dirty);
+    let mut arrivals = Array::<Variant>::new();
+    for ev in &events.cell_arrivals {
+        let mut entry = GdDictionary::new();
+        entry.set("sid", ev.sid);
+        entry.set("seg_from_idx", ev.seg_from_idx);
+        entry.set("kind", &GString::from(logistics_kind_str(ev.kind)));
+        arrivals.push(&entry);
+    }
+    out.set("cell_arrivals", &arrivals);
+    let mut completions = Array::<Variant>::new();
+    for ev in &events.path_completions {
+        let mut entry = logistics_path_completion_dict(ev);
+        completions.push(&entry);
+    }
+    out.set("path_completions", &completions);
+    out.set(
+        "completed_corridor_sids",
+        &vec_to_packed_i32(&events.completed_corridor_sids),
+    );
+    out.set("new_built_cells", &vec_to_packed_i32(&events.new_built_cells));
+    out.set("friendly_output_mult", events.friendly_output_mult);
+    out.set("hostile_output_mult", events.hostile_output_mult);
+    out.set("reassign_teams", &PackedByteArray::new());
+    out
+}
+
+fn logistics_step_events_dict_from_builder(events: &BuilderStepEvents) -> GdDictionary {
     let mut out = GdDictionary::new();
     out.set("visual_dirty", events.visual_dirty);
     let mut arrivals = Array::<Variant>::new();
@@ -209,12 +260,26 @@ fn builder_step_events_dict(events: &BuilderStepEvents) -> GdDictionary {
         "completed_corridor_sids",
         &vec_to_packed_i32(&events.completed_corridor_sids),
     );
+    out.set("new_built_cells", &PackedInt32Array::new());
+    out.set("friendly_output_mult", 1.0f32);
+    out.set("hostile_output_mult", 1.0f32);
     let mut teams = PackedByteArray::new();
     for t in &events.reassign_teams {
         teams.push(*t);
     }
     out.set("reassign_teams", &teams);
     out
+}
+
+fn logistics_path_completion_dict(ev: &logistics::PathCompletionEvent) -> GdDictionary {
+    let mut entry = GdDictionary::new();
+    entry.set("sid", ev.sid);
+    entry.set("gx", ev.gx);
+    entry.set("gy", ev.gy);
+    entry.set("team", ev.team);
+    entry.set("is_corridor_link", ev.is_corridor_link);
+    entry.set("kind", &GString::from(logistics_kind_str(ev.kind)));
+    entry
 }
 
 fn path_completion_dict(ev: &PathCompletionEvent) -> GdDictionary {
@@ -335,14 +400,26 @@ struct TerritorySim {
     agent_snap_teams: Vec<u8>,
     agent_snap_gx: Vec<i32>,
     agent_snap_gy: Vec<i32>,
+    bombers: Option<BomberLayer>,
+    bombers_enabled: bool,
+    bomber_snap_teams: Vec<u8>,
+    bomber_snap_gx: Vec<i32>,
+    bomber_snap_gy: Vec<i32>,
+    bomber_snap_search_scope: Vec<i32>,
     structure_store: StructureStore,
+    /// Change feed for Godot visuals — drain via pull_presentation_txn (main tables stay in Rust).
+    presentation_txn: PresentationTxn,
     world_session_cfg: WorldSessionConfig,
     world_session_enabled: bool,
     builder_layer: BuilderLayer,
+    logistics_layer: LogisticsLayer,
     builder_cfg: BuilderConfig,
+    logistics_cfg: LogisticsConfig,
     builder_enabled: bool,
+    logistics_enabled: bool,
     resource_wallet: ResourceWallet,
     resource_wallet_enabled: bool,
+    content_tables: ContentTables,
     player_home_gx: i32,
     player_home_gy: i32,
     enemy_home_gx: i32,
@@ -756,6 +833,139 @@ impl TerritorySim {
     }
 
     #[func]
+    fn configure_content_tables(&mut self, config: GdDictionary) {
+        let build_sec: Vec<f32> = config
+            .get("structure_build_sec")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let max_health: Vec<f32> = config
+            .get("structure_max_health")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let logistics_drain: Vec<f32> = config
+            .get("structure_logistics_drain")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let spawn_interval: Vec<f32> = config
+            .get("structure_spawn_interval")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let spawn_max_active: Vec<i32> = config
+            .get("structure_spawn_max_active")
+            .and_then(|v| v.try_to::<PackedInt32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0)).collect())
+            .unwrap_or_default();
+        let spawn_unit: Vec<i32> = config
+            .get("structure_spawn_unit")
+            .and_then(|v| v.try_to::<PackedInt32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(-1)).collect())
+            .unwrap_or_default();
+        let spawn_resources: Vec<f32> = config
+            .get("structure_spawn_resources")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+        let unit_global_cap: Vec<i32> = config
+            .get("unit_global_cap")
+            .and_then(|v| v.try_to::<PackedInt32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0)).collect())
+            .unwrap_or_default();
+        let unit_upkeep: Vec<f32> = config
+            .get("unit_upkeep_resources")
+            .and_then(|v| v.try_to::<PackedFloat32Array>().ok())
+            .map(|p| (0..p.len()).map(|i| p.get(i).unwrap_or(0.0)).collect())
+            .unwrap_or_default();
+
+        let mut tables = ContentTables::default();
+        let defaults = tables.clone();
+        for kind in 0..MAX_KINDS {
+            let mut res = [0.0f32; RESOURCE_SLOTS];
+            for r in 0..RESOURCE_SLOTS {
+                let idx = kind * RESOURCE_SLOTS + r;
+                res[r] = f32_at(&spawn_resources, idx, 0.0);
+            }
+            fill_structure_row(
+                &mut tables,
+                kind,
+                f32_at(&build_sec, kind, defaults.structure_build_sec[kind]),
+                f32_at(&max_health, kind, defaults.structure_max_health[kind]),
+                f32_at(
+                    &logistics_drain,
+                    kind,
+                    defaults.structure_logistics_drain[kind],
+                ),
+                f32_at(
+                    &spawn_interval,
+                    kind,
+                    defaults.structure_spawn_interval[kind],
+                ),
+                u32_at(&spawn_max_active, kind, defaults.structure_spawn_max_active[kind]),
+                i32_at(&spawn_unit, kind, defaults.structure_spawn_unit[kind]),
+                res,
+            );
+        }
+        for unit in 0..economy::MAX_UNITS {
+            tables.unit_global_cap[unit] =
+                u32_at(&unit_global_cap, unit, defaults.unit_global_cap[unit]);
+            for r in 0..RESOURCE_SLOTS {
+                let idx = unit * RESOURCE_SLOTS + r;
+                tables.unit_upkeep_resources[unit][r] =
+                    f32_at(&unit_upkeep, idx, defaults.unit_upkeep_resources[unit][r]);
+            }
+        }
+        self.content_tables = tables;
+
+        let road_cells_per_sec: f32 = config
+            .get("road_cells_per_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.road_cells_per_sec);
+        let outpost_enemy_dps: f32 = config
+            .get("outpost_enemy_dps")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.world_session_cfg.outpost_enemy_dps);
+
+        self.content_tables
+            .apply_to_logistics(&mut self.logistics_cfg, road_cells_per_sec);
+        self.logistics_cfg.reconcile_cells_per_frame = config
+            .get("reconcile_cells_per_frame")
+            .and_then(|v| v.try_to::<i32>().ok())
+            .unwrap_or(self.logistics_cfg.reconcile_cells_per_frame as i32)
+            as usize;
+        self.logistics_cfg.full_recal_interval_sec = config
+            .get("full_recal_interval_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.full_recal_interval_sec);
+        self.logistics_cfg.placement_heat_decay_per_sec = config
+            .get("placement_heat_decay_per_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.placement_heat_decay_per_sec);
+        self.logistics_cfg.burst_base = config
+            .get("burst_base")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.burst_base);
+        self.logistics_cfg.burst_ratio = config
+            .get("burst_ratio")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.burst_ratio);
+        self.logistics_cfg.strain_sensitivity = config
+            .get("strain_sensitivity")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.logistics_cfg.strain_sensitivity);
+
+        let upkeep_deficit_dps: f32 = config
+            .get("soldier_upkeep_deficit_dps")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(self.world_session_cfg.upkeep_deficit_dps);
+
+        self.content_tables
+            .apply_to_world_session(&mut self.world_session_cfg, outpost_enemy_dps, upkeep_deficit_dps);
+    }
+
+    #[func]
     fn configure_world_session(&mut self, config: GdDictionary, enabled: bool) {
         self.world_session_cfg = WorldSessionConfig {
             outpost_build_sec: config
@@ -790,6 +1000,34 @@ impl TerritorySim {
                 .get("soldier_spawn_cost")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(3.0),
+            hangar_build_sec: config
+                .get("hangar_build_sec")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(60.0),
+            hangar_spawn_interval: config
+                .get("hangar_spawn_interval")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(10.0),
+            hangar_max_active: config
+                .get("hangar_max_active")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(5),
+            global_bomber_cap: config
+                .get("global_bomber_cap")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(100),
+            bomber_spawn_cost: config
+                .get("bomber_spawn_cost")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(3.0),
+            soldier_upkeep_per_sec: config
+                .get("soldier_upkeep_per_sec")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(self.world_session_cfg.soldier_upkeep_per_sec),
+            upkeep_deficit_dps: config
+                .get("upkeep_deficit_dps")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(self.world_session_cfg.upkeep_deficit_dps),
         };
         self.world_session_enabled = enabled;
     }
@@ -809,49 +1047,48 @@ impl TerritorySim {
         let Some(kernel) = self.kernel.as_ref() else {
             return GdDictionary::new();
         };
-        let mut wallet = if self.resource_wallet_enabled {
-            self.resource_wallet.friendly[0]
-        } else {
-            friendly_aurelium
-        };
+        let cfg = self.world_session_cfg.clone();
+        let tables = self.content_tables.clone();
         let agents_ptr = self.agents.as_mut();
-        let events = tick_world_session(
-            kernel,
-            &mut self.structure_store,
-            agents_ptr,
-            dt,
-            &mut wallet,
-            &self.world_session_cfg,
-        );
-        if self.resource_wallet_enabled {
-            self.resource_wallet.friendly[0] = wallet;
-        }
-        world_session_events_dict(&events, wallet)
+        let bombers_ptr = self.bombers.as_mut();
+        let (events, friendly_aurelium_out) = if self.resource_wallet_enabled {
+            let events = tick_world_session(
+                kernel,
+                &mut self.structure_store,
+                agents_ptr,
+                bombers_ptr,
+                dt,
+                Some(&mut self.resource_wallet),
+                None,
+                &tables,
+                &cfg,
+            );
+            (events, self.resource_wallet.friendly[0])
+        } else {
+            let mut wallet_au = friendly_aurelium;
+            let events = tick_world_session(
+                kernel,
+                &mut self.structure_store,
+                agents_ptr,
+                bombers_ptr,
+                dt,
+                None,
+                Some(&mut wallet_au),
+                &tables,
+                &cfg,
+            );
+            (events, wallet_au)
+        };
+        world_session_events_dict(&events, friendly_aurelium_out)
     }
 
     #[func]
     fn configure_builders(&mut self, config: GdDictionary, enabled: bool) {
-        self.builder_cfg = BuilderConfig {
+        self.logistics_cfg = LogisticsConfig {
             road_cells_per_sec: config
                 .get("road_cells_per_sec")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(1.0),
-            bots_per_home: config
-                .get("bots_per_home")
-                .and_then(|v| v.try_to().ok())
-                .unwrap_or(2),
-            orbit_radius_cells: config
-                .get("orbit_radius_cells")
-                .and_then(|v| v.try_to().ok())
-                .unwrap_or(3.5),
-            orbit_speed: config
-                .get("orbit_speed")
-                .and_then(|v| v.try_to().ok())
-                .unwrap_or(0.55),
-            return_sec: config
-                .get("return_sec")
-                .and_then(|v| v.try_to().ok())
-                .unwrap_or(0.45),
             outpost_build_sec: config
                 .get("outpost_build_sec")
                 .and_then(|v| v.try_to().ok())
@@ -860,10 +1097,54 @@ impl TerritorySim {
                 .get("barracks_build_sec")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(60.0),
+            hangar_build_sec: config
+                .get("hangar_build_sec")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(60.0),
             outpost_max_health: config
                 .get("outpost_max_health")
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(10.0),
+            reconcile_cells_per_frame: config
+                .get("reconcile_cells_per_frame")
+                .and_then(|v| v.try_to::<i32>().ok())
+                .unwrap_or(648) as usize,
+            full_recal_interval_sec: config
+                .get("full_recal_interval_sec")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(25.0),
+            placement_heat_decay_per_sec: config
+                .get("placement_heat_decay_per_sec")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.85),
+            burst_base: config
+                .get("burst_base")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.02),
+            burst_ratio: config
+                .get("burst_ratio")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(1.35),
+            structure_drain_spawner: config
+                .get("structure_drain_spawner")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.04),
+            structure_drain_barracks: config
+                .get("structure_drain_barracks")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.06),
+            structure_drain_hangar: config
+                .get("structure_drain_hangar")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.06),
+            structure_drain_corridor: config
+                .get("structure_drain_corridor")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(0.03),
+            strain_sensitivity: config
+                .get("strain_sensitivity")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or(1.0),
         };
         self.player_home_gx = config
             .get("player_home_gx")
@@ -881,34 +1162,65 @@ impl TerritorySim {
             .get("enemy_home_gy")
             .and_then(|v| v.try_to().ok())
             .unwrap_or(0);
+        self.logistics_enabled = enabled;
         self.builder_enabled = enabled;
-        if enabled {
-            self.builder_layer.player_home = (self.player_home_gx, self.player_home_gy);
-            self.builder_layer.enemy_home = (self.enemy_home_gx, self.enemy_home_gy);
-            self.builder_layer.init_bots(&self.builder_cfg);
+        if self.logistics_enabled {
+            self.logistics_layer.player_home = (self.player_home_gx, self.player_home_gy);
+            self.logistics_layer.enemy_home = (self.enemy_home_gx, self.enemy_home_gy);
+            if let Some(kernel) = &self.kernel {
+                let tile_count = kernel.tile_count;
+                self.logistics_layer.configure(
+                    tile_count,
+                    kernel.grid_w,
+                    kernel.grid_h,
+                    &self.logistics_cfg,
+                );
+                self.logistics_layer
+                    .seed_from_store(&self.structure_store, &self.logistics_cfg);
+            }
         }
     }
 
     #[func]
     fn builder_authority_enabled(&self) -> bool {
-        self.builder_enabled && self.structure_store.ready && self.kernel.is_some()
+        self.logistics_enabled && self.kernel.is_some()
+    }
+
+    fn ensure_logistics_network(&mut self) {
+        if self.logistics_layer.is_configured() {
+            return;
+        }
+        let Some(kernel) = self.kernel.as_ref() else {
+            return;
+        };
+        self.logistics_layer.player_home = (self.player_home_gx, self.player_home_gy);
+        self.logistics_layer.enemy_home = (self.enemy_home_gx, self.enemy_home_gy);
+        self.logistics_layer.configure(
+            kernel.tile_count,
+            kernel.grid_w,
+            kernel.grid_h,
+            &self.logistics_cfg,
+        );
+        if self.structure_store.ready {
+            self.logistics_layer
+                .seed_from_store(&self.structure_store, &self.logistics_cfg);
+        }
     }
 
     #[func]
     fn builder_enqueue_job(&mut self, sid: i32, team: u8) {
-        if sid < 0 {
+        if sid < 0 || !self.logistics_enabled {
             return;
         }
-        self.builder_layer.enqueue_job(sid, team);
-        if self.builder_enabled {
-            let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
-            self.builder_layer.assign_builder_jobs(
-                &self.structure_store,
-                grid_w,
-                &self.builder_cfg,
-                team as i32,
-            );
-        }
+        self.ensure_logistics_network();
+        let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
+        self.logistics_layer.register_terminal(
+            sid,
+            &mut self.structure_store,
+            team,
+            grid_w,
+            &self.logistics_cfg,
+        );
     }
 
     #[func]
@@ -916,24 +1228,16 @@ impl TerritorySim {
         if sid < 0 {
             return;
         }
-        let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
-        self.builder_layer.cancel_job(
-            sid,
-            &self.structure_store,
-            grid_w,
-            &self.builder_cfg,
-        );
+        let Some(st) = self.structure_store.structures.get(&sid) else {
+            return;
+        };
+        let team = st.team;
+        self.logistics_layer.unregister_terminal(sid, &self.structure_store, team);
     }
 
     #[func]
-    fn builder_assign_jobs(&mut self, team_filter: i32) {
-        let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
-        self.builder_layer.assign_builder_jobs(
-            &self.structure_store,
-            grid_w,
-            &self.builder_cfg,
-            team_filter,
-        );
+    fn builder_assign_jobs(&mut self, _team_filter: i32) {
+        // Logistics network has no idle-bot job assignment.
     }
 
     #[func]
@@ -941,43 +1245,86 @@ impl TerritorySim {
         if !self.builder_authority_enabled() {
             return GdDictionary::new();
         }
-        let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
-        let events = self.builder_layer.step_frame(
+        self.ensure_logistics_network();
+        let (grid_w, grid_h) = self
+            .kernel
+            .as_ref()
+            .map(|k| (k.grid_w, k.grid_h))
+            .unwrap_or((0, 0));
+        let events = self.logistics_layer.step_frame(
             dt,
             &mut self.structure_store,
             grid_w,
-            &self.builder_cfg,
+            grid_h,
+            &self.logistics_cfg,
         );
-        builder_step_events_dict(&events)
+        if let Some(kernel) = self.kernel.as_mut() {
+            kernel.logistics_friendly_output_mult = events.friendly_output_mult;
+            kernel.logistics_hostile_output_mult = events.hostile_output_mult;
+        }
+        // Append logistics changes into the presentation transaction log (main table already updated).
+        self.presentation_txn.merge_logistics(&events);
+        self.presentation_txn
+            .fill_path_built_from_arrivals(&self.structure_store, &events);
+        logistics_step_events_dict(&events)
+    }
+
+    /// Drain the presentation transaction log for Godot visuals.
+    /// Main tables (owners / structures / logistics) stay in Rust; this is the change feed only.
+    #[func]
+    fn pull_presentation_txn(&mut self, include_full_structure_snapshot: bool) -> GdDictionary {
+        // Fold any remaining owner dirty (if advance did not already stash via sync_owners_delta_into_txn).
+        if let Some(kernel) = self.kernel.as_mut() {
+            let (idx, vals) = kernel.take_owner_dirty();
+            let (display_idx, display_vals) = kernel.take_display_dirty();
+            if !idx.is_empty() || !display_idx.is_empty() {
+                self.presentation_txn.push_owner_delta(
+                    idx,
+                    vals,
+                    display_idx,
+                    display_vals,
+                    kernel.friendly_tiles,
+                    kernel.hostile_tiles,
+                );
+            } else {
+                self.presentation_txn.friendly_tiles = kernel.friendly_tiles;
+                self.presentation_txn.hostile_tiles = kernel.hostile_tiles;
+            }
+        }
+        let mut out = self.presentation_txn.take().to_dict();
+        if include_full_structure_snapshot && self.structure_store.ready {
+            // Rare: full table read for placement/debug — not the per-frame path.
+            out.set("structures", &self.get_structure_snapshot());
+        }
+        out
+    }
+
+    #[func]
+    fn get_network_built_mask(&self, team: u8) -> PackedByteArray {
+        vec_to_packed_byte(&self.logistics_layer.built_mask(team))
+    }
+
+    #[func]
+    fn get_logistics_strain(&self) -> GdDictionary {
+        let mut out = GdDictionary::new();
+        let friendly_mult = self
+            .kernel
+            .as_ref()
+            .map(|k| k.logistics_friendly_output_mult)
+            .unwrap_or(1.0);
+        let hostile_mult = self
+            .kernel
+            .as_ref()
+            .map(|k| k.logistics_hostile_output_mult)
+            .unwrap_or(1.0);
+        out.set("friendly_output_mult", friendly_mult);
+        out.set("hostile_output_mult", hostile_mult);
+        out
     }
 
     #[func]
     fn get_builder_visual_snapshot(&self) -> GdDictionary {
-        let mut out = GdDictionary::new();
-        if !self.builder_enabled {
-            return out;
-        }
-        let grid_w = self.kernel.as_ref().map(|k| k.grid_w).unwrap_or(0);
-        let n = self.builder_layer.bots.len();
-        let mut xs = Vec::with_capacity(n);
-        let mut ys = Vec::with_capacity(n);
-        let mut teams_vec = Vec::with_capacity(n);
-        for bot in &self.builder_layer.bots {
-            let (x, y) = work_grid_pos(
-                bot,
-                &self.structure_store,
-                grid_w,
-                &self.builder_cfg,
-                &self.builder_layer,
-            );
-            xs.push(x);
-            ys.push(y);
-            teams_vec.push(bot.team);
-        }
-        out.set("pos_x", &vec_to_packed_f32(&xs));
-        out.set("pos_y", &vec_to_packed_f32(&ys));
-        out.set("teams", &vec_to_packed_byte(&teams_vec));
-        out
+        GdDictionary::new()
     }
 
     #[func]
@@ -1052,7 +1399,37 @@ impl TerritorySim {
             }
         }
         self.advance_rounds(n);
-        self.sync_owners_delta()
+        // Owner dirty stays in the kernel until pull_presentation_txn (or legacy sync_owners_delta).
+        // Still return a sync dict for backends that mirror into GDScript tile_control.
+        self.sync_owners_delta_into_txn()
+    }
+
+    /// Take owner dirty from the kernel, stash into the presentation txn, and return the same shape
+    /// as sync_owners_delta (for BattleTerritoryRustBackend last_* buffers).
+    fn sync_owners_delta_into_txn(&mut self) -> GdDictionary {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return GdDictionary::new();
+        };
+        let (idx, vals) = kernel.take_owner_dirty();
+        let (display_idx, display_vals) = kernel.take_display_dirty();
+        let friendly = kernel.friendly_tiles;
+        let hostile = kernel.hostile_tiles;
+        self.presentation_txn.push_owner_delta(
+            idx.clone(),
+            vals.clone(),
+            display_idx.clone(),
+            display_vals.clone(),
+            friendly,
+            hostile,
+        );
+        let mut out = GdDictionary::new();
+        out.set("owner_indices", &vec_to_packed_i32(&idx));
+        out.set("owner_values", &vec_to_packed_byte(&vals));
+        out.set("display_indices", &vec_to_packed_i32(&display_idx));
+        out.set("display_r8", &vec_to_packed_byte(&display_vals));
+        out.set("friendly_tiles", friendly);
+        out.set("hostile_tiles", hostile);
+        out
     }
 
     #[func]
@@ -1192,8 +1569,95 @@ impl TerritorySim {
     }
 
     #[func]
-    fn agents_active(&self) -> bool {
-        self.agents_enabled && self.agents.is_some()
+    fn configure_bombers(&mut self, config: GdDictionary) -> bool {
+        let global_cap: u32 = config
+            .get("global_cap")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(100);
+        let per_hangar_cap: u32 = config
+            .get("per_hangar_cap")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(5);
+        let max_hp: f32 = config
+            .get("max_hp")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(100.0);
+        let move_cells_per_sec: f32 = config
+            .get("move_cells_per_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(2.0);
+        let infra_move_mult: f32 = config
+            .get("infra_move_mult")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(3.0);
+        let bomb_power: f32 = config
+            .get("bomb_power")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(1000.0);
+        let bomb_interval_sec: f32 = config
+            .get("bomb_interval_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(10.0);
+        let orphan_dps: f32 = config
+            .get("orphan_dps")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(1.0);
+        let step_dt: f32 = config
+            .get("step_dt")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(1.0 / 14.0);
+        let replans_per_tick: u32 = config
+            .get("replans_per_tick")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(6);
+        let replan_fallback_rounds: i32 = config
+            .get("replan_fallback_rounds")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(42);
+        let search_expand_initial: usize = config
+            .get("search_expand_initial")
+            .and_then(|v| v.try_to::<i32>().ok())
+            .map(|v| v.max(1) as usize)
+            .unwrap_or(5_000);
+        let search_expand_step: usize = config
+            .get("search_expand_step")
+            .and_then(|v| v.try_to::<i32>().ok())
+            .map(|v| v.max(1) as usize)
+            .unwrap_or(5_000);
+        let search_expand_max: usize = config
+            .get("search_expand_max")
+            .and_then(|v| v.try_to::<i32>().ok())
+            .map(|v| v.max(1) as usize)
+            .unwrap_or(40_000);
+        let plan_reeval_sec: f32 = config
+            .get("plan_reeval_sec")
+            .and_then(|v| v.try_to().ok())
+            .unwrap_or(25.0);
+        let bomber_cfg = BomberConfig {
+            global_cap,
+            per_hangar_cap,
+            max_hp,
+            move_cells_per_sec,
+            infra_move_mult,
+            bomb_power,
+            bomb_interval_sec,
+            orphan_dps,
+            step_dt,
+            replans_per_tick,
+            replan_fallback_rounds,
+            search_expand_initial,
+            search_expand_step,
+            search_expand_max,
+            plan_reeval_sec,
+        };
+        self.bombers = Some(BomberLayer::new(bomber_cfg));
+        self.bombers_enabled = true;
+        true
+    }
+
+    #[func]
+    fn bombers_active(&self) -> bool {
+        self.bombers_enabled && self.bombers.is_some()
     }
 
     #[func]
@@ -1213,6 +1677,14 @@ impl TerritorySim {
             packed_byte_to_vec(&friendly_bridge),
             packed_byte_to_vec(&hostile_bridge),
         );
+        if let Some(bombers) = self.bombers.as_mut() {
+            bombers.update_nav_masks(
+                packed_byte_to_vec(&friendly_corridor),
+                packed_byte_to_vec(&hostile_corridor),
+                packed_byte_to_vec(&friendly_bridge),
+                packed_byte_to_vec(&hostile_bridge),
+            );
+        }
     }
 
     #[func]
@@ -1239,6 +1711,93 @@ impl TerritorySim {
             return false;
         };
         agents.try_spawn(kernel, barracks_id, team, bx, by)
+    }
+
+    #[func]
+    fn agents_active(&self) -> bool {
+        self.agents_enabled && self.agents.is_some()
+    }
+
+    #[func]
+    fn notify_hangar_destroyed(&mut self, hangar_id: i32) {
+        let Some(bombers) = self.bombers.as_mut() else {
+            return;
+        };
+        bombers.on_hangar_destroyed(hangar_id);
+    }
+
+    #[func]
+    fn bomber_living_count(&self) -> i32 {
+        self.bombers
+            .as_ref()
+            .map(|b| b.living_count() as i32)
+            .unwrap_or(0)
+    }
+
+    #[func]
+    fn bomber_living_for_hangar(&self, hangar_id: i32) -> i32 {
+        self.bombers
+            .as_ref()
+            .map(|b| b.living_for_hangar(hangar_id) as i32)
+            .unwrap_or(0)
+    }
+
+    #[func]
+    fn try_spawn_bomber(
+        &mut self,
+        hangar_id: i32,
+        team: u8,
+        gx: i32,
+        gy: i32,
+    ) -> bool {
+        let Some(kernel) = self.kernel.as_ref() else {
+            return false;
+        };
+        let Some(bombers) = self.bombers.as_mut() else {
+            return false;
+        };
+        bombers.try_spawn(kernel, hangar_id, team, gx, gy)
+    }
+
+    #[func]
+    fn get_bomber_snapshot(&mut self) -> GdDictionary {
+        let mut out = GdDictionary::new();
+        let Some(bombers) = self.bombers.as_mut() else {
+            return out;
+        };
+        let n = bombers.bombers.len();
+        self.bomber_snap_teams.clear();
+        self.bomber_snap_gx.clear();
+        self.bomber_snap_gy.clear();
+        self.bomber_snap_search_scope.clear();
+        self.bomber_snap_teams.reserve(n);
+        self.bomber_snap_gx.reserve(n);
+        self.bomber_snap_gy.reserve(n);
+        self.bomber_snap_search_scope.reserve(n);
+        for b in &bombers.bombers {
+            self.bomber_snap_teams.push(b.team);
+            self.bomber_snap_gx.push(b.gx);
+            self.bomber_snap_gy.push(b.gy);
+            self.bomber_snap_search_scope.push(b.search_expand_limit as i32);
+        }
+        out.set("teams", &vec_to_packed_byte(&self.bomber_snap_teams));
+        out.set("gx", &vec_to_packed_i32(&self.bomber_snap_gx));
+        out.set("gy", &vec_to_packed_i32(&self.bomber_snap_gy));
+        out.set("search_scope", &vec_to_packed_i32(&self.bomber_snap_search_scope));
+        out.set("count", n as i32);
+        let events = bombers.take_bomb_events();
+        let mut bomb_gx = PackedInt32Array::new();
+        let mut bomb_gy = PackedInt32Array::new();
+        let mut bomb_teams = PackedByteArray::new();
+        for ev in &events {
+            bomb_gx.push(ev.gx);
+            bomb_gy.push(ev.gy);
+            bomb_teams.push(ev.team);
+        }
+        out.set("bomb_gx", &bomb_gx);
+        out.set("bomb_gy", &bomb_gy);
+        out.set("bomb_teams", &bomb_teams);
+        out
     }
 
     #[func]
@@ -1292,39 +1851,32 @@ impl TerritorySim {
 
     #[func]
     fn advance_round(&mut self) {
-        if let Some(kernel) = self.kernel.as_mut() {
-            if self.agents_enabled {
-                if let Some(agents) = self.agents.as_mut() {
-                    if agents.living_count() > 0 {
-                        kernel.advance_round_with_agents(agents);
-                        return;
-                    }
-                }
-            }
-            kernel.advance_round();
-        }
-    }
-
-    #[func]
-    fn advance_rounds(&mut self, n: i32) {
-        let count = n.max(0);
-        if count <= 0 {
-            return;
-        }
         let Some(kernel) = self.kernel.as_mut() else {
             return;
         };
         if self.agents_enabled {
             if let Some(agents) = self.agents.as_mut() {
                 if agents.living_count() > 0 {
-                    for _ in 0..count {
-                        kernel.advance_round_with_agents(agents);
-                    }
-                    return;
+                    agents.tick(kernel);
                 }
             }
         }
-        kernel.advance_rounds(count);
+        if self.bombers_enabled {
+            if let Some(bombers) = self.bombers.as_mut() {
+                if bombers.living_count() > 0 {
+                    bombers.tick(kernel);
+                }
+            }
+        }
+        kernel.advance_round();
+    }
+
+    #[func]
+    fn advance_rounds(&mut self, n: i32) {
+        let count = n.max(0);
+        for _ in 0..count {
+            self.advance_round();
+        }
     }
 
     #[func]

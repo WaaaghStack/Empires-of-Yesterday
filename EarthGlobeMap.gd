@@ -27,6 +27,7 @@ var _globe_mi: MeshInstance3D
 var _fluid_mi: MeshInstance3D
 var _markers: Node3D
 var _soldiers: Node3D
+var _bombers: Node3D
 var _builders: Node3D
 var _effects: Node3D
 var _roads: Node3D
@@ -48,15 +49,26 @@ var _marker_pool_used: int = 0
 var _soldier_pool: Array[MeshInstance3D] = []
 var _soldier_pool_used: int = 0
 var _soldier_sphere_mesh: SphereMesh
+var _bomber_pool: Array[MeshInstance3D] = []
+var _bomber_pool_used: int = 0
+var _bomber_mesh: BoxMesh
+var _bomb_drop_mesh: SphereMesh
 var _builder_pool: Array[MeshInstance3D] = []
 var _builder_pool_used: int = 0
 var _builder_mesh: BoxMesh
 var _marker_box_mesh: BoxMesh
 var _road_land_mm: MultiMeshInstance3D
 var _road_bridge_mm: MultiMeshInstance3D
+## Live instance counts (MultiMesh.instance_count is capacity; visible_instance_count is drawn).
+var _road_mm_land_used: int = 0
+var _road_mm_bridge_used: int = 0
+const _ROAD_MM_MIN_CAPACITY := 256
 var _road_cache_land: Dictionary = {}
 var _road_cache_bridge: Dictionary = {}
 var _road_cached_seg_total: Dictionary = {}
+var _network_built_cells: Dictionary = {}
+var _network_road_land: Array[Transform3D] = []
+var _network_road_bridge: Array[Transform3D] = []
 var _path_cache: Dictionary = {} # sid -> PackedInt32Array
 var _preview: Node3D
 var _preview_route: Node3D
@@ -174,6 +186,14 @@ func _build_scene() -> void:
 	_soldier_sphere_mesh = SphereMesh.new()
 	_soldier_sphere_mesh.radius = 0.35
 	_soldier_sphere_mesh.height = 0.7
+	_bombers = Node3D.new()
+	_bombers.name = "Bombers"
+	add_child(_bombers)
+	_bomber_mesh = BoxMesh.new()
+	_bomber_mesh.size = Vector3(0.9, 0.28, 1.35)
+	_bomb_drop_mesh = SphereMesh.new()
+	_bomb_drop_mesh.radius = 0.22
+	_bomb_drop_mesh.height = 0.44
 	_builders = Node3D.new()
 	_builders.name = "Builders"
 	add_child(_builders)
@@ -260,7 +280,11 @@ func _build_scene() -> void:
 	_road_cache_land.clear()
 	_road_cache_bridge.clear()
 	_road_cached_seg_total.clear()
+	_network_built_cells.clear()
+	_network_road_land.clear()
+	_network_road_bridge.clear()
 	_path_cache.clear()
+	_reset_road_multimesh_instances()
 	_resource_link_seg_count.clear()
 	_resource_link_nodes.clear()
 	_pulse_pool.clear()
@@ -958,6 +982,8 @@ func refresh_markers(
 				var prog: float = 1.0 - clampf(rem / build_sec, 0.0, 1.0)
 				if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 					col = Color(0.55, 0.38, 0.22).lerp(Color(0.85, 0.55, 0.28), prog)
+				elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+					col = Color(0.35, 0.38, 0.55).lerp(Color(0.55, 0.62, 0.95), prog)
 				else:
 					col = Color(0.3, 0.45, 0.62).lerp(Color(0.25, 0.65, 1.0), prog)
 				scale_f = lerpf(0.78, 1.0, prog)
@@ -965,6 +991,8 @@ func refresh_markers(
 			_:
 				if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 					col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
+				elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+					col = Color(0.52, 0.68, 0.98) if team == 1 else Color(0.95, 0.48, 0.38)
 				else:
 					col = Color(0.25, 0.65, 1.0) if team == 1 else Color(1.0, 0.4, 0.3)
 		if hp_frac < 1.0:
@@ -984,15 +1012,14 @@ func refresh_connecting_markers(structures: Array, home_player: Vector2i, home_e
 	if _marker_sid_slot.is_empty():
 		refresh_markers(structures, home_player, home_enemy)
 		return
+	# Only CONNECTING (road still growing) blinks. BUILDING uses solid progress colors —
+	# road is already complete in the structure table.
 	var pulse_sids: Array[int] = []
 	for st: Dictionary in structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
 			continue
 		var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
-		if (
-			state == WorldConquestOutpostBuildLib.STATE_CONNECTING
-			or state == WorldConquestOutpostBuildLib.STATE_BUILDING
-		):
+		if state == WorldConquestOutpostBuildLib.STATE_CONNECTING:
 			var sid: int = int(st.get("id", -1))
 			if sid >= 0:
 				pulse_sids.append(sid)
@@ -1056,6 +1083,8 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 			var prog: float = 1.0 - clampf(rem / build_sec, 0.0, 1.0)
 			if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 				col = Color(0.55, 0.38, 0.22).lerp(Color(0.85, 0.55, 0.28), prog)
+			elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+				col = Color(0.35, 0.38, 0.55).lerp(Color(0.55, 0.62, 0.95), prog)
 			else:
 				col = Color(0.3, 0.45, 0.62).lerp(Color(0.25, 0.65, 1.0), prog)
 			scale_f = lerpf(0.78, 1.0, prog)
@@ -1063,6 +1092,8 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 		_:
 			if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
 				col = Color(0.82, 0.58, 0.24) if team == 1 else Color(0.9, 0.45, 0.28)
+			elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+				col = Color(0.52, 0.68, 0.98) if team == 1 else Color(0.95, 0.48, 0.38)
 			else:
 				col = Color(0.25, 0.65, 1.0) if team == 1 else Color(1.0, 0.4, 0.3)
 	if hp_frac < 1.0:
@@ -1189,7 +1220,124 @@ func _place_pooled_soldier(grid: Vector2i, color: Color) -> void:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 
-func sync_roads(structures: Array, changed_sids: Array = []) -> void:
+func sync_bombers(
+	teams: PackedByteArray,
+	gx: PackedInt32Array,
+	gy: PackedInt32Array,
+	search_scope: PackedInt32Array = PackedInt32Array(),
+) -> void:
+	if _bombers == null:
+		return
+	_bomber_pool_used = 0
+	var n: int = mini(teams.size(), mini(gx.size(), gy.size()))
+	for i in range(n):
+		var grid := Vector2i(gx[i], gy[i])
+		if grid.x < 0:
+			continue
+		var team: int = int(teams[i])
+		var col: Color = Color(0.45, 0.72, 1.0) if team == 1 else Color(1.0, 0.42, 0.32)
+		var scope: int = int(search_scope[i]) if i < search_scope.size() else 0
+		_place_pooled_bomber(grid, col, scope)
+	for j in range(_bomber_pool_used, _bomber_pool.size()):
+		_bomber_pool[j].visible = false
+
+
+func _bomber_scope_visual_scale(scope: int) -> float:
+	var initial: int = WorldConquestConfigLib.BOMBER_SEARCH_EXPAND_INITIAL
+	var max_scope: int = WorldConquestConfigLib.BOMBER_SEARCH_EXPAND_MAX
+	if scope <= 0:
+		scope = initial
+	if max_scope <= initial:
+		return 1.0
+	var t: float = clampf(
+		float(scope - initial) / float(max_scope - initial),
+		0.0,
+		1.0,
+	)
+	return lerpf(1.0, 1.85, t)
+
+
+func _place_pooled_bomber(grid: Vector2i, color: Color, search_scope: int = 0) -> void:
+	if _bombers == null or battle_data == null or grid.x < 0:
+		return
+	while _bomber_pool.size() <= _bomber_pool_used:
+		var node := MeshInstance3D.new()
+		node.mesh = _bomber_mesh
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		node.material_override = StandardMaterial3D.new()
+		(node.material_override as StandardMaterial3D).emission_enabled = true
+		_bombers.add_child(node)
+		_bomber_pool.append(node)
+	var craft: MeshInstance3D = _bomber_pool[_bomber_pool_used]
+	_bomber_pool_used += 1
+	craft.visible = true
+	var scope_scale: float = _bomber_scope_visual_scale(search_scope)
+	craft.scale = Vector3(scope_scale, scope_scale, scope_scale)
+	craft.position = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
+	var mat := craft.material_override as StandardMaterial3D
+	mat.albedo_color = color
+	mat.emission = color * 0.7
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+
+func play_bomb_drops(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:
+	if _effects == null or battle_data == null:
+		return
+	var n: int = mini(teams.size(), mini(gx.size(), gy.size()))
+	for i in range(n):
+		_spawn_bomb_drop(Vector2i(gx[i], gy[i]), int(teams[i]))
+
+
+func _spawn_bomb_drop(grid: Vector2i, team: int) -> void:
+	if grid.x < 0:
+		return
+	var col: Color = Color(1.0, 0.55, 0.15) if team == 1 else Color(1.0, 0.28, 0.18)
+	var top: Vector3 = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
+	var ground: Vector3 = _grid_surface_pos(grid, 0.55)
+	var bomb := MeshInstance3D.new()
+	bomb.mesh = _bomb_drop_mesh
+	bomb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = col
+	mat.emission_enabled = true
+	mat.emission = col * 0.9
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bomb.material_override = mat
+	bomb.position = top
+	_effects.add_child(bomb)
+	var tween := create_tween()
+	tween.tween_property(bomb, "position", ground, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_callback(func() -> void:
+		_spawn_bomb_impact_fx(ground, col)
+		bomb.queue_free()
+	)
+
+
+func _spawn_bomb_impact_fx(pos: Vector3, col: Color) -> void:
+	if _effects == null:
+		return
+	var flash := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.55
+	mesh.height = 1.1
+	flash.mesh = mesh
+	flash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = col
+	mat.emission_enabled = true
+	mat.emission = col
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	flash.material_override = mat
+	flash.position = pos
+	_effects.add_child(flash)
+	var tween := create_tween()
+	tween.tween_property(flash, "scale", Vector3(2.2, 2.2, 2.2), 0.35)
+	tween.parallel().tween_property(mat, "albedo_color:a", 0.0, 0.35)
+	tween.tween_callback(flash.queue_free)
+
+
+func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool = false) -> void:
 	if _roads == null or battle_data == null:
 		return
 	var incremental: bool = not changed_sids.is_empty()
@@ -1198,17 +1346,23 @@ func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 		for sid_v in changed_sids:
 			changed_set[int(sid_v)] = true
 	var live_ids: Dictionary = {}
-	var road_dirty: bool = false
+	var need_full_rebuild: bool = false
 	for st: Dictionary in structures:
 		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
+			continue
+		# Logistics network MultiMesh owns progressive roads for spawners/barracks/hangars.
+		# Drawing structure path_built too doubles cost every cell during CONNECTING.
+		var kind: String = str(st.get("kind", ""))
+		if network_roads and kind != WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
 			continue
 		var sid: int = int(st.get("id", -1))
 		if sid < 0:
 			continue
 		live_ids[sid] = true
 		if not incremental or changed_set.has(sid):
+			# Growth is O(delta) append; shrink/material reclass returns need_rebuild.
 			if _sync_outpost_road(st, sid, false):
-				road_dirty = true
+				need_full_rebuild = true
 	for corridor: Dictionary in battle_data.bridge_corridors:
 		var sid: int = int(corridor.get("id", -1))
 		if sid < 0:
@@ -1218,13 +1372,13 @@ func sync_roads(structures: Array, changed_sids: Array = []) -> void:
 			var pseudo: Dictionary = corridor.duplicate()
 			pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
 			if _sync_outpost_road(pseudo, sid, false):
-				road_dirty = true
+				need_full_rebuild = true
 	for sid in _road_cached_seg_total.keys():
 		if not live_ids.has(sid):
 			if _clear_road(sid, false):
-				road_dirty = true
-	if road_dirty:
-		_flush_road_multimesh()
+				need_full_rebuild = true
+	if need_full_rebuild:
+		_rebuild_road_multimesh_from_caches()
 
 
 func _setup_road_multimeshes() -> void:
@@ -1239,7 +1393,9 @@ func _setup_road_multimeshes() -> void:
 	var land_mm := MultiMesh.new()
 	land_mm.transform_format = MultiMesh.TRANSFORM_3D
 	land_mm.mesh = _shared_road_box
-	land_mm.instance_count = 0
+	# Preallocate capacity — raising instance_count clears buffers in Godot 4.
+	land_mm.instance_count = _ROAD_MM_MIN_CAPACITY
+	land_mm.visible_instance_count = 0
 	_road_land_mm.multimesh = land_mm
 	_road_land_mm.material_override = _road_material
 	_road_land_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -1250,37 +1406,241 @@ func _setup_road_multimeshes() -> void:
 	var bridge_mm := MultiMesh.new()
 	bridge_mm.transform_format = MultiMesh.TRANSFORM_3D
 	bridge_mm.mesh = _shared_road_box
-	bridge_mm.instance_count = 0
+	bridge_mm.instance_count = _ROAD_MM_MIN_CAPACITY
+	bridge_mm.visible_instance_count = 0
 	_road_bridge_mm.multimesh = bridge_mm
 	_road_bridge_mm.material_override = _bridge_material
 	_road_bridge_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_road_bridge_mm.sorting_offset = 2.0
 	_roads.add_child(_road_bridge_mm)
+	_road_mm_land_used = 0
+	_road_mm_bridge_used = 0
 
 
-func _flush_road_multimesh() -> void:
-	if _road_land_mm == null or _road_bridge_mm == null:
-		return
+func _collect_road_multimesh_xforms() -> Array:
 	var land_xforms: Array[Transform3D] = []
+	for xform_var in _network_road_land:
+		land_xforms.append(xform_var)
 	for sid in _road_cache_land.keys():
 		for xform_var in _road_cache_land[sid]:
 			land_xforms.append(xform_var)
 	var bridge_xforms: Array[Transform3D] = []
+	for xform_var in _network_road_bridge:
+		bridge_xforms.append(xform_var)
 	for sid in _road_cache_bridge.keys():
 		for xform_var in _road_cache_bridge[sid]:
 			bridge_xforms.append(xform_var)
-	_apply_multimesh_transforms(_road_land_mm, land_xforms)
-	_apply_multimesh_transforms(_road_bridge_mm, bridge_xforms)
+	return [land_xforms, bridge_xforms]
 
 
-func _apply_multimesh_transforms(mm_node: MultiMeshInstance3D, xforms: Array[Transform3D]) -> void:
+## Full rewrite from authoritative caches (remove/reset, or capacity growth).
+func _rebuild_road_multimesh_from_caches() -> void:
+	if _road_land_mm == null or _road_bridge_mm == null:
+		return
+	var pair: Array = _collect_road_multimesh_xforms()
+	_write_multimesh_transforms(_road_land_mm, pair[0], true)
+	_write_multimesh_transforms(_road_bridge_mm, pair[1], false)
+
+
+func _reset_road_multimesh_instances() -> void:
+	_road_mm_land_used = 0
+	_road_mm_bridge_used = 0
+	if _road_land_mm != null and _road_land_mm.multimesh != null:
+		_road_land_mm.multimesh.visible_instance_count = 0
+	if _road_bridge_mm != null and _road_bridge_mm.multimesh != null:
+		_road_bridge_mm.multimesh.visible_instance_count = 0
+
+
+## Append new segments. Does NOT raise instance_count (that would wipe prior instances).
+## If capacity is exceeded, rebuilds from caches with a larger buffer.
+func _append_road_multimesh_transforms(
+	land_new: Array[Transform3D], bridge_new: Array[Transform3D]
+) -> void:
+	if land_new.is_empty() and bridge_new.is_empty():
+		return
+	if not _try_append_multimesh(_road_land_mm, land_new, true):
+		_rebuild_road_multimesh_from_caches()
+		return
+	if not _try_append_multimesh(_road_bridge_mm, bridge_new, false):
+		_rebuild_road_multimesh_from_caches()
+
+
+func clear_network_roads() -> void:
+	_network_built_cells.clear()
+	_network_road_land.clear()
+	_network_road_bridge.clear()
+	_rebuild_road_multimesh_from_caches()
+
+
+func apply_network_road_cells(cells: PackedInt32Array) -> void:
+	if battle_data == null or cells.is_empty():
+		return
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var land_new: Array[Transform3D] = []
+	var bridge_new: Array[Transform3D] = []
+	const DIRS: Array[Vector2i] = [
+		Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+	]
+	for i in range(cells.size()):
+		var key: int = cells[i]
+		if key < 0 or _network_built_cells.has(key):
+			continue
+		_network_built_cells[key] = true
+		var gx: int = key % w
+		var gy: int = key / w
+		var b: Vector2i = Vector2i(gx, gy)
+		for d: Vector2i in DIRS:
+			var nx: int = gx + d.x
+			var ny: int = gy + d.y
+			if ny < 0 or ny >= h:
+				continue
+			if nx < 0:
+				nx = w - 1
+			elif nx >= w:
+				nx = 0
+			var nk: int = ny * w + nx
+			if not _network_built_cells.has(nk):
+				continue
+			var a: Vector2i = Vector2i(nx, ny)
+			var xform: Transform3D = _road_segment_transform(a, b)
+			if _segment_is_bridge(a, b):
+				_network_road_bridge.append(xform)
+				bridge_new.append(xform)
+			else:
+				_network_road_land.append(xform)
+				land_new.append(xform)
+			break
+	if not land_new.is_empty() or not bridge_new.is_empty():
+		_append_road_multimesh_transforms(land_new, bridge_new)
+
+
+func _write_multimesh_transforms(mm_node: MultiMeshInstance3D, xforms: Array, is_land: bool) -> void:
 	if mm_node == null or mm_node.multimesh == null:
 		return
 	var mm: MultiMesh = mm_node.multimesh
 	var n: int = xforms.size()
-	mm.instance_count = n
+	var cap: int = maxi(n, _ROAD_MM_MIN_CAPACITY)
+	# Only touch instance_count when capacity must change (clears buffer in Godot 4).
+	if mm.instance_count < cap:
+		mm.instance_count = maxi(cap * 2, _ROAD_MM_MIN_CAPACITY) if n > 0 else _ROAD_MM_MIN_CAPACITY
 	for i in range(n):
-		mm.set_instance_transform(i, xforms[i])
+		mm.set_instance_transform(i, xforms[i] as Transform3D)
+	mm.visible_instance_count = n
+	if is_land:
+		_road_mm_land_used = n
+	else:
+		_road_mm_bridge_used = n
+
+
+## Returns false if capacity is insufficient (caller must rebuild from caches).
+func _try_append_multimesh(mm_node: MultiMeshInstance3D, xforms: Array, is_land: bool) -> bool:
+	if mm_node == null or mm_node.multimesh == null:
+		return true
+	if xforms.is_empty():
+		return true
+	var mm: MultiMesh = mm_node.multimesh
+	var used: int = _road_mm_land_used if is_land else _road_mm_bridge_used
+	var need: int = used + xforms.size()
+	if need > mm.instance_count:
+		return false
+	for i in range(xforms.size()):
+		mm.set_instance_transform(used + i, xforms[i] as Transform3D)
+	if is_land:
+		_road_mm_land_used = need
+	else:
+		_road_mm_bridge_used = need
+	mm.visible_instance_count = need
+	return true
+
+
+func road_multimesh_used_counts() -> Dictionary:
+	return {
+		"land_used": _road_mm_land_used,
+		"bridge_used": _road_mm_bridge_used,
+		"land_visible": (
+			_road_land_mm.multimesh.visible_instance_count
+			if _road_land_mm != null and _road_land_mm.multimesh != null
+			else 0
+		),
+		"bridge_visible": (
+			_road_bridge_mm.multimesh.visible_instance_count
+			if _road_bridge_mm != null and _road_bridge_mm.multimesh != null
+			else 0
+		),
+		"land_capacity": (
+			_road_land_mm.multimesh.instance_count
+			if _road_land_mm != null and _road_land_mm.multimesh != null
+			else 0
+		),
+		"network_land": _network_road_land.size(),
+		"network_bridge": _network_road_bridge.size(),
+	}
+
+
+## Unit exercise of the shipped MultiMesh append path.
+## Appends `batches` × `per_batch` synthetic land segments; asserts cumulative visible count.
+func selfcheck_road_multimesh_append(batches: int = 5, per_batch: int = 4) -> Dictionary:
+	if _shared_road_box == null:
+		_shared_road_box = BoxMesh.new()
+		_shared_road_box.size = Vector3.ONE
+	if _roads == null or not is_instance_valid(_roads):
+		_roads = Node3D.new()
+		_roads.name = "RoadsSelfcheck"
+		add_child(_roads)
+	if _road_material == null:
+		_road_material = StandardMaterial3D.new()
+		_road_material.albedo_color = ROAD_COLOR
+		_road_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	if _bridge_material == null:
+		_bridge_material = StandardMaterial3D.new()
+		_bridge_material.albedo_color = BRIDGE_COLOR
+		_bridge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	if _road_land_mm == null or _road_land_mm.multimesh == null:
+		_setup_road_multimeshes()
+	if _road_land_mm == null or _road_land_mm.multimesh == null:
+		return {"ok": false, "error": "road multimesh not available"}
+	_network_road_land.clear()
+	_network_road_bridge.clear()
+	_road_cache_land.clear()
+	_road_cache_bridge.clear()
+	_road_cached_seg_total.clear()
+	_road_mm_land_used = 0
+	_road_mm_bridge_used = 0
+	# Re-seed capacity without wiping via a zero instance_count (which would clear buffers).
+	if _road_land_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
+		_road_land_mm.multimesh.instance_count = _ROAD_MM_MIN_CAPACITY
+	_road_land_mm.multimesh.visible_instance_count = 0
+	if _road_bridge_mm != null and _road_bridge_mm.multimesh != null:
+		if _road_bridge_mm.multimesh.instance_count < _ROAD_MM_MIN_CAPACITY:
+			_road_bridge_mm.multimesh.instance_count = _ROAD_MM_MIN_CAPACITY
+		_road_bridge_mm.multimesh.visible_instance_count = 0
+	var expected: int = 0
+	for _b in range(maxi(batches, 1)):
+		var land_new: Array[Transform3D] = []
+		for _i in range(maxi(per_batch, 1)):
+			var t := Transform3D(Basis.IDENTITY, Vector3(float(expected + _i), 0.0, 0.0))
+			land_new.append(t)
+			_network_road_land.append(t)
+		_append_road_multimesh_transforms(land_new, [] as Array[Transform3D])
+		expected += land_new.size()
+		var used_now: int = _road_mm_land_used
+		var vis_now: int = _road_land_mm.multimesh.visible_instance_count
+		if used_now != expected or vis_now != expected:
+			return {
+				"ok": false,
+				"error": "after batch cumulative mismatch",
+				"expected": expected,
+				"used": used_now,
+				"visible": vis_now,
+			}
+	var counts: Dictionary = road_multimesh_used_counts()
+	counts["ok"] = (
+		int(counts.get("land_used", 0)) == expected
+		and int(counts.get("land_visible", 0)) == expected
+	)
+	counts["expected"] = expected
+	return counts
 
 
 func _packed_path_keys(st: Dictionary, sid: int) -> PackedInt32Array:
@@ -1295,6 +1655,8 @@ func _packed_path_keys(st: Dictionary, sid: int) -> PackedInt32Array:
 	return packed
 
 
+## Returns true only when a full MultiMesh rebuild is required (shrink/remove).
+## Path growth is append-only and returns false after applying O(delta) updates.
 func _sync_outpost_road(st: Dictionary, sid: int, flush_now: bool = true) -> bool:
 	var packed: PackedInt32Array = _packed_path_keys(st, sid)
 	if packed.is_empty():
@@ -1308,9 +1670,51 @@ func _sync_outpost_road(st: Dictionary, sid: int, flush_now: bool = true) -> boo
 		built_cells = packed.size()
 	built_cells = clampi(built_cells, 1, packed.size())
 	var need_segs: int = maxi(built_cells - 1, 0)
-	if int(_road_cached_seg_total.get(sid, -1)) == need_segs:
+	var had_cache: bool = _road_cached_seg_total.has(sid)
+	var prev_segs: int = int(_road_cached_seg_total.get(sid, 0))
+	if had_cache and prev_segs == need_segs:
 		return false
+
+	# Shrink or first-time reclass after material change: rewrite sid cache + full rebuild.
+	if had_cache and need_segs < prev_segs:
+		_road_cached_seg_total[sid] = need_segs
+		_replace_outpost_road_cache(sid, packed, need_segs, w)
+		if flush_now:
+			_rebuild_road_multimesh_from_caches()
+		return true
+
+	# Growth or first paint: append only the new segments (O(delta)).
+	var from_seg: int = prev_segs if had_cache else 0
+	var land_new: Array[Transform3D] = []
+	var bridge_new: Array[Transform3D] = []
+	for i in range(from_seg, need_segs):
+		var a: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(packed[i], w)
+		var b: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(packed[i + 1], w)
+		var xform: Transform3D = _road_segment_transform(a, b)
+		if _segment_is_bridge(a, b):
+			bridge_new.append(xform)
+		else:
+			land_new.append(xform)
 	_road_cached_seg_total[sid] = need_segs
+	if not land_new.is_empty():
+		if not _road_cache_land.has(sid):
+			_road_cache_land[sid] = [] as Array[Transform3D]
+		var land_cache: Array = _road_cache_land[sid]
+		for xform_var in land_new:
+			land_cache.append(xform_var)
+		_road_cache_land[sid] = land_cache
+	if not bridge_new.is_empty():
+		if not _road_cache_bridge.has(sid):
+			_road_cache_bridge[sid] = [] as Array[Transform3D]
+		var bridge_cache: Array = _road_cache_bridge[sid]
+		for xform_var2 in bridge_new:
+			bridge_cache.append(xform_var2)
+		_road_cache_bridge[sid] = bridge_cache
+	_append_road_multimesh_transforms(land_new, bridge_new)
+	return false
+
+
+func _replace_outpost_road_cache(sid: int, packed: PackedInt32Array, need_segs: int, w: int) -> void:
 	var land_xforms: Array[Transform3D] = []
 	var bridge_xforms: Array[Transform3D] = []
 	for i in range(need_segs):
@@ -1329,9 +1733,6 @@ func _sync_outpost_road(st: Dictionary, sid: int, flush_now: bool = true) -> boo
 		_road_cache_bridge.erase(sid)
 	else:
 		_road_cache_bridge[sid] = bridge_xforms
-	if flush_now:
-		_flush_road_multimesh()
-	return true
 
 
 func clear_road(sid: int) -> void:
@@ -1375,7 +1776,7 @@ func _clear_road(sid: int, flush_now: bool = true) -> bool:
 	_road_cached_seg_total.erase(sid)
 	_path_cache.erase(sid)
 	if had and flush_now:
-		_flush_road_multimesh()
+		_rebuild_road_multimesh_from_caches()
 	return had
 
 
