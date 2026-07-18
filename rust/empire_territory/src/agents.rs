@@ -1,9 +1,11 @@
 //! World Conquest soldiers — path via nav rules toward frontier stance tiles.
 
-use crate::pathfind::battle_nav::AgentNavMasks;
-use crate::pathfind::kernel::SearchKernel;
+use std::collections::HashMap;
+
+use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
+use crate::pathfind::kernel::{RoutePath, SearchKernel};
 use crate::pathfind::nav_rules::{
-    is_stance_goal_at, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
+    is_stance_goal_at, rule_by_id, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
 };
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
@@ -14,6 +16,8 @@ const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 const HOSTILE_TERRITORY_DPS: f32 = 3.0;
 const CLAIM_DOMINANCE_RATIO: f32 = 1.15;
 const AURA_STACK_CAP: u32 = 5;
+
+type CellKey = (i32, i32);
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -78,7 +82,9 @@ pub struct AgentLayer {
     pub config: AgentConfig,
     pub friendly_deficit_dps: f32,
     pub hostile_deficit_dps: f32,
-    living_by_barracks: std::collections::HashMap<i32, u32>,
+    living_by_barracks: HashMap<i32, u32>,
+    /// Live ground occupancy: cell → soldier id (one living soldier per cell).
+    occupant_at: HashMap<CellKey, u32>,
     next_id: u32,
     pub friendly_corridor: Vec<u8>,
     pub hostile_corridor: Vec<u8>,
@@ -96,7 +102,8 @@ impl AgentLayer {
             config,
             friendly_deficit_dps: 0.0,
             hostile_deficit_dps: 0.0,
-            living_by_barracks: std::collections::HashMap::new(),
+            living_by_barracks: HashMap::new(),
+            occupant_at: HashMap::new(),
             next_id: 1,
             friendly_corridor: Vec::new(),
             hostile_corridor: Vec::new(),
@@ -183,6 +190,7 @@ impl AgentLayer {
             goal_nav_stamp: 0,
             goal_nav_masks_epoch: 0,
         });
+        self.set_occupant(gx, gy, id);
         let last = self.agents.len() - 1;
         self.replan_route(kernel, last);
         self.finish_replan(kernel, last);
@@ -223,23 +231,34 @@ impl AgentLayer {
             }
             self.agents[i].move_accum += move_rate * dt;
             while self.agents[i].move_accum >= 1.0 {
-                self.agents[i].move_accum -= 1.0;
                 let sx = self.agents[i].step_gx;
                 let sy = self.agents[i].step_gy;
+                let id = self.agents[i].id;
                 if sx >= 0 && (sx != self.agents[i].gx || sy != self.agents[i].gy) {
+                    // Path blocked by peer: wait one sim move step (no pathfind thrash).
+                    if self.ground_occupied_by_other(sx, sy, id) {
+                        self.agents[i].move_accum = self.agents[i].move_accum.min(1.0);
+                        break;
+                    }
                     if !self.is_passable(kernel, team, sx, sy) {
+                        self.agents[i].move_accum -= 1.0;
                         self.agents[i].step_gx = -1;
                         self.agents[i].step_gy = -1;
                         self.agents[i].retarget_cd = 0;
                         break;
                     }
+                    self.agents[i].move_accum -= 1.0;
+                    let old_gx = self.agents[i].gx;
+                    let old_gy = self.agents[i].gy;
                     self.agents[i].gx = sx;
                     self.agents[i].gy = sy;
+                    self.move_occupant(old_gx, old_gy, sx, sy, id);
                     self.advance_deploy_path_after_move(kernel, i);
                     self.sync_step_from_deploy_path(kernel, i);
                 } else if self.holding_at_goal(kernel, team, &self.agents[i]) {
                     break;
                 } else {
+                    self.agents[i].move_accum -= 1.0;
                     self.agents[i].retarget_cd = 0;
                     break;
                 }
@@ -302,12 +321,19 @@ impl AgentLayer {
 
         for i in 0..n {
             let team = self.agents[i].team;
+            let id = self.agents[i].id;
             let holding = self.holding_at_goal(kernel, team, &self.agents[i]);
             let stuck = self.agents[i].step_gx < 0 && !holding;
             let nav_stale = self.nav_stale_for_agent(kernel, &self.agents[i]);
             let fallback_due = self.agents[i].retarget_cd <= 0;
+            // Goal taken by another soldier → reassess to next free conquest goal.
+            let goal_taken = self.ground_occupied_by_other(
+                self.agents[i].goal_gx,
+                self.agents[i].goal_gy,
+                id,
+            );
 
-            if stuck {
+            if stuck || goal_taken {
                 urgent.push(i);
                 continue;
             }
@@ -315,8 +341,6 @@ impl AgentLayer {
             if holding {
                 if nav_stale {
                     normal.push(i);
-                } else if fallback_due {
-                    self.agents[i].retarget_cd -= 1;
                 } else {
                     self.agents[i].retarget_cd -= 1;
                 }
@@ -452,6 +476,7 @@ impl AgentLayer {
         let gx = self.agents[agent_i].gx;
         let gy = self.agents[agent_i].gy;
         let team = self.agents[agent_i].team;
+        let except_id = self.agents[agent_i].id;
         let start_idx = kernel.cell_index(gx, gy);
         if start_idx < 0 {
             self.agents[agent_i].step_gx = -1;
@@ -497,23 +522,42 @@ impl AgentLayer {
         }
 
         self.nav_search.ensure_capacity(kernel.tile_count);
-        let masks = AgentNavMasks {
-            friendly_corridor: &self.friendly_corridor,
-            hostile_corridor: &self.hostile_corridor,
-            friendly_bridge: &self.friendly_bridge,
-            hostile_bridge: &self.hostile_bridge,
-        };
-        let outcome = run_nav_rule(
+
+        // Prefer next free conquest goal; if none free, allow contested goals.
+        let mut outcome = Self::find_advance_path(
             &mut self.nav_search,
             kernel,
-            &masks,
+            &self.friendly_corridor,
+            &self.hostile_corridor,
+            &self.friendly_bridge,
+            &self.hostile_bridge,
+            &self.occupant_at,
             gx,
             gy,
+            start_idx,
             team,
-            NAV_RULE_INFANTRY_ADVANCE,
+            except_id,
+            true,
         );
+        if outcome.is_none() {
+            outcome = Self::find_advance_path(
+                &mut self.nav_search,
+                kernel,
+                &self.friendly_corridor,
+                &self.hostile_corridor,
+                &self.friendly_bridge,
+                &self.hostile_bridge,
+                &self.occupant_at,
+                gx,
+                gy,
+                start_idx,
+                team,
+                except_id,
+                false,
+            );
+        }
 
-        if let Some(route) = outcome.path {
+        if let Some(route) = outcome {
             if route.path.len() >= 2 {
                 let w = kernel.grid_w;
                 let goal_idx = *route.path.last().unwrap();
@@ -543,6 +587,58 @@ impl AgentLayer {
         self.agents[agent_i].step_gy = -1;
         self.agents[agent_i].deploy_path.clear();
         self.agents[agent_i].deploy_path_pos = 0;
+    }
+
+    fn find_advance_path(
+        nav_search: &mut SearchKernel,
+        kernel: &TerritoryKernel,
+        friendly_corridor: &[u8],
+        hostile_corridor: &[u8],
+        friendly_bridge: &[u8],
+        hostile_bridge: &[u8],
+        occupant_at: &HashMap<CellKey, u32>,
+        gx: i32,
+        gy: i32,
+        start_idx: i32,
+        team: u8,
+        except_id: u32,
+        free_goals_only: bool,
+    ) -> Option<RoutePath> {
+        let masks = AgentNavMasks {
+            friendly_corridor,
+            hostile_corridor,
+            friendly_bridge,
+            hostile_bridge,
+        };
+        if !free_goals_only {
+            return run_nav_rule(
+                nav_search,
+                kernel,
+                &masks,
+                gx,
+                gy,
+                team,
+                NAV_RULE_INFANTRY_ADVANCE,
+            )
+            .path;
+        }
+        let rule = rule_by_id(NAV_RULE_INFANTRY_ADVANCE)?;
+        let view = BattleNavView::new(kernel, &masks, team);
+        let w = kernel.grid_w.max(1);
+        let is_free_stance = |idx: usize| {
+            if !view.is_stance_goal(idx) {
+                return false;
+            }
+            let cx = (idx as i32) % w;
+            let cy = (idx as i32) / w;
+            match occupant_at.get(&(cx, cy)) {
+                None => true,
+                Some(&oid) => oid == except_id,
+            }
+        };
+        nav_search
+            .find_nearest_goal(&view, &[start_idx], rule.search, is_free_stance)
+            .map(|(path, _)| path)
     }
 
     fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, agent: &Agent) -> bool {
@@ -659,6 +755,15 @@ impl AgentLayer {
     }
 
     fn remove_dead(&mut self, dead: &[u32]) {
+        let clear: Vec<(i32, i32, u32)> = self
+            .agents
+            .iter()
+            .filter(|a| dead.contains(&a.id))
+            .map(|a| (a.gx, a.gy, a.id))
+            .collect();
+        for (gx, gy, id) in clear {
+            self.clear_occupant(gx, gy, id);
+        }
         self.agents.retain(|a| {
             if dead.contains(&a.id) {
                 if !a.orphan {
@@ -673,6 +778,29 @@ impl AgentLayer {
         });
     }
 
+    fn set_occupant(&mut self, gx: i32, gy: i32, id: u32) {
+        self.occupant_at.insert((gx, gy), id);
+    }
+
+    fn clear_occupant(&mut self, gx: i32, gy: i32, id: u32) {
+        if self.occupant_at.get(&(gx, gy)).copied() == Some(id) {
+            self.occupant_at.remove(&(gx, gy));
+        }
+    }
+
+    fn move_occupant(&mut self, from_gx: i32, from_gy: i32, to_gx: i32, to_gy: i32, id: u32) {
+        self.clear_occupant(from_gx, from_gy, id);
+        self.set_occupant(to_gx, to_gy, id);
+    }
+
+    /// True if another living soldier already occupies this ground cell (O(1) map).
+    fn ground_occupied_by_other(&self, gx: i32, gy: i32, except_id: u32) -> bool {
+        match self.occupant_at.get(&(gx, gy)) {
+            Some(&id) => id != except_id,
+            None => false,
+        }
+    }
+
     fn find_spawn_cell(
         &self,
         kernel: &TerritoryKernel,
@@ -680,10 +808,14 @@ impl AgentLayer {
         bx: i32,
         by: i32,
     ) -> Option<(i32, i32)> {
+        // Prefer network-owned neighbors, then any team-owned neighbor; never stack soldiers.
         for (dx, dy) in CARDINAL {
             let gx = bx + dx;
             let gy = by + dy;
             if !self.is_passable(kernel, team, gx, gy) {
+                continue;
+            }
+            if self.ground_occupied_by_other(gx, gy, u32::MAX) {
                 continue;
             }
             let idx = kernel.cell_index(gx, gy);
@@ -700,6 +832,9 @@ impl AgentLayer {
             let gx = bx + dx;
             let gy = by + dy;
             if !self.is_passable(kernel, team, gx, gy) {
+                continue;
+            }
+            if self.ground_occupied_by_other(gx, gy, u32::MAX) {
                 continue;
             }
             let idx = kernel.cell_index(gx, gy);

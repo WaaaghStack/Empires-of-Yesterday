@@ -7,9 +7,13 @@ const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
 const EarthGlobeRoadsLib := preload("res://EarthGlobeRoads.gd")
+const PlanetVisualBakeLib := preload("res://PlanetVisualBake.gd")
+const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
 const WorldConquestOutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const WorldConquestResourcesLib := preload("res://WorldConquestResources.gd")
 const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
+const _TERRAIN_SHADER: Shader = preload("res://shaders/globe/terrain_display.gdshader")
+const _ATMOSPHERE_SHADER: Shader = preload("res://shaders/globe/atmosphere_rim.gdshader")
 
 const ROAD_COLOR := Color(0.52, 0.52, 0.54)
 const BRIDGE_COLOR := Color(0.62, 0.64, 0.68)
@@ -36,6 +40,10 @@ var battle_data = null
 var _world_map_id: String = WorldMapCatalogLib.DEFAULT_MAP_ID
 var _globe_mi: MeshInstance3D
 var _fluid_mi: MeshInstance3D
+var _atmosphere_mi: MeshInstance3D
+var _terrain_shader_mat: ShaderMaterial
+var _albedo_tex: ImageTexture
+var _height_tex: ImageTexture
 var _markers: Node3D
 var _soldiers: Node3D
 var _bombers: Node3D
@@ -149,12 +157,9 @@ func _build_scene() -> void:
 	_globe_mi.name = "Globe"
 	_globe_mi.mesh = _build_globe_mesh_for_detail(false)
 	_globe_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var tmat := StandardMaterial3D.new()
-	tmat.vertex_color_use_as_albedo = true
-	tmat.roughness = 0.9
-	tmat.cull_mode = BaseMaterial3D.CULL_BACK
-	_globe_mi.material_override = tmat
+	_apply_terrain_material()
 	add_child(_globe_mi)
+	_add_atmosphere_shell()
 	_fluid_mi = MeshInstance3D.new()
 	_fluid_mi.name = "Fluid"
 	_fluid_mi.mesh = _build_globe_mesh_for_detail(true)
@@ -167,10 +172,9 @@ func _build_scene() -> void:
 	_fluid_mat = StandardMaterial3D.new()
 	_fluid_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_fluid_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	# Back-face culling halves fluid fragment work and stops far-side fluid
-	# bleeding through the globe (no_depth_test draws over the terrain shell).
+	# Depth-tested land overlay; cull back so far-side faces do not punch through ocean.
 	_fluid_mat.cull_mode = BaseMaterial3D.CULL_BACK
-	_fluid_mat.no_depth_test = true
+	_fluid_mat.no_depth_test = false
 	_fluid_mat.render_priority = 1
 	_fluid_mat.albedo_texture = _fluid_tex
 	_fluid_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -195,14 +199,14 @@ func _build_scene() -> void:
 	_road_material.roughness = 0.95
 	_road_material.metallic = 0.0
 	_road_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_road_material.no_depth_test = true
+	_road_material.no_depth_test = false
 	_road_material.render_priority = ROAD_RENDER_PRIORITY
 	_bridge_material = StandardMaterial3D.new()
 	_bridge_material.albedo_color = BRIDGE_COLOR
 	_bridge_material.roughness = 0.85
 	_bridge_material.metallic = 0.05
 	_bridge_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_bridge_material.no_depth_test = true
+	_bridge_material.no_depth_test = false
 	_bridge_material.render_priority = ROAD_RENDER_PRIORITY
 	_markers = Node3D.new()
 	_markers.name = "Markers"
@@ -277,7 +281,7 @@ func _build_scene() -> void:
 	_resource_link_material.emission = Color(0.55, 0.5, 0.2)
 	_resource_link_material.emission_energy_multiplier = 0.6
 	_resource_link_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_resource_link_material.no_depth_test = true
+	_resource_link_material.no_depth_test = false
 	_resource_link_material.render_priority = RESOURCE_RENDER_PRIORITY
 	_resource_link_materials.clear()
 	_resource_link_materials_linking.clear()
@@ -289,7 +293,7 @@ func _build_scene() -> void:
 		lmat.emission = col * 0.35
 		lmat.emission_energy_multiplier = 0.6
 		lmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		lmat.no_depth_test = true
+		lmat.no_depth_test = false
 		lmat.render_priority = RESOURCE_RENDER_PRIORITY
 		_resource_link_materials.append(lmat)
 		var lmat_dim := StandardMaterial3D.new()
@@ -299,7 +303,7 @@ func _build_scene() -> void:
 		lmat_dim.emission_energy_multiplier = 0.45
 		lmat_dim.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		lmat_dim.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		lmat_dim.no_depth_test = true
+		lmat_dim.no_depth_test = false
 		lmat_dim.render_priority = RESOURCE_RENDER_PRIORITY
 		_resource_link_materials_linking.append(lmat_dim)
 	_road_cache_land.clear()
@@ -381,6 +385,76 @@ func _build_globe_mesh_for_detail(fluid: bool) -> ArrayMesh:
 	return EarthGlobeMeshLib._build_globe_mesh(
 		battle_data, fluid, dims.x, dims.y, _world_map_id
 	)
+
+
+func _apply_terrain_material() -> void:
+	if _globe_mi == null or battle_data == null:
+		return
+	var albedo_img: Image = PlanetVisualBakeLib.build_albedo_image(battle_data, _world_map_id)
+	var height_img: Image = PlanetVisualBakeLib.build_height_image(battle_data)
+	if albedo_img == null or height_img == null:
+		var fallback := StandardMaterial3D.new()
+		fallback.vertex_color_use_as_albedo = true
+		fallback.roughness = 0.9
+		fallback.cull_mode = BaseMaterial3D.CULL_BACK
+		_globe_mi.material_override = fallback
+		return
+	_albedo_tex = ImageTexture.create_from_image(albedo_img)
+	_height_tex = ImageTexture.create_from_image(height_img)
+	_terrain_shader_mat = ShaderMaterial.new()
+	_terrain_shader_mat.shader = _TERRAIN_SHADER
+	_terrain_shader_mat.set_shader_parameter("albedo_map", _albedo_tex)
+	_terrain_shader_mat.set_shader_parameter("height_map", _height_tex)
+	_terrain_shader_mat.set_shader_parameter(
+		"height_scale", WorldConquestConfigLib.HEIGHT_SCALE
+	)
+	_terrain_shader_mat.set_shader_parameter("ambient_boost", 0.22)
+	_globe_mi.material_override = _terrain_shader_mat
+
+
+func _add_atmosphere_shell() -> void:
+	_atmosphere_mi = MeshInstance3D.new()
+	_atmosphere_mi.name = "Atmosphere"
+	var sm := SphereMesh.new()
+	var r: float = (
+		WorldConquestConfigLib.GLOBE_RADIUS * WorldConquestConfigLib.ATMOSPHERE_RADIUS_SCALE
+	)
+	sm.radius = r
+	sm.height = r * 2.0
+	sm.radial_segments = 64
+	sm.rings = 32
+	_atmosphere_mi.mesh = sm
+	_atmosphere_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var amat := ShaderMaterial.new()
+	amat.shader = _ATMOSPHERE_SHADER
+	var atmo_col: Color = WorldConquestMapGeneratorLib.globe_colors_for_map(_world_map_id).get(
+		"ocean", Color(0.05, 0.18, 0.42)
+	)
+	amat.set_shader_parameter(
+		"atmosphere_color",
+		Vector3(
+			clampf(atmo_col.r * 1.6 + 0.15, 0.0, 1.0),
+			clampf(atmo_col.g * 1.4 + 0.25, 0.0, 1.0),
+			clampf(atmo_col.b * 1.2 + 0.35, 0.0, 1.0),
+		),
+	)
+	amat.set_shader_parameter("intensity", 0.4)
+	amat.set_shader_parameter("power", 2.4)
+	_atmosphere_mi.material_override = amat
+	add_child(_atmosphere_mi)
+
+
+## True when surface point faces the camera (front hemisphere). Hides far-side ghosts.
+func _is_front_hemisphere(world_pos: Vector3) -> bool:
+	if camera == null:
+		return true
+	if world_pos.length_squared() < 0.0001:
+		return true
+	var outward: Vector3 = world_pos.normalized()
+	var to_cam: Vector3 = camera.global_position - world_pos
+	if to_cam.length_squared() < 0.0001:
+		return true
+	return outward.dot(to_cam.normalized()) > 0.02
 
 
 ## H4: Slow full-grid fluid bake — live WC prefers ownership R8/delta from Screen drain only.
@@ -1330,6 +1404,7 @@ func _place_pooled_soldier(grid: Vector2i, team: int) -> void:
 	sprite.texture = _unit_sprite_texture(false, team)
 	sprite.position = _grid_surface_pos(grid, SOLDIER_SURFACE_LIFT)
 	sprite.scale = Vector3.ONE
+	sprite.visible = _is_front_hemisphere(sprite.position)
 
 
 func sync_bombers(
@@ -1381,6 +1456,7 @@ func _place_pooled_bomber(grid: Vector2i, team: int, search_scope: int = 0) -> v
 	var scope_scale: float = _bomber_scope_visual_scale(search_scope)
 	sprite.scale = Vector3(scope_scale, scope_scale, scope_scale)
 	sprite.position = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
+	sprite.visible = _is_front_hemisphere(sprite.position)
 
 
 func play_bomb_drops(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:
@@ -1928,10 +2004,11 @@ func _add_deposit_marker(grid: Vector2i, color: Color, scale_f: float) -> void:
 	mat.emission = color * 0.45
 	mat.emission_energy_multiplier = 1.4
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.no_depth_test = true
+	mat.no_depth_test = false
 	mat.render_priority = RESOURCE_RENDER_PRIORITY
 	cyl.material_override = mat
 	cyl.position = pos
+	cyl.visible = _is_front_hemisphere(pos)
 	_deposits.add_child(cyl)
 
 
@@ -2031,13 +2108,13 @@ func _place_pooled_marker(
 		_marker_pool.append(node)
 	var box: MeshInstance3D = _marker_pool[_marker_pool_used]
 	_marker_pool_used += 1
-	box.visible = true
 	box.position = _grid_surface_pos(grid, 1.5)
 	box.scale = Vector3.ONE * (1.8 * scale_f)
+	box.visible = _is_front_hemisphere(box.position)
 	var mat := box.material_override as StandardMaterial3D
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.emission = Color(color.r, color.g, color.b) * 0.5
-	mat.no_depth_test = true
+	mat.no_depth_test = false
 	mat.render_priority = MARKER_RENDER_PRIORITY
 	mat.transparency = (
 		BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -2060,11 +2137,12 @@ func _add_capital_marker_to(
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.emission_enabled = true
 	mat.emission = Color(color.r, color.g, color.b) * 0.5
-	mat.no_depth_test = true
+	mat.no_depth_test = false
 	mat.render_priority = MARKER_RENDER_PRIORITY
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED
 	box.material_override = mat
 	box.position = pos
+	box.visible = _is_front_hemisphere(pos)
 	parent.add_child(box)
 
 
@@ -2235,3 +2313,26 @@ func _apply_camera() -> void:
 		camera.look_at(Vector3.ZERO, Vector3.UP)
 	else:
 		camera.look_at_from_position(offset, Vector3.ZERO, Vector3.UP)
+	_refresh_hemisphere_visibility()
+
+
+func _refresh_hemisphere_visibility() -> void:
+	for i in range(_marker_pool_used):
+		var node: MeshInstance3D = _marker_pool[i]
+		if node == null:
+			continue
+		node.visible = _is_front_hemisphere(node.position)
+	for i in range(_soldier_pool_used):
+		var s: Sprite3D = _soldier_pool[i]
+		if s == null:
+			continue
+		s.visible = _is_front_hemisphere(s.position)
+	for i in range(_bomber_pool_used):
+		var b: Sprite3D = _bomber_pool[i]
+		if b == null:
+			continue
+		b.visible = _is_front_hemisphere(b.position)
+	if _deposits != null:
+		for child in _deposits.get_children():
+			if child is Node3D:
+				(child as Node3D).visible = _is_front_hemisphere((child as Node3D).position)

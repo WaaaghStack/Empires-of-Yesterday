@@ -35,14 +35,14 @@ impl Default for WorldSessionConfig {
     fn default() -> Self {
         Self {
             outpost_build_sec: 5.0,
-            barracks_build_sec: 60.0,
+            barracks_build_sec: 5.0,
             outpost_max_health: 10.0,
             outpost_enemy_dps: 3.0,
             barracks_spawn_interval: 10.0,
             barracks_max_active: 5,
             global_soldier_cap: 100,
             soldier_spawn_cost: 3.0,
-            hangar_build_sec: 60.0,
+            hangar_build_sec: 5.0,
             hangar_spawn_interval: 10.0,
             hangar_max_active: 5,
             global_bomber_cap: 100,

@@ -269,17 +269,26 @@ func _setup_world_visuals(map_id: String) -> void:
 	if globe_map != null:
 		globe_map.setup(battle_data, map_id)
 		var light := DirectionalLight3D.new()
-		light.rotation_degrees = Vector3(-42.0, -30.0, 0.0)
-		light.light_energy = 1.2
+		light.name = "Sun"
+		light.rotation_degrees = Vector3(-38.0, -28.0, 0.0)
+		light.light_energy = 1.45
+		light.light_color = Color(1.0, 0.97, 0.92)
 		light.shadow_enabled = false
 		globe_map.add_child(light)
+		var fill := DirectionalLight3D.new()
+		fill.name = "Fill"
+		fill.rotation_degrees = Vector3(25.0, 140.0, 0.0)
+		fill.light_energy = 0.35
+		fill.light_color = Color(0.55, 0.65, 0.9)
+		fill.shadow_enabled = false
+		globe_map.add_child(fill)
 		var env_node := WorldEnvironment.new()
 		var e := Environment.new()
 		e.background_mode = Environment.BG_COLOR
-		e.background_color = Color(0.02, 0.03, 0.06)
+		e.background_color = Color(0.015, 0.02, 0.05)
 		e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		e.ambient_light_color = Color(0.3, 0.35, 0.45)
-		e.ambient_light_energy = 0.5
+		e.ambient_light_color = Color(0.28, 0.34, 0.48)
+		e.ambient_light_energy = 0.55
 		env_node.environment = e
 		globe_map.add_child(env_node)
 	_refresh_markers()

@@ -42,9 +42,11 @@ const SIM_ACTIVE_SOFT_CAP := 8000
 const WORLD_CONQUEST_MIN_LOAD_SEC := 2.5
 
 const GLOBE_RADIUS := 100.0
-## Subtle displacement so land reads as one continuous shell (not floating plates).
-const HEIGHT_SCALE := 7.0
-const FLUID_SURFACE_LIFT := 0.35
+## Radial displacement so mountains read as ridges (mesh + surface LUT).
+const HEIGHT_SCALE := 11.0
+const FLUID_SURFACE_LIFT := 0.45
+## Atmosphere shell scale vs GLOBE_RADIUS (cosmetic rim).
+const ATMOSPHERE_RADIUS_SCALE := 1.045
 ## Globe render mesh (coarser than sim grid for GPU budget).
 const GLOBE_MESH_W := 144
 const GLOBE_MESH_H := 72
@@ -112,14 +114,14 @@ const OUTPOST_MAX_HEALTH := 10.0
 const OUTPOST_ENEMY_DPS := 3.0
 ## Barracks — same Supply economy as outposts; longer build; spawns soldiers (Aurelium).
 const BARRACKS_COST_SUPPLY := 400
-const BARRACKS_BUILD_SEC := 60.0
+const BARRACKS_BUILD_SEC := 5.0
 const BARRACKS_SPAWN_INTERVAL_SEC := 10.0
 const BARRACKS_MAX_ACTIVE_UNITS := 5
 const GLOBAL_SOLDIER_CAP := 100
 const SOLDIER_SPAWN_AURELIUM_COST := 3.0
 ## Hangar — same economy as barracks; spawns bombers (Aurelium).
 const HANGAR_COST_SUPPLY := 400
-const HANGAR_BUILD_SEC := 60.0
+const HANGAR_BUILD_SEC := 5.0
 const HANGAR_SPAWN_INTERVAL_SEC := 10.0
 const HANGAR_MAX_ACTIVE_UNITS := 5
 const GLOBAL_BOMBER_CAP := 100

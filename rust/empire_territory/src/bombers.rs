@@ -1,9 +1,17 @@
 //! World Conquest bombers — flight-band units spawned from hangars.
 
-use crate::pathfind::battle_nav::AgentNavMasks;
-use crate::pathfind::kernel::SearchKernel;
-use crate::pathfind::nav_rules::{is_air_strike_target_at, run_bomber_strike_rule};
+use std::collections::HashMap;
+
+use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
+use crate::pathfind::kernel::{RoutePath, SearchKernel};
+use crate::pathfind::nav_rules::{
+    is_air_strike_target_at, rule_by_id, run_bomber_strike_rule, NAV_RULE_BOMBER_STRIKE,
+};
 use crate::sim::{TerritoryKernel, OWNER_FRIENDLY};
+
+const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+type CellKey = (i32, i32);
 
 #[derive(Clone, Debug)]
 pub struct BomberConfig {
@@ -88,7 +96,9 @@ pub struct Bomber {
 pub struct BomberLayer {
     pub bombers: Vec<Bomber>,
     pub config: BomberConfig,
-    living_by_hangar: std::collections::HashMap<i32, u32>,
+    living_by_hangar: HashMap<i32, u32>,
+    /// Live air occupancy: cell → bomber id (one living bomber per air cell).
+    occupant_at: HashMap<CellKey, u32>,
     next_id: u32,
     pub friendly_corridor: Vec<u8>,
     pub hostile_corridor: Vec<u8>,
@@ -105,7 +115,8 @@ impl BomberLayer {
         Self {
             bombers: Vec::new(),
             config,
-            living_by_hangar: std::collections::HashMap::new(),
+            living_by_hangar: HashMap::new(),
+            occupant_at: HashMap::new(),
             next_id: 1,
             friendly_corridor: Vec::new(),
             hostile_corridor: Vec::new(),
@@ -164,22 +175,23 @@ impl BomberLayer {
         if self.living_for_hangar(hangar_id) >= self.config.per_hangar_cap {
             return false;
         }
-        if kernel.cell_index(gx, gy) < 0 {
+        // One living bomber per air cell: spawn only on a free cell near hangar.
+        let Some((sx, sy)) = self.find_spawn_air_cell(kernel, gx, gy) else {
             return false;
-        }
+        };
         let id = self.next_id;
         self.next_id += 1;
         self.bombers.push(Bomber {
             id,
             team,
             hangar_id,
-            gx,
-            gy,
+            gx: sx,
+            gy: sy,
             hp: self.config.max_hp,
             orphan: false,
             version: 0,
-            goal_gx: gx,
-            goal_gy: gy,
+            goal_gx: sx,
+            goal_gy: sy,
             step_gx: -1,
             step_gy: -1,
             move_accum: 0.0,
@@ -192,6 +204,7 @@ impl BomberLayer {
             goal_nav_stamp: 0,
             goal_nav_masks_epoch: 0,
         });
+        self.set_occupant(sx, sy, id);
         let last = self.bombers.len() - 1;
         self.replan_route(kernel, last, false);
         self.finish_replan(kernel, last);
@@ -240,23 +253,34 @@ impl BomberLayer {
             }
             self.bombers[i].move_accum += move_rate * dt;
             while self.bombers[i].move_accum >= 1.0 {
-                self.bombers[i].move_accum -= 1.0;
                 let sx = self.bombers[i].step_gx;
                 let sy = self.bombers[i].step_gy;
+                let id = self.bombers[i].id;
                 if sx >= 0 && (sx != self.bombers[i].gx || sy != self.bombers[i].gy) {
+                    // Path blocked by peer: wait one sim move step (no pathfind thrash).
+                    if self.air_occupied_by_other(sx, sy, id) {
+                        self.bombers[i].move_accum = self.bombers[i].move_accum.min(1.0);
+                        break;
+                    }
                     if !self.is_in_bounds(kernel, sx, sy) {
+                        self.bombers[i].move_accum -= 1.0;
                         self.bombers[i].step_gx = -1;
                         self.bombers[i].step_gy = -1;
                         self.bombers[i].retarget_cd = 0;
                         break;
                     }
+                    self.bombers[i].move_accum -= 1.0;
+                    let old_gx = self.bombers[i].gx;
+                    let old_gy = self.bombers[i].gy;
                     self.bombers[i].gx = sx;
                     self.bombers[i].gy = sy;
+                    self.move_occupant(old_gx, old_gy, sx, sy, id);
                     self.advance_deploy_path_after_move(kernel, i);
                     self.sync_step_from_deploy_path(kernel, i);
                 } else if self.holding_at_goal(kernel, team, &self.bombers[i]) {
                     break;
                 } else {
+                    self.bombers[i].move_accum -= 1.0;
                     self.bombers[i].retarget_cd = 0;
                     break;
                 }
@@ -334,11 +358,18 @@ impl BomberLayer {
 
         for i in 0..n {
             let team = self.bombers[i].team;
+            let id = self.bombers[i].id;
             let holding = self.holding_at_goal(kernel, team, &self.bombers[i]);
             let stuck = self.bombers[i].step_gx < 0 && !holding;
             let nav_stale = self.nav_stale_for_bomber(kernel, &self.bombers[i]);
             let fallback_due = self.bombers[i].retarget_cd <= 0;
             let plan_reeval_due = self.bombers[i].plan_age_sec >= self.config.plan_reeval_sec;
+            // Goal taken by another bomber → reassess to next free strike goal.
+            let goal_taken = self.air_occupied_by_other(
+                self.bombers[i].goal_gx,
+                self.bombers[i].goal_gy,
+                id,
+            );
 
             if plan_reeval_due {
                 self.bombers[i].search_expand_limit = self.config.search_expand_initial;
@@ -347,8 +378,8 @@ impl BomberLayer {
                 continue;
             }
 
-            if stuck {
-                urgent.push((i, false));
+            if stuck || goal_taken {
+                urgent.push((i, goal_taken));
                 continue;
             }
 
@@ -483,6 +514,7 @@ impl BomberLayer {
         let gx = self.bombers[bomber_i].gx;
         let gy = self.bombers[bomber_i].gy;
         let team = self.bombers[bomber_i].team;
+        let except_id = self.bombers[bomber_i].id;
         let start_idx = kernel.cell_index(gx, gy);
         if start_idx < 0 {
             self.bombers[bomber_i].step_gx = -1;
@@ -509,27 +541,52 @@ impl BomberLayer {
         }
 
         self.nav_search.ensure_capacity(kernel.tile_count);
-        let exclude = if prefer_alternate_goal {
+        let max_expand = self.capped_search_expand(kernel, &self.bombers[bomber_i]);
+        let exclude_start = if prefer_alternate_goal {
             Some(start_idx)
         } else {
             None
         };
-        let max_expand = self.capped_search_expand(kernel, &self.bombers[bomber_i]);
-        let outcome = run_bomber_strike_rule(
+        // Prefer next free strike goal; if none free, allow contested targets.
+        let mut path = Self::find_strike_path(
             &mut self.nav_search,
             kernel,
-            &masks,
+            &self.friendly_corridor,
+            &self.hostile_corridor,
+            &self.friendly_bridge,
+            &self.hostile_bridge,
+            &self.occupant_at,
             gx,
             gy,
+            start_idx,
             team,
-            exclude,
+            except_id,
             max_expand,
+            exclude_start,
+            true,
         );
+        if path.is_none() {
+            path = Self::find_strike_path(
+                &mut self.nav_search,
+                kernel,
+                &self.friendly_corridor,
+                &self.hostile_corridor,
+                &self.friendly_bridge,
+                &self.hostile_bridge,
+                &self.occupant_at,
+                gx,
+                gy,
+                start_idx,
+                team,
+                except_id,
+                max_expand,
+                exclude_start,
+                false,
+            );
+        }
 
-        if outcome.path.is_none()
-            && prefer_alternate_goal
-            && is_air_strike_target_at(kernel, &masks, team, gx, gy)
-        {
+        let still_on_strike = is_air_strike_target_at(kernel, &masks, team, gx, gy);
+        if path.is_none() && prefer_alternate_goal && still_on_strike {
             self.bombers[bomber_i].goal_gx = gx;
             self.bombers[bomber_i].goal_gy = gy;
             self.bombers[bomber_i].deploy_path = vec![start_idx];
@@ -540,7 +597,7 @@ impl BomberLayer {
             return;
         }
 
-        if let Some(route) = outcome.path {
+        if let Some(route) = path {
             if route.path.len() >= 2 {
                 let w = kernel.grid_w;
                 let goal_idx = *route.path.last().unwrap();
@@ -575,6 +632,66 @@ impl BomberLayer {
         self.note_strike_search_result(bomber_i, kernel, false);
     }
 
+    fn find_strike_path(
+        nav_search: &mut SearchKernel,
+        kernel: &TerritoryKernel,
+        friendly_corridor: &[u8],
+        hostile_corridor: &[u8],
+        friendly_bridge: &[u8],
+        hostile_bridge: &[u8],
+        occupant_at: &HashMap<CellKey, u32>,
+        gx: i32,
+        gy: i32,
+        start_idx: i32,
+        team: u8,
+        except_id: u32,
+        max_expand: usize,
+        exclude_start: Option<i32>,
+        free_goals_only: bool,
+    ) -> Option<RoutePath> {
+        let masks = AgentNavMasks {
+            friendly_corridor,
+            hostile_corridor,
+            friendly_bridge,
+            hostile_bridge,
+        };
+        if !free_goals_only {
+            return run_bomber_strike_rule(
+                nav_search,
+                kernel,
+                &masks,
+                gx,
+                gy,
+                team,
+                exclude_start,
+                max_expand,
+            )
+            .path;
+        }
+        let rule = rule_by_id(NAV_RULE_BOMBER_STRIKE)?;
+        let view = BattleNavView::new(kernel, &masks, team);
+        let w = kernel.grid_w.max(1);
+        let exclude = exclude_start.unwrap_or(-1);
+        let ctx = rule.search.with_max_expand(max_expand);
+        let is_free_strike = |idx: usize| {
+            if !view.is_air_strike_goal(idx) {
+                return false;
+            }
+            if exclude >= 0 && idx as i32 == exclude {
+                return false;
+            }
+            let cx = (idx as i32) % w;
+            let cy = (idx as i32) / w;
+            match occupant_at.get(&(cx, cy)) {
+                None => true,
+                Some(&oid) => oid == except_id,
+            }
+        };
+        nav_search
+            .find_nearest_goal(&view, &[start_idx], ctx, is_free_strike)
+            .map(|(path, _)| path)
+    }
+
     fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, bomber: &Bomber) -> bool {
         let masks = AgentNavMasks {
             friendly_corridor: &self.friendly_corridor,
@@ -596,6 +713,49 @@ impl BomberLayer {
 
     fn is_in_bounds(&self, kernel: &TerritoryKernel, gx: i32, gy: i32) -> bool {
         kernel.cell_index(gx, gy) >= 0
+    }
+
+    fn set_occupant(&mut self, gx: i32, gy: i32, id: u32) {
+        self.occupant_at.insert((gx, gy), id);
+    }
+
+    fn clear_occupant(&mut self, gx: i32, gy: i32, id: u32) {
+        if self.occupant_at.get(&(gx, gy)).copied() == Some(id) {
+            self.occupant_at.remove(&(gx, gy));
+        }
+    }
+
+    fn move_occupant(&mut self, from_gx: i32, from_gy: i32, to_gx: i32, to_gy: i32, id: u32) {
+        self.clear_occupant(from_gx, from_gy, id);
+        self.set_occupant(to_gx, to_gy, id);
+    }
+
+    /// True if another living bomber already occupies this air cell (O(1) map).
+    fn air_occupied_by_other(&self, gx: i32, gy: i32, except_id: u32) -> bool {
+        match self.occupant_at.get(&(gx, gy)) {
+            Some(&id) => id != except_id,
+            None => false,
+        }
+    }
+
+    /// Free air cell at hangar or a free cardinal neighbor; never stack bombers.
+    fn find_spawn_air_cell(
+        &self,
+        kernel: &TerritoryKernel,
+        hx: i32,
+        hy: i32,
+    ) -> Option<(i32, i32)> {
+        if self.is_in_bounds(kernel, hx, hy) && !self.air_occupied_by_other(hx, hy, u32::MAX) {
+            return Some((hx, hy));
+        }
+        for (dx, dy) in CARDINAL {
+            let gx = hx + dx;
+            let gy = hy + dy;
+            if self.is_in_bounds(kernel, gx, gy) && !self.air_occupied_by_other(gx, gy, u32::MAX) {
+                return Some((gx, gy));
+            }
+        }
+        None
     }
 
     fn sync_step_from_deploy_path(&mut self, kernel: &TerritoryKernel, bomber_i: usize) {
@@ -637,6 +797,15 @@ impl BomberLayer {
     }
 
     fn remove_dead(&mut self, dead: &[u32]) {
+        let clear: Vec<(i32, i32, u32)> = self
+            .bombers
+            .iter()
+            .filter(|b| dead.contains(&b.id))
+            .map(|b| (b.gx, b.gy, b.id))
+            .collect();
+        for (gx, gy, id) in clear {
+            self.clear_occupant(gx, gy, id);
+        }
         self.bombers.retain(|b| {
             if dead.contains(&b.id) {
                 if !b.orphan {

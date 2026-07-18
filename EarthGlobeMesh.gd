@@ -1,9 +1,7 @@
 class_name EarthGlobeMesh
 extends RefCounted
 
-const BattleMapDataLib := preload("res://BattleMapData.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
 const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
 
 
@@ -42,7 +40,7 @@ static func _build_globe_mesh(
 		for mx in range(mw):
 			if fluid and not _quad_has_land(map_data, mx, my, mw, mh, gw, gh):
 				continue
-			_add_meridian_quad(st, map_data, mx, my, mw, mh, gw, gh, r, hs, fluid, map_id)
+			_add_meridian_quad(st, map_data, mx, my, mw, mh, gw, gh, r, hs, fluid)
 	st.generate_normals()
 	return st.commit()
 
@@ -113,7 +111,6 @@ static func _add_meridian_quad(
 	radius: float,
 	hs: float,
 	fluid: bool,
-	map_id: String,
 ) -> void:
 	var lons: Array[float] = [_mx_to_lon(mx, mw), _mx_to_lon(mx + 1, mw)]
 	var lats: Array[float] = [_my_to_lat(my, mh), _my_to_lat(my + 1, mh)]
@@ -129,31 +126,9 @@ static func _add_meridian_quad(
 			var u: float = (lon + PI) / TAU
 			var v: float = float(g.y) / float(gh)
 			uvs.append(Vector2(u, v))
-	var sample_g: Vector2i = _grid_from_lon_lat(
-		(lons[0] + lons[1]) * 0.5, (lats[0] + lats[1]) * 0.5, gw, gh
-	)
-	var col: Color = (
-		Color(1, 1, 1, 0.0)
-		if fluid
-		else _cell_color(map_data, sample_g.x, sample_g.y, map_id)
-	)
+	# Terrain color from PlanetVisualBake albedo; white verts so shader albedo shows.
+	var col: Color = Color(1, 1, 1, 1.0 if not fluid else 0.0)
 	for idx in [0, 2, 1, 1, 2, 3]:
 		st.set_color(col)
 		st.set_uv(uvs[idx])
 		st.add_vertex(verts[idx])
-
-
-static func _cell_color(map_data, gx: int, gy: int, map_id: String) -> Color:
-	var colors: Dictionary = WorldConquestMapGeneratorLib.globe_colors_for_map(map_id)
-	if not map_data.is_land_cell(gx, gy):
-		return colors.get("ocean", Color(0.05, 0.18, 0.42))
-	var t: int = map_data.get_cell_terrain(gx, gy)
-	match t:
-		BattleMapDataLib.Terrain.WATER:
-			return colors.get("ocean", Color(0.05, 0.18, 0.42))
-		BattleMapDataLib.Terrain.MOUNTAIN:
-			return colors.get("mountain", Color(0.48, 0.44, 0.38))
-		BattleMapDataLib.Terrain.SAND:
-			return colors.get("sand", Color(0.72, 0.64, 0.38))
-		_:
-			return colors.get("land", Color(0.34, 0.52, 0.28))

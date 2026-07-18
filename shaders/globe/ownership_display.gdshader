@@ -1,6 +1,6 @@
 shader_type spatial;
-// Opaque overlay: avoids expensive alpha fill-rate on large owned regions.
-render_mode unshaded, cull_back;
+// Opaque overlay on land shell; depth-tested so far-side borders do not punch through ocean.
+render_mode unshaded, cull_back, depth_draw_opaque;
 
 uniform sampler2D owner_map : filter_nearest, repeat_enable;
 uniform sampler2D border_map : filter_nearest, repeat_enable;

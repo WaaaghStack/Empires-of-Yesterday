@@ -38,7 +38,7 @@ impl Default for BuilderConfig {
             orbit_speed: 0.55,
             return_sec: 0.45,
             outpost_build_sec: 5.0,
-            barracks_build_sec: 60.0,
+            barracks_build_sec: 5.0,
             outpost_max_health: 10.0,
         }
     }

@@ -47,8 +47,8 @@ impl Default for LogisticsConfig {
         Self {
             road_cells_per_sec: 1.0,
             outpost_build_sec: 5.0,
-            barracks_build_sec: 60.0,
-            hangar_build_sec: 60.0,
+            barracks_build_sec: 5.0,
+            hangar_build_sec: 5.0,
             outpost_max_health: 10.0,
             reconcile_cells_per_frame: LOGISTICS_RECONCILE_CELLS_PER_FRAME_DEFAULT,
             full_recal_interval_sec: 25.0,

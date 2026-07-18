@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode blend_mix, unshaded, cull_back, depth_test_disabled;
+render_mode blend_mix, unshaded, cull_back;
 
 uniform sampler2D pressure_friendly : filter_nearest, repeat_enable;
 uniform sampler2D pressure_hostile : filter_nearest, repeat_enable;
