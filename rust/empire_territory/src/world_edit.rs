@@ -102,8 +102,13 @@ impl TerritoryKernel {
         let mut touched = Vec::new();
         let flooded = if team == OWNER_FRIENDLY {
             flood_passable_into_mask(
+                self.graph_topology,
+                &self.neighbors,
+                &self.neighbor_count,
+                self.tile_count,
                 self.grid_w,
                 self.grid_h,
+                self.wrap_longitude,
                 &self.passable_mask,
                 gx,
                 gy,
@@ -112,8 +117,13 @@ impl TerritoryKernel {
             )
         } else {
             flood_passable_into_mask(
+                self.graph_topology,
+                &self.neighbors,
+                &self.neighbor_count,
+                self.tile_count,
                 self.grid_w,
                 self.grid_h,
+                self.wrap_longitude,
                 &self.passable_mask,
                 gx,
                 gy,
@@ -143,8 +153,13 @@ impl TerritoryKernel {
         for (team, gx, gy) in spawners {
             let flooded = if team == OWNER_FRIENDLY {
                 flood_passable_into_mask(
+                    self.graph_topology,
+                    &self.neighbors,
+                    &self.neighbor_count,
+                    self.tile_count,
                     self.grid_w,
                     self.grid_h,
+                    self.wrap_longitude,
                     &self.passable_mask,
                     gx,
                     gy,
@@ -153,8 +168,13 @@ impl TerritoryKernel {
                 )
             } else {
                 flood_passable_into_mask(
+                    self.graph_topology,
+                    &self.neighbors,
+                    &self.neighbor_count,
+                    self.tile_count,
                     self.grid_w,
                     self.grid_h,
+                    self.wrap_longitude,
                     &self.passable_mask,
                     gx,
                     gy,
@@ -565,20 +585,38 @@ fn land_at(land_mask: &[u8], grid_w: i32, grid_h: i32, gx: i32, gy: i32) -> bool
 }
 
 fn flood_passable_into_mask(
+    graph_topology: bool,
+    neighbors: &[[i32; 6]],
+    neighbor_count: &[u8],
+    tile_count: usize,
     grid_w: i32,
     grid_h: i32,
+    wrap_longitude: bool,
     passable_mask: &[u8],
     start_gx: i32,
     start_gy: i32,
     mask: &mut [u8],
     touched: &mut Vec<i32>,
 ) -> bool {
-    let start_idx = cell_index(start_gx, start_gy, grid_w, grid_h);
+    let start_idx = if graph_topology {
+        if start_gy == 0 && start_gx >= 0 && start_gx < grid_w as i32 {
+            start_gx
+        } else {
+            -1
+        }
+    } else if start_gx < 0 || start_gy < 0 || start_gx >= grid_w || start_gy >= grid_h {
+        -1
+    } else {
+        start_gy * grid_w + start_gx
+    };
     if start_idx < 0 {
         return false;
     }
     let start_ui = start_idx as usize;
-    if start_ui >= passable_mask.len() || passable_mask[start_ui] == 0 || start_ui >= mask.len() {
+    if start_ui >= passable_mask.len()
+        || passable_mask[start_ui] == 0
+        || start_ui >= mask.len()
+    {
         return false;
     }
     let mut any_new = false;
@@ -587,23 +625,28 @@ fn flood_passable_into_mask(
         any_new = true;
         touched.push(start_idx);
     }
-    let mut queue = vec![(start_gx, start_gy)];
+    let mut queue = vec![start_ui];
     let mut head = 0usize;
+    let mut neighbor_scratch = Vec::with_capacity(6);
     while head < queue.len() {
-        let (cx, cy) = queue[head];
+        let cur_ui = queue[head];
         head += 1;
-        for (dx, dy) in crate::sim::CARDINAL {
-            let nx = cx + dx;
-            let ny = cy + dy;
-            if nx < 0 || ny < 0 || nx >= grid_w || ny >= grid_h {
-                continue;
-            }
-            let nidx = cell_index(nx, ny, grid_w, grid_h);
-            if nidx < 0 {
-                continue;
-            }
-            let nui = nidx as usize;
-            if nui >= passable_mask.len() || passable_mask[nui] == 0 || nui >= mask.len() {
+        TerritoryKernel::collect_neighbors_static(
+            graph_topology,
+            neighbors,
+            neighbor_count,
+            tile_count,
+            grid_w,
+            grid_h,
+            wrap_longitude,
+            cur_ui,
+            &mut neighbor_scratch,
+        );
+        for &nui in &neighbor_scratch {
+            if nui >= passable_mask.len()
+                || passable_mask[nui] == 0
+                || nui >= mask.len()
+            {
                 continue;
             }
             if mask[nui] != 0 {
@@ -611,9 +654,69 @@ fn flood_passable_into_mask(
             }
             mask[nui] = 1;
             any_new = true;
-            touched.push(nidx);
-            queue.push((nx, ny));
+            touched.push(nui as i32);
+            queue.push(nui);
         }
     }
     any_new
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sim::{TerritoryKernel, OWNER_FRIENDLY, OWNER_NEUTRAL};
+
+    fn line_graph_kernel() -> TerritoryKernel {
+        let n = 4;
+        let mut neighbors = vec![[-1i32; 6]; n];
+        let mut neighbor_count = vec![0u8; n];
+        neighbors[0] = [1, -1, -1, -1, -1, -1];
+        neighbor_count[0] = 1;
+        neighbors[1] = [0, 2, -1, -1, -1, -1];
+        neighbor_count[1] = 2;
+        neighbors[2] = [1, 3, -1, -1, -1, -1];
+        neighbor_count[2] = 2;
+        neighbors[3] = [2, -1, -1, -1, -1, -1];
+        neighbor_count[3] = 1;
+        let mut k = TerritoryKernel::new(
+            n as i32,
+            1,
+            vec![1u8; n],
+            vec![0.0f32; n],
+            vec![1.0f32; n],
+            vec![1.0f32; n],
+            vec![OWNER_NEUTRAL; n],
+            vec![0.0f32; n],
+            vec![0.0f32; n],
+            0.0,
+            0.0,
+            0,
+            -1,
+            Vec::new(),
+            0,
+            0,
+            false,
+            false,
+            false,
+        );
+        k.set_graph_neighbors(neighbors, neighbor_count);
+        k.passable_mask = vec![1u8; n];
+        k.land_mask = vec![1u8; n];
+        k.friendly_reachable = vec![0u8; n];
+        k.hostile_reachable = vec![0u8; n];
+        k.world_edit_ready = true;
+        k
+    }
+
+    #[test]
+    fn graph_flood_reaches_beyond_cardinal_on_strip() {
+        let mut k = line_graph_kernel();
+        k.extend_beachhead_from_landing(0, 0, OWNER_FRIENDLY);
+        assert!(k.friendly_reachable[0] > 0);
+        assert!(k.friendly_reachable[1] > 0);
+        assert!(
+            k.friendly_reachable[2] > 0,
+            "graph flood from cell 0 must reach cell 2 (not cardinal on 1×N strip)"
+        );
+        assert!(k.friendly_reachable[3] > 0);
+    }
 }

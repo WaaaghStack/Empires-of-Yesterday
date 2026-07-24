@@ -19,6 +19,7 @@ mod presentation_txn;
 mod resources;
 mod route;
 mod sim;
+mod sphere_grid;
 mod structures;
 mod tape_codec;
 mod world_edit;
@@ -28,13 +29,14 @@ use economy::{
     fill_structure_row, f32_at, i32_at, u32_at, ContentTables, MAX_KINDS, RESOURCE_SLOTS,
 };
 use ffi_convert::{
-    corridor_specs_from_array, f32_triple_from_array, logistics_step_events_dict,
-    packed_byte_to_vec, packed_f32_to_vec, persisted_corridor_from_dict, spawners_from_dict,
-    structure_record_from_dict, structure_record_to_dict, vec_to_packed_byte, vec_to_packed_f32,
-    vec_to_packed_i32, world_edit_result_dict, world_session_events_dict, GdDictionary,
+    corridor_specs_from_array, f32_triple_from_array, graph_neighbors_from_packed,
+    logistics_step_events_dict, packed_byte_to_vec, packed_f32_to_vec, packed_i32_to_vec,
+    persisted_corridor_from_dict, spawners_from_dict, structure_record_from_dict,
+    structure_record_to_dict, vec_to_packed_byte, vec_to_packed_f32, vec_to_packed_i32,
+    world_edit_result_dict, world_session_events_dict, GdDictionary,
 };
 use fluid_bake::bake_fluid_rgba;
-use godot::builtin::Variant;
+use godot::builtin::{Vector3, Variant};
 use godot::prelude::*;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -44,7 +46,8 @@ use builders::{BuilderConfig, BuilderLayer};
 use logistics::{clamp_reconcile_budget, LogisticsConfig, LogisticsLayer};
 use resources::ResourceWallet;
 use route::{PortalGraph, RoutePlannerState, RouteSnapshot};
-use structures::{state_from_str, StructureStore};
+use sphere_grid::SphereGrid;
+use structures::{scd1_structures_pull_ids, state_from_str, StructureStore};
 use sim::{Spawner, TerritoryKernel};
 use tape_codec::{decode_pressure_v2, encode_pressure_v2, pack_territory_tape_v2};
 use domain_version::{
@@ -105,6 +108,8 @@ struct TerritorySim {
     player_home_gy: i32,
     enemy_home_gx: i32,
     enemy_home_gy: i32,
+    /// Cached sphere grid for fast `sphere_nearest_cell` after `generate_sphere_grid`.
+    sphere_grid_cache: Option<SphereGrid>,
 }
 
 #[godot_api]
@@ -117,6 +122,64 @@ impl TerritorySim {
     #[func]
     fn version(&self) -> GString {
         env!("CARGO_PKG_VERSION").into()
+    }
+
+    #[func]
+    fn generate_sphere_grid(&mut self, frequency: i32) -> GdDictionary {
+        let f = frequency.max(1) as u32;
+        let grid = SphereGrid::generate(f);
+        self.sphere_grid_cache = Some(grid.clone());
+        let mut positions = PackedVector3Array::new();
+        for p in &grid.positions {
+            positions.push(Vector3::new(p[0], p[1], p[2]));
+        }
+        let mut neighbors_flat = Vec::with_capacity(grid.cell_count * 6);
+        for row in &grid.neighbors {
+            neighbors_flat.extend_from_slice(row);
+        }
+        let mut faces_flat = Vec::with_capacity(grid.faces.len() * 3);
+        for tri in &grid.faces {
+            faces_flat.push(tri[0] as i32);
+            faces_flat.push(tri[1] as i32);
+            faces_flat.push(tri[2] as i32);
+        }
+        let mut out = GdDictionary::new();
+        out.set("frequency", f as i32);
+        out.set("cell_count", grid.cell_count as i32);
+        out.set("positions", &positions);
+        out.set("lat", &vec_to_packed_f32(&grid.lat));
+        out.set("lon", &vec_to_packed_f32(&grid.lon));
+        out.set("neighbors", &vec_to_packed_i32(&neighbors_flat));
+        out.set("neighbor_count", &vec_to_packed_byte(&grid.neighbor_count));
+        out.set("faces", &vec_to_packed_i32(&faces_flat));
+        out
+    }
+
+    #[func]
+    fn sphere_nearest_cell(&self, frequency: i32, x: f32, y: f32, z: f32) -> i32 {
+        let f = frequency.max(1) as u32;
+        if let Some(grid) = self.sphere_grid_cache.as_ref() {
+            if grid.frequency == f {
+                return grid.nearest_cell([x, y, z]);
+            }
+        }
+        SphereGrid::generate(f).nearest_cell([x, y, z])
+    }
+
+    #[func]
+    fn build_equirect_to_cell(&mut self, frequency: i32, ow: i32, oh: i32) -> PackedInt32Array {
+        let f = frequency.max(1) as u32;
+        let ow = ow.max(0) as u32;
+        let oh = oh.max(0) as u32;
+        let grid = match self.sphere_grid_cache.as_ref() {
+            Some(cached) if cached.frequency == f => cached.clone(),
+            _ => {
+                let g = SphereGrid::generate(f);
+                self.sphere_grid_cache = Some(g.clone());
+                g
+            }
+        };
+        vec_to_packed_i32(&grid.build_equirect_to_cell(ow, oh))
     }
 
     #[func]
@@ -229,6 +292,20 @@ impl TerritorySim {
                 .and_then(|v| v.try_to().ok())
                 .unwrap_or(10);
             kernel.spawner_inject_interval_rounds = inject_interval.max(1);
+            let graph_neighbors: PackedInt32Array = config
+                .get("graph_neighbors")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or_default();
+            let graph_neighbor_count: PackedByteArray = config
+                .get("graph_neighbor_count")
+                .and_then(|v| v.try_to().ok())
+                .unwrap_or_default();
+            if graph_neighbors.len() >= tile_count * 6 && graph_neighbor_count.len() == tile_count {
+                let flat = packed_i32_to_vec(&graph_neighbors);
+                let neighbors = graph_neighbors_from_packed(&flat, tile_count);
+                let neighbor_count = packed_byte_to_vec(&graph_neighbor_count);
+                kernel.set_graph_neighbors(neighbors, neighbor_count);
+            }
             let passable: PackedByteArray = config
                 .get("passable_mask")
                 .and_then(|v| v.try_to().ok())
@@ -467,8 +544,8 @@ impl TerritorySim {
     #[func]
     fn structure_store_remove(&mut self, sid: i32) {
         if self.structure_store.structures.contains_key(&sid) {
-            self.structure_store.remove(sid);
-            let _ = self.domain_book.touch(DomainId::Structures);
+            let v = self.domain_book.touch(DomainId::Structures);
+            self.structure_store.remove_with_tombstone(sid, v);
         }
     }
 
@@ -618,15 +695,12 @@ impl TerritorySim {
         match d {
             DomainId::Structures => {
                 let mut rows: Array<Variant> = Array::new();
-                let mut ids: Vec<i32> = self.structure_store.structures.keys().copied().collect();
-                ids.sort_unstable();
+                // Shipped SCD1 pack: living ids + tombstone removed_ids (see scd1_structures_pull_ids).
+                let (ids, removed) = scd1_structures_pull_ids(&self.structure_store, last, full);
                 for id in ids {
                     let Some(record) = self.structure_store.structures.get(&id) else {
                         continue;
                     };
-                    if !full && record.version <= last {
-                        continue;
-                    }
                     let entry = structure_record_to_dict(record);
                     rows.push(&entry);
                 }
@@ -647,8 +721,9 @@ impl TerritorySim {
                     corridors.push(&entry);
                 }
                 out.set("rows", &rows);
+                out.set("removed_ids", &vec_to_packed_i32(&removed));
                 out.set("bridge_corridors", &corridors);
-                out.set("empty", rows.is_empty() && !full);
+                out.set("empty", rows.is_empty() && removed.is_empty() && !full);
             }
             DomainId::Territory => {
                 let Some(kernel) = self.kernel.as_ref() else {
@@ -1050,6 +1125,7 @@ impl TerritorySim {
             (events, wallet_au)
         };
         // SCD1: stamp structure versions for activates / destroys so pulls see BUILDING→ACTIVE.
+        // Destroys already removed the row; re-stamp tombstones so incremental pulls emit removed_ids.
         if !events.activated_sids.is_empty()
             || !events.destroyed_sids.is_empty()
             || events.marker_dirty
@@ -1064,6 +1140,9 @@ impl TerritorySim {
                 if let Some(st) = self.structure_store.structures.get_mut(&sid) {
                     st.version = sv;
                 }
+            }
+            for &sid in &events.destroyed_sids {
+                self.structure_store.tombstones.insert(sid, sv);
             }
         }
         // Living-set domains: spawn must advance high-water so the next pull includes new units.
@@ -1189,6 +1268,9 @@ impl TerritorySim {
                     tile_count,
                     kernel.grid_w,
                     kernel.grid_h,
+                    kernel.graph_topology,
+                    kernel.neighbors.clone(),
+                    kernel.neighbor_count.clone(),
                     &self.logistics_cfg,
                 );
                 self.logistics_layer
@@ -1216,6 +1298,9 @@ impl TerritorySim {
             kernel.tile_count,
             kernel.grid_w,
             kernel.grid_h,
+            kernel.graph_topology,
+            kernel.neighbors.clone(),
+            kernel.neighbor_count.clone(),
             &self.logistics_cfg,
         );
         if self.structure_store.ready {
@@ -1350,6 +1435,17 @@ impl TerritorySim {
     #[func]
     fn get_network_built_mask(&self, team: u8) -> PackedByteArray {
         vec_to_packed_byte(&self.logistics_layer.built_mask(team))
+    }
+
+    #[func]
+    fn get_network_planned_mask(&self, team: u8) -> PackedByteArray {
+        vec_to_packed_byte(&self.logistics_layer.planned_mask(team))
+    }
+
+    /// Built ∪ planned for place-time spur attach (option B). Prefer over dual full-mask pulls.
+    #[func]
+    fn get_network_route_mask(&self, team: u8) -> PackedByteArray {
+        vec_to_packed_byte(&self.logistics_layer.route_mask(team))
     }
 
     #[func]
@@ -2431,6 +2527,8 @@ impl RoutePlanner {
         land_mask: PackedByteArray,
         bridge_mask: PackedByteArray,
         land_comp: PackedInt32Array,
+        graph_neighbors: PackedInt32Array,
+        graph_neighbor_count: PackedByteArray,
     ) -> bool {
         let n = (grid_w * grid_h) as usize;
         if n <= 0 {
@@ -2444,6 +2542,13 @@ impl RoutePlanner {
         if lm.len() < n || bm.len() < n || lc.len() < n {
             return false;
         }
+        let mut graph_nbrs: Vec<[i32; 6]> = Vec::new();
+        let mut graph_nbr_count: Vec<u8> = Vec::new();
+        if graph_neighbors.len() >= n * 6 && graph_neighbor_count.len() == n {
+            let flat = packed_i32_to_vec(&graph_neighbors);
+            graph_nbrs = graph_neighbors_from_packed(&flat, n);
+            graph_nbr_count = packed_byte_to_vec(&graph_neighbor_count);
+        }
         let snap = Arc::new(RouteSnapshot {
             grid_w,
             grid_h,
@@ -2451,9 +2556,39 @@ impl RoutePlanner {
             land_mask: lm,
             bridge_mask: bm,
             land_comp: lc,
+            graph_neighbors: graph_nbrs,
+            graph_neighbor_count: graph_nbr_count,
+            cell_positions: Vec::new(),
         });
         if let Ok(mut guard) = self.state.snapshot.lock() {
             *guard = Some(snap);
+        }
+        true
+    }
+
+    #[func]
+    fn set_cell_positions(&mut self, cell_positions: PackedFloat32Array) -> bool {
+        let snap = match self.state.snapshot.lock().ok().and_then(|g| g.clone()) {
+            Some(s) => s,
+            None => return false,
+        };
+        let n = snap.tile_count();
+        if n <= 0 || cell_positions.len() < n * 3 {
+            return false;
+        }
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = i * 3;
+            positions.push([
+                cell_positions.get(base).unwrap_or(0.0),
+                cell_positions.get(base + 1).unwrap_or(0.0),
+                cell_positions.get(base + 2).unwrap_or(0.0),
+            ]);
+        }
+        let mut next = (*snap).clone();
+        next.cell_positions = positions;
+        if let Ok(mut guard) = self.state.snapshot.lock() {
+            *guard = Some(Arc::new(next));
         }
         true
     }
@@ -2506,7 +2641,7 @@ impl RoutePlanner {
 
     #[func]
     fn route_planner_api_version(&self) -> i32 {
-        3
+        4
     }
 
     #[func]

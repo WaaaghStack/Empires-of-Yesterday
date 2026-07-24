@@ -79,6 +79,12 @@ func setup_from_tile_control(map_data, tile_control: BattleTileControlLib) -> bo
 	_free_gpu()
 	if map_data == null or tile_control == null:
 		return false
+	if map_data.sphere_mode:
+		push_error(
+			"BattleTerritoryGpuField: rect GPU territory sim is disabled in sphere WC "
+			+ "(use BattleTerritoryRustBackend / EarthGlobeMap fluid)."
+		)
+		return false
 	grid_w = map_data.grid_width
 	grid_h = map_data.grid_height
 	tile_count = grid_w * grid_h

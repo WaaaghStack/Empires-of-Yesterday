@@ -112,7 +112,14 @@ fn cell_travel_sec(cfg: &BuilderConfig) -> f32 {
     }
 }
 
+/// Unpack a packed gameplay cell key to `(gx, gy)`.
+///
+/// Live sphere WC passes `grid_w = cell_count` with a single-row layout (`grid_h = 1`), so
+/// path keys are linear cell ids and this yields `(cell_key, 0)` for in-range keys. Rect maps
+/// use standard row-major `(key % grid_w, key / grid_w)`. Callers must not pass overlay width
+/// (360) as `grid_w` on sphere maps — use `cell_count` from the Rust backend config.
 fn grid_from_packed_key(cell_key: i32, grid_w: i32) -> (i32, i32) {
+    debug_assert!(grid_w > 0, "grid_from_packed_key: grid_w must be positive");
     (cell_key % grid_w, cell_key / grid_w)
 }
 

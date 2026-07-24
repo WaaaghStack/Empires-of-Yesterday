@@ -109,6 +109,9 @@ struct TeamNetwork {
     tile_count: usize,
     grid_w: i32,
     grid_h: i32,
+    graph_topology: bool,
+    neighbors: Vec<[i32; 6]>,
+    neighbor_count: Vec<u8>,
     home_key: i32,
     built: Vec<u8>,
     planned: Vec<u8>,
@@ -124,7 +127,15 @@ struct TeamNetwork {
 }
 
 impl TeamNetwork {
-    fn new(tile_count: usize, grid_w: i32, grid_h: i32, home_key: i32) -> Self {
+    fn new(
+        tile_count: usize,
+        grid_w: i32,
+        grid_h: i32,
+        graph_topology: bool,
+        neighbors: Vec<[i32; 6]>,
+        neighbor_count: Vec<u8>,
+        home_key: i32,
+    ) -> Self {
         let mut built = vec![0u8; tile_count];
         if home_key >= 0 && (home_key as usize) < tile_count {
             built[home_key as usize] = 1;
@@ -133,6 +144,9 @@ impl TeamNetwork {
             tile_count,
             grid_w,
             grid_h,
+            graph_topology,
+            neighbors,
+            neighbor_count,
             home_key,
             built,
             planned: vec![0u8; tile_count],
@@ -292,7 +306,23 @@ impl TeamNetwork {
     }
 
     fn adjacent_to_built(&self, key: i32) -> bool {
-        if key < 0 || self.grid_w <= 0 {
+        if key < 0 || (key as usize) >= self.tile_count {
+            return false;
+        }
+        if self.graph_topology {
+            let ui = key as usize;
+            if ui >= self.neighbor_count.len() {
+                return false;
+            }
+            let n = self.neighbor_count[ui] as usize;
+            for slot in 0..n.min(6) {
+                if self.is_built(self.neighbors[ui][slot]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if self.grid_w <= 0 {
             return false;
         }
         let gx = key % self.grid_w;
@@ -523,6 +553,9 @@ impl LogisticsLayer {
         tile_count: usize,
         grid_w: i32,
         grid_h: i32,
+        graph_topology: bool,
+        neighbors: Vec<[i32; 6]>,
+        neighbor_count: Vec<u8>,
         cfg: &LogisticsConfig,
     ) {
         let player_key = if self.player_home.0 >= 0 {
@@ -535,8 +568,24 @@ impl LogisticsLayer {
         } else {
             -1
         };
-        let mut friendly = TeamNetwork::new(tile_count, grid_w, grid_h, player_key);
-        let mut hostile = TeamNetwork::new(tile_count, grid_w, grid_h, enemy_key);
+        let mut friendly = TeamNetwork::new(
+            tile_count,
+            grid_w,
+            grid_h,
+            graph_topology,
+            neighbors.clone(),
+            neighbor_count.clone(),
+            player_key,
+        );
+        let mut hostile = TeamNetwork::new(
+            tile_count,
+            grid_w,
+            grid_h,
+            graph_topology,
+            neighbors,
+            neighbor_count,
+            enemy_key,
+        );
         friendly.full_recal_timer = cfg.full_recal_interval_sec;
         hostile.full_recal_timer = cfg.full_recal_interval_sec;
         self.friendly = Some(friendly);
@@ -637,6 +686,30 @@ impl LogisticsLayer {
             .unwrap_or_default()
     }
 
+    /// Reserved-but-unbuilt road cells (option B attach targets for simultaneous builds).
+    pub fn planned_mask(&self, team: u8) -> Vec<u8> {
+        self.network(team)
+            .map(|n| n.planned.clone())
+            .unwrap_or_default()
+    }
+
+    /// Built ∪ planned — place-time spur attach / portal infra without dumping cells as sources.
+    pub fn route_mask(&self, team: u8) -> Vec<u8> {
+        let Some(net) = self.network(team) else {
+            return Vec::new();
+        };
+        let n = net.built.len().min(net.planned.len());
+        let mut out = vec![0u8; net.built.len().max(net.planned.len())];
+        for i in 0..n {
+            out[i] = if net.built[i] != 0 || net.planned[i] != 0 {
+                1
+            } else {
+                0
+            };
+        }
+        out
+    }
+
     pub fn step_frame(
         &mut self,
         dt: f32,
@@ -658,7 +731,15 @@ impl LogisticsLayer {
             return result;
         }
         if self.friendly.is_none() || self.hostile.is_none() {
-            self.configure(tile_count, grid_w, grid_h, cfg);
+            self.configure(
+                tile_count,
+                grid_w,
+                grid_h,
+                false,
+                Vec::new(),
+                Vec::new(),
+                cfg,
+            );
         }
 
         let network_changed_before_cells = result.new_built_cells.len();
@@ -977,7 +1058,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(16, 16, 16, &cfg);
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let dt = 1.0;
         let mut done = false;
@@ -1033,7 +1114,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(256, 16, 16, &cfg);
+        layer.configure(256, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
         layer.register_terminal(2, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let frame = layer.step_frame(1.0, &mut store, 16, 16, &cfg);
@@ -1085,7 +1166,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(256, 16, 16, &cfg);
+        layer.configure(256, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
         layer.register_terminal(2, &mut store, OWNER_FRIENDLY, 16, &cfg);
         for _ in 0..16 {
@@ -1126,7 +1207,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(16, 16, 16, &cfg);
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(8, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let net = layer.friendly.as_mut().unwrap();
         for &key in &path {
@@ -1174,7 +1255,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(16, 16, 16, &cfg);
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(42, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let mut done = false;
         for _ in 0..40 {
@@ -1195,6 +1276,90 @@ mod tests {
             (st.path_built - 4.0).abs() < 0.01,
             "path_built should be full length"
         );
+    }
+
+    #[test]
+    fn route_mask_is_built_union_planned() {
+        let mut layer = LogisticsLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            ..Default::default()
+        };
+        let cfg = LogisticsConfig::default();
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 1,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_CONNECTING,
+            gx: 3,
+            gy: 0,
+            path_keys: vec![0, 1, 2, 3],
+            path_built: 1.0,
+            path_len: 4,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
+        layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
+        let route = layer.route_mask(OWNER_FRIENDLY);
+        assert_eq!(route.len(), 16);
+        assert_ne!(route[0], 0, "home/source built");
+        assert_ne!(route[1], 0, "planned spur cell in route mask");
+        assert_ne!(route[2], 0, "planned spur cell in route mask");
+        assert_eq!(layer.built_mask(OWNER_FRIENDLY)[1], 0);
+        assert_ne!(layer.planned_mask(OWNER_FRIENDLY)[1], 0);
+    }
+
+    #[test]
+    fn logistics_completes_short_spur_on_shared_network() {
+        let mut layer = LogisticsLayer {
+            player_home: (0, 0),
+            enemy_home: (8, 8),
+            ..Default::default()
+        };
+        let cfg = LogisticsConfig::default();
+        let mut store = StructureStore::default();
+        // Pre-built trunk 0..2; spur attaches at 2 and only grows 3.
+        store.upsert(StructureRecord {
+            id: 11,
+            team: OWNER_FRIENDLY,
+            kind: KIND_SPAWNER,
+            state: STATE_CONNECTING,
+            gx: 3,
+            gy: 0,
+            path_keys: vec![2, 3],
+            path_built: 1.0,
+            path_len: 2,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 0,
+        });
+        store.ready = true;
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
+        {
+            let net = layer.friendly.as_mut().unwrap();
+            net.built[0] = 1;
+            net.built[1] = 1;
+            net.built[2] = 1;
+        }
+        layer.register_terminal(11, &mut store, OWNER_FRIENDLY, 16, &cfg);
+        let mut done = false;
+        for _ in 0..80 {
+            let frame = layer.step_frame(0.25, &mut store, 16, 16, &cfg);
+            if !frame.path_completions.is_empty() {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "short spur should complete against shared trunk");
+        assert!(layer.built_mask(OWNER_FRIENDLY)[3] != 0);
     }
 
     #[test]
@@ -1224,7 +1389,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(16, 16, 16, &cfg);
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(9, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let net = layer.friendly.as_mut().unwrap();
         for &key in &path {
@@ -1266,7 +1431,7 @@ mod tests {
         };
         let mut cfg = LogisticsConfig::default();
         cfg.reconcile_cells_per_frame = 64;
-        layer.configure(256, 16, 16, &cfg);
+        layer.configure(256, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         let mut store = StructureStore::default();
         store.ready = true;
         let frame = layer.step_frame(0.016, &mut store, 16, 16, &cfg);
@@ -1304,7 +1469,7 @@ mod tests {
             version: 0,
         });
         store.ready = true;
-        layer.configure(16, 16, 16, &cfg);
+        layer.configure(16, 16, 16, false, Vec::new(), Vec::new(), &cfg);
         layer.register_terminal(1, &mut store, OWNER_FRIENDLY, 16, &cfg);
         let v0 = layer.road_network_version;
         let frame = layer.step_frame(1.0, &mut store, 16, 16, &cfg);

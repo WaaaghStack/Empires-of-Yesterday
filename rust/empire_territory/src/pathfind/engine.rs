@@ -144,6 +144,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         }
     }
 

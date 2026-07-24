@@ -35,13 +35,15 @@ This document describes how to build and use the Rust native extension that acce
 
 | Method | Role |
 |--------|------|
-| `pull_domain_since(domain, last_version, force_full)` | Full current rows with `version > last` (or full domain if `force_full` / start) |
+| `pull_domain_since(domain, last_version, force_full)` | Full current rows with `version > last` (or full domain if `force_full` / start). Structures also emit `removed_ids` (tombstones) and `bridge_corridors` on full/incremental packs |
 | `scd1_domain_epoch(domain)` | High-water for domain |
 | `scd1_sim_generation()` | Match generation (resets force seed) |
 | `scd1_decide_full_pull(...)` | Allow-list reason or empty (incremental) |
 | `scd1_note_full_pull(reason)` | Cooldown + `FULL_RESYNC` log |
 
-Domains: `territory`, `structures`, `roads`, `agents`, `bombers`, `wallet`. Client: `Scd1DomainPull.gd`. Harness: `scd1_version_pull_harness.gd`.
+Domains: `territory`, `structures`, `roads`, `agents`, `bombers`, `wallet`. Client: `Scd1DomainPull.gd` (per-domain full-pull cooldown; rewinds `last_version` on full seed / sim_generation). Harness: `scd1_version_pull_harness.gd`.
+
+**Authority split:** Rust is the sim engine (mutations, pathing, domain epochs). Godot is visualization only (SCD1 apply, billboards, overlays). `pull_presentation_txn` is **legacy/QA only** — not live Play paint.
 
 ### Backend defaults (when extension is loaded)
 

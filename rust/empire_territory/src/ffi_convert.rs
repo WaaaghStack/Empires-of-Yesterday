@@ -33,6 +33,23 @@ pub fn vec_to_packed_f32(data: &[f32]) -> PackedFloat32Array {
     PackedFloat32Array::from(data)
 }
 
+pub fn packed_i32_to_vec(arr: &PackedInt32Array) -> Vec<i32> {
+    (0..arr.len()).map(|i| arr.get(i).unwrap_or(-1)).collect()
+}
+
+pub fn graph_neighbors_from_packed(flat: &[i32], tile_count: usize) -> Vec<[i32; 6]> {
+    let mut out = Vec::with_capacity(tile_count);
+    for i in 0..tile_count {
+        let base = i * 6;
+        let mut row = [-1i32; 6];
+        for k in 0..6 {
+            row[k] = flat.get(base + k).copied().unwrap_or(-1);
+        }
+        out.push(row);
+    }
+    out
+}
+
 pub fn vec_to_packed_i32(data: &[i32]) -> PackedInt32Array {
     PackedInt32Array::from(data)
 }

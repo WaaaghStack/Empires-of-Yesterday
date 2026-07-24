@@ -29,6 +29,23 @@ var map_size: Vector2 = Vector2(3072, 2304)
 var grid_width: int = 96
 var grid_height: int = 72
 var cell_size: float = 32.0
+## Equal-area sphere gameplay grid (World Conquest). When true:
+## - grid_width/grid_height = overlay equirect dims (texture shaders, 360×180)
+## - cell_count = gameplay tile count (~64002 at frequency 80)
+## - terrain_cells, tile_height, blocked_cells, etc. are length cell_count (NOT w*h)
+## - Gameplay cell access: cell_index(cell_id, 0) or is_land_cell_id(cell_id)
+var sphere_mode: bool = false
+var cell_count: int = 0
+var sphere_frequency: int = 0
+var cell_positions: PackedVector3Array = PackedVector3Array()
+var cell_lat: PackedFloat32Array = PackedFloat32Array()
+var cell_lon: PackedFloat32Array = PackedFloat32Array()
+var neighbors: PackedInt32Array = PackedInt32Array()
+var neighbor_counts: PackedByteArray = PackedByteArray()
+var sphere_faces: PackedInt32Array = PackedInt32Array()
+var equirect_to_cell: PackedInt32Array = PackedInt32Array()
+var overlay_width: int = 360
+var overlay_height: int = 180
 ## Dominions-style capture points (see BattleMapGenerator placement).
 var capture_points: Array = []
 var node_type: String = "battle"
@@ -75,23 +92,90 @@ var enemy_capital_grid: Vector2i = Vector2i(-1, -1)
 var resource_deposits: Array = []
 
 
+func gameplay_tile_count() -> int:
+	return cell_count if sphere_mode else grid_width * grid_height
+
+
+## Gameplay cell id on sphere is stored as Vector2i(cell_id, 0).
+## Equirect overlay pixels must use equirect_pixel_to_cell — never this shortcut for row 0.
 func cell_index(gx: int, gy: int) -> int:
+	if sphere_mode:
+		# Gameplay convention: Vector2i(cell_id, 0) with cell_id in [0, cell_count).
+		if gy == 0 and gx >= 0 and gx < cell_count:
+			return gx
+		# Explicit equirect only when gy != 0 (avoids colliding north row with cell ids).
+		if gy != 0 and gx >= 0 and gy >= 0 and gx < grid_width and gy < grid_height:
+			return equirect_pixel_to_cell(gx, gy)
+		return -1
 	return gy * grid_width + gx
 
 
-func get_cell_terrain(gx: int, gy: int) -> int:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+## Overlay / texture pixel → gameplay cell via LUT only (never dual-address with cell_id).
+func equirect_pixel_to_cell(px: int, py: int) -> int:
+	if not sphere_mode:
+		return cell_index(px, py)
+	if px < 0 or py < 0 or px >= grid_width or py >= grid_height:
+		return -1
+	var eidx: int = py * grid_width + px
+	if eidx < 0 or eidx >= equirect_to_cell.size():
+		return -1
+	return int(equirect_to_cell[eidx])
+
+
+func get_neighbors(cell_id: int) -> Array[int]:
+	var out: Array[int] = []
+	if not sphere_mode or cell_id < 0 or cell_id >= cell_count:
+		return out
+	var base: int = cell_id * 6
+	if base + 6 > neighbors.size():
+		return out
+	var ncount: int = int(neighbor_counts[cell_id]) if cell_id < neighbor_counts.size() else 0
+	for slot in range(ncount):
+		var nbr: int = neighbors[base + slot]
+		if nbr >= 0:
+			out.append(nbr)
+	return out
+
+
+func _gameplay_cell_index(gx: int, gy: int) -> int:
+	# Sphere gameplay uses cell_id on x with gy == 0; never equirect row-0 collision.
+	return cell_index(gx, gy)
+
+
+func is_land_equirect_pixel(px: int, py: int) -> bool:
+	var cid: int = equirect_pixel_to_cell(px, py)
+	return is_land_cell_id(cid)
+
+
+func get_tile_height_equirect_pixel(px: int, py: int) -> float:
+	var cid: int = equirect_pixel_to_cell(px, py)
+	if cid < 0 or cid >= tile_height.size():
+		return 0.0
+	return tile_height[cid]
+
+
+func get_cell_terrain_equirect_pixel(px: int, py: int) -> int:
+	var cid: int = equirect_pixel_to_cell(px, py)
+	if cid < 0 or cid >= terrain_cells.size():
 		return Terrain.WATER
-	var idx := cell_index(gx, gy)
+	return int(terrain_cells[cid])
+
+
+func get_cell_terrain(gx: int, gy: int) -> int:
+	var idx: int = _gameplay_cell_index(gx, gy)
+	if idx < 0:
+		return Terrain.WATER
 	if idx >= terrain_cells.size():
 		return Terrain.GRASS
 	return int(terrain_cells[idx])
 
 
 func get_move_cost(gx: int, gy: int) -> float:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+	var idx: int = _gameplay_cell_index(gx, gy)
+	if idx < 0:
 		return IMPASSABLE_MOVE_COST
-	var idx := cell_index(gx, gy)
+	if not sphere_mode and (gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height):
+		return IMPASSABLE_MOVE_COST
 	if idx < terrain_move_cost.size():
 		return terrain_move_cost[idx]
 	var t: int = get_cell_terrain(gx, gy)
@@ -101,9 +185,11 @@ func get_move_cost(gx: int, gy: int) -> float:
 
 
 func get_defense(gx: int, gy: int) -> float:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+	var idx: int = _gameplay_cell_index(gx, gy)
+	if idx < 0:
 		return 1.0
-	var idx := cell_index(gx, gy)
+	if not sphere_mode and (gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height):
+		return 1.0
 	if idx < terrain_defense.size():
 		return terrain_defense[idx]
 	var t: int = get_cell_terrain(gx, gy)
@@ -115,16 +201,22 @@ func get_defense(gx: int, gy: int) -> float:
 ## Height layer (0.0 lowlands to 1.0 peaks → 0–100 terrain in sim). Pressure is not capped by height.
 ## is_passable / is_land_cell will later incorporate height for fluid movement rules.
 func get_tile_height(gx: int, gy: int) -> float:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+	var idx: int = _gameplay_cell_index(gx, gy)
+	if idx < 0:
 		return 0.0
-	var idx := cell_index(gx, gy)
+	if not sphere_mode and (gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height):
+		return 0.0
 	if idx < tile_height.size():
 		return tile_height[idx]
 	return 0.5
 
 
 func is_passable(gx: int, gy: int) -> bool:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+	if sphere_mode:
+		var idx: int = _gameplay_cell_index(gx, gy)
+		if idx < 0:
+			return false
+	elif gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
 		return false
 	if is_cell_blocked(gx, gy):
 		return false
@@ -137,44 +229,81 @@ func is_land_cell(gx: int, gy: int) -> bool:
 	return get_cell_terrain(gx, gy) != Terrain.WATER
 
 
+func is_land_cell_id(cell_id: int) -> bool:
+	if cell_id < 0 or cell_id >= gameplay_tile_count():
+		return false
+	return is_land_cell(cell_id, 0)
+
+
 func is_cell_blocked(gx: int, gy: int) -> bool:
-	if gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
+	if sphere_mode:
+		var idx: int = _gameplay_cell_index(gx, gy)
+		if idx < 0:
+			return true
+	elif gx < 0 or gy < 0 or gx >= grid_width or gy >= grid_height:
 		return true
-	var idx := cell_index(gx, gy)
+	var idx := _gameplay_cell_index(gx, gy)
 	if idx >= blocked_cells.size():
 		return false
 	return blocked_cells[idx] > 0
 
 
 func sync_blocked_from_terrain() -> void:
-	var total := grid_width * grid_height
+	var total: int = gameplay_tile_count()
 	if blocked_cells.size() != total:
 		blocked_cells.resize(total)
-	for gy in range(grid_height):
-		for gx in range(grid_width):
-			var idx := cell_index(gx, gy)
-			var blocked: int = 1 if get_move_cost(gx, gy) >= IMPASSABLE_MOVE_COST else 0
-			blocked_cells[idx] = blocked
+	if sphere_mode:
+		for cid in range(cell_count):
+			var blocked: int = 1 if get_move_cost(cid, 0) >= IMPASSABLE_MOVE_COST else 0
+			blocked_cells[cid] = blocked
+	else:
+		for gy in range(grid_height):
+			for gx in range(grid_width):
+				var idx := cell_index(gx, gy)
+				var blocked: int = 1 if get_move_cost(gx, gy) >= IMPASSABLE_MOVE_COST else 0
+				blocked_cells[idx] = blocked
 
 
 func rebuild_terrain_arrays() -> void:
-	var total := grid_width * grid_height
+	var total: int = gameplay_tile_count()
 	terrain_move_cost.resize(total)
 	terrain_defense.resize(total)
-	for gy in range(grid_height):
-		for gx in range(grid_width):
-			var idx := cell_index(gx, gy)
-			var t: int = get_cell_terrain(gx, gy)
+	if sphere_mode:
+		for cid in range(cell_count):
+			var t: int = get_cell_terrain(cid, 0)
 			if t < 0 or t >= TERRAIN_MOVE_COST.size():
 				t = Terrain.GRASS
-			terrain_move_cost[idx] = TERRAIN_MOVE_COST[t]
-			terrain_defense[idx] = TERRAIN_DEFENSE[t]
+			terrain_move_cost[cid] = TERRAIN_MOVE_COST[t]
+			terrain_defense[cid] = TERRAIN_DEFENSE[t]
+	else:
+		for gy in range(grid_height):
+			for gx in range(grid_width):
+				var idx := cell_index(gx, gy)
+				var t: int = get_cell_terrain(gx, gy)
+				if t < 0 or t >= TERRAIN_MOVE_COST.size():
+					t = Terrain.GRASS
+				terrain_move_cost[idx] = TERRAIN_MOVE_COST[t]
+				terrain_defense[idx] = TERRAIN_DEFENSE[t]
 	sync_blocked_from_terrain()
 
 
 func sector_col_row_for_grid(gx: int, gy: int) -> Vector2i:
 	var sector_cols := 8
 	var sector_rows := 6
+	if sphere_mode:
+		var cid: int = gx if gy == 0 else cell_index(gx, gy)
+		if cid < 0 or cid >= cell_count:
+			return Vector2i(0, 0)
+		# cell_lat / cell_lon are radians (asin / atan2).
+		var lat: float = cell_lat[cid] if cid < cell_lat.size() else 0.0
+		var lon: float = cell_lon[cid] if cid < cell_lon.size() else 0.0
+		var col: int = clampi(
+			int((lon + PI) / TAU * float(sector_cols)), 0, sector_cols - 1
+		)
+		var row: int = clampi(
+			int((PI * 0.5 - lat) / PI * float(sector_rows)), 0, sector_rows - 1
+		)
+		return Vector2i(col, row)
 	var col: int = clampi(int(float(gx) * float(sector_cols) / float(grid_width)), 0, sector_cols - 1)
 	var row: int = clampi(int(float(gy) * float(sector_rows) / float(grid_height)), 0, sector_rows - 1)
 	return Vector2i(col, row)
@@ -194,6 +323,16 @@ func region_index_for_grid(gx: int, gy: int) -> int:
 
 
 func cell_center(gx: int, gy: int) -> Vector2:
+	if sphere_mode:
+		var cid: int = gx if gy == 0 else cell_index(gx, gy)
+		if cid < 0 or cid >= cell_count:
+			return Vector2.ZERO
+		# Project sphere lat/lon (radians) into legacy 2D map space for non-globe helpers.
+		var lat: float = cell_lat[cid] if cid < cell_lat.size() else 0.0
+		var lon: float = cell_lon[cid] if cid < cell_lon.size() else 0.0
+		var u: float = (lon + PI) / TAU
+		var v: float = (PI * 0.5 - lat) / PI
+		return Vector2((u - 0.5) * map_size.x, (v - 0.5) * map_size.y)
 	var half := map_size * 0.5
 	return Vector2(
 		(gx + 0.5) * cell_size - half.x,
@@ -202,6 +341,16 @@ func cell_center(gx: int, gy: int) -> Vector2:
 
 
 func world_to_grid(pos: Vector2) -> Vector2i:
+	if sphere_mode:
+		# Inverse of cell_center equirect projection → nearest cell id as Vector2i(id, 0).
+		var u: float = clampf(pos.x / maxf(map_size.x, 1.0) + 0.5, 0.0, 1.0 - 1e-6)
+		var v: float = clampf(pos.y / maxf(map_size.y, 1.0) + 0.5, 0.0, 1.0 - 1e-6)
+		var px: int = clampi(int(u * float(grid_width)), 0, maxi(grid_width - 1, 0))
+		var py: int = clampi(int(v * float(grid_height)), 0, maxi(grid_height - 1, 0))
+		var cid: int = equirect_pixel_to_cell(px, py)
+		if cid < 0:
+			return Vector2i(0, 0)
+		return Vector2i(cid, 0)
 	var half := map_size * 0.5
 	var gx := int(floor((pos.x + half.x) / cell_size))
 	var gy := int(floor((pos.y + half.y) / cell_size))
@@ -209,12 +358,41 @@ func world_to_grid(pos: Vector2) -> Vector2i:
 
 
 func snap_world_to_cell_center(pos: Vector2) -> Vector2:
+	if sphere_mode:
+		var g := world_to_grid(pos)
+		var cid: int = g.x
+		if cid < 0 or cid >= cell_count:
+			return Vector2.ZERO
+		if not is_land_cell_id(cid):
+			return _nearest_land_center_sphere(cid)
+		return cell_center(cid, 0)
 	var g := world_to_grid(pos)
 	g.x = clampi(g.x, 0, grid_width - 1)
 	g.y = clampi(g.y, 0, grid_height - 1)
 	if not is_land_cell(g.x, g.y):
 		return _nearest_land_center(g.x, g.y)
 	return cell_center(g.x, g.y)
+
+
+func _nearest_land_center_sphere(start_id: int) -> Vector2:
+	if start_id < 0 or start_id >= cell_count:
+		return cell_center(0, 0)
+	if is_land_cell_id(start_id):
+		return cell_center(start_id, 0)
+	var visited: Dictionary = {start_id: true}
+	var queue: Array[int] = [start_id]
+	var head: int = 0
+	while head < queue.size():
+		var cur: int = queue[head]
+		head += 1
+		if is_land_cell_id(cur):
+			return cell_center(cur, 0)
+		for nbr in get_neighbors(cur):
+			if visited.has(nbr):
+				continue
+			visited[nbr] = true
+			queue.append(nbr)
+	return cell_center(start_id, 0)
 
 
 func _nearest_land_center(gx: int, gy: int) -> Vector2:

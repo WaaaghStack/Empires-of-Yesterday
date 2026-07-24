@@ -4,16 +4,17 @@ Runtime budgets and knobs for the 360×180 Earth territory sim. Canonical mechan
 
 ## Live authority pipeline (must stay cheap)
 
-Live Play is **WorldDataset in Rust** + **PresentationTxn apply-only** on the Godot side (not full-table paint):
+Live Play is **WorldDataset in Rust** (sim engine) + **SCD1 domain versioned pulls** on the Godot side (visualization only — apply-only, not dual-sim):
 
 | Concern | Live behavior | Where |
 |---------|---------------|--------|
-| **PresentationTxn** | Pull deltas once/frame (`owner`, `path_built`, roads, markers); apply to render cache only | `presentation_txn.rs`, `pull_presentation_txn` |
+| **SCD1 domain pulls** | Per-domain `pull_domain_since` rows with `version > last`; full seed only at start / allow-listed gap; structure tombstones via `removed_ids` | `domain_version.rs`, `Scd1DomainPull.gd`, `WorldConquestScreen._flush_live_presentation_delta` |
 | **Roads MultiMesh** | **Append-only** instance growth on path/network extend; full rewrite only on remove/reset | `EarthGlobeMap._append_road_multimesh_transforms` |
 | **Sim catch-up cap** | When prior frame > `FRAME_BUDGET_MS` (16 ms), cap catch-up to **1** sim step | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` |
 | **Construction drain order** | Ordered queue drain: corridors → beachhead → roads → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu (never same frame as roads/markers/overlay; gpu blocked N+1 after overlay) | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` |
+| **Unit replan FPS** | Path-block waits (no BFS); free-goal miss skip + soft goal claims; O(1) occupancy maps | `agents.rs`, `bombers.rs` |
 
-Do not reintroduce per-step full pressure/R8 pulls, full structure snapshots every frame, or uncapped multi-step catch-up on live.
+Do not reintroduce PresentationTxn as the live paint path, per-step full pressure/R8 pulls, full structure snapshots every frame, or uncapped multi-step catch-up on live.
 
 ---
 
@@ -61,6 +62,7 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | **Deferred owner GPU upload** | `OutpostConstructionQueue.request_gpu_upload`, `EarthGlobeMap.flush_pending_owner_gpu_upload` | GPU commit only via queue drain slot; respects `OVERLAY_GPU_UPLOAD_MAX_HZ` |
 | **Budget-aware sim catch-up** | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` | Caps `advance_dt` to 1 step when prior frame exceeded `FRAME_BUDGET_MS` (16 ms) |
 | **Incremental roads/markers** | `EarthGlobeMap.sync_roads(changed_sids)`, `refresh_connecting_markers` | Path cell growth syncs only dirty structure ids; pulse refresh touches connecting/building markers only |
+| **Road ribbons (3-lane)** | `EarthGlobeMap._ribbon_lane_transforms` | MultiMesh black\|white\|black lanes ~3 cell widths; equirect cell-paint disabled (`ROAD_CELL_PAINT=false`) |
 | **Precomputed border mask** | `EarthGlobeMap._border_bytes_cache`, `ownership_display.gdshader` | 2 texture fetches per fragment instead of 9 |
 | **Spawner FFI cache** | `BattleTerritoryRustBackend._maybe_update_spawners` | Skips `update_spawners` when placed spawners unchanged |
 | **GPU fluid shader** | `shaders/globe/fluid_display.gdshader`, `EarthGlobeMap.apply_fluid_from_pressures_gpu` | No CPU `bake_fluid_rgba` on live path; camera-facing tex upload |
@@ -78,7 +80,8 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | **Surface position LUT** | `EarthGlobeMap._surface_lut` | Soldiers/markers/roads skip per-frame trig |
 | **Road/link segment pools** | `EarthGlobeMap._road_seg_pool`, `_link_seg_pool` | Reuses `MeshInstance3D` nodes |
 | **Incremental road MultiMesh** | `EarthGlobeMap._append_road_multimesh_transforms` | Path/network growth appends instances only; full rewrite only on remove/reset |
-| **PresentationTxn (live)** | `presentation_txn.rs` + `pull_presentation_txn` | Rust main tables + change feed; Godot applies path_built/road/owner deltas only |
+| **SCD1 domain pulls (live)** | `Scd1DomainPull.gd` + `pull_domain_since` | Rust main tables + per-domain epochs; Godot applies rows/tombstones only |
+| **PresentationTxn (legacy/QA)** | `presentation_txn.rs` + `pull_presentation_txn` | Not live Play paint — QA/goldens only |
 | **Event-driven route portals** | `WorldConquestScreen._ensure_route_portals_for_team` | Rebuild when versions or active team change — not on every place/pathfind |
 | **Dirty-flag maintenance** | `WorldConquestScreen._has_active_construction`, `_bridges_repaired` | Skips outpost/bridge loops when idle |
 | **Frame phase profiler** | `FrameBudgetProfiler.gd` | Always samples `_process` ms for F3 HUD; spike logging when `BATTLE_FRAME_BUDGET_LOG=1`; fps_drop tags `likely_cpu`/`likely_gpu` + phase dump |

@@ -47,6 +47,12 @@ func setup(battle_data) -> void:
 func enable_gpu_pressure_mode() -> void:
 	if _battle_data == null or _sprite == null:
 		return
+	if _battle_data.sphere_mode:
+		push_warning(
+			"BattleTileOwnershipOverlay: rect GPU pressure overlay skipped in sphere WC "
+			+ "(EarthGlobeMap owns fluid display)."
+		)
+		return
 	_gpu_pressure_mode = true
 	var w: int = _battle_data.grid_width
 	var h: int = _battle_data.grid_height
@@ -115,6 +121,12 @@ func apply_live_state(
 	hostile: PackedFloat32Array,
 ) -> void:
 	if not _gpu_pressure_mode or _battle_data == null:
+		return
+	if _battle_data.sphere_mode:
+		push_warning(
+			"BattleTileOwnershipOverlay: apply_live_state skipped in sphere WC "
+			+ "(do not index 360x180 overlay as gameplay cells)."
+		)
 		return
 	if friendly.is_empty() or hostile.is_empty():
 		return

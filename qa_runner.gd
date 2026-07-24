@@ -43,6 +43,7 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://RunState.gd",
 	"res://UnitSimulationStore.gd",
 	"res://WorldConquestConfig.gd",
+	"res://SphereGridLib.gd",
 	"res://WorldConquestMapGenerator.gd",
 	"res://WorldConquestOutpostBuild.gd",
 	"res://WorldConquestResources.gd",
@@ -50,6 +51,7 @@ const SCRIPT_PATHS: Array[String] = [
 	"res://WorldDatasetAssert.gd",
 	"res://WorldMapBakeLib.gd",
 	"res://WorldMapCatalog.gd",
+	"res://WorldPackLib.gd",
 	"res://OutpostConstructionQueue.gd",
 	"res://BuilderAgentLib.gd",
 	"res://EnemyStrategy.gd",
@@ -209,6 +211,15 @@ func _validate_world_dataset_on_screen(screen: Control) -> void:
 
 
 func _validate_world_conquest_smoke() -> void:
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	if WorldConquestConfigLib.SPHERE_GRID_ENABLED:
+		_validate_sphere_grid_smoke()
+		_validate_rect_globe_mesh_short()
+	else:
+		_validate_rect_world_conquest_smoke()
+
+
+func _validate_rect_world_conquest_smoke() -> void:
 	_log("-- World Conquest smoke (360x180 map + globe mesh) --")
 	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
 	const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
@@ -237,6 +248,126 @@ func _validate_world_conquest_smoke() -> void:
 		_fail("world conquest fluid globe mesh empty")
 		return
 	_log("OK  world conquest smoke %dx%d claimable=%d" % [bmap.grid_width, bmap.grid_height, claimable])
+
+
+func _validate_rect_globe_mesh_short() -> void:
+	_log("-- Rect globe mesh short (EarthMapGenerator sanity) --")
+	const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
+	const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
+	var bmap = EarthMapGeneratorLib.generate(44201)
+	var globe: ArrayMesh = EarthGlobeMeshLib.build_globe(bmap)
+	if globe.get_surface_count() < 1:
+		_fail("rect globe mesh short check empty")
+		return
+	_log("OK  rect globe mesh short")
+
+
+func _validate_sphere_grid_smoke() -> void:
+	_log("-- Sphere grid smoke (equal-area icosahedron + globe mesh) --")
+	const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
+	const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
+	const EarthGlobeMeshLib := preload("res://EarthGlobeMesh.gd")
+	const SphereGridLib := preload("res://SphereGridLib.gd")
+	const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
+	const seed_val: int = 44201
+	var bmap = WorldConquestMapGeneratorLib.generate(WorldMapCatalogLib.MAP_EARTH, seed_val)
+	if not bmap.sphere_mode:
+		_fail("sphere grid smoke: expected sphere_mode true")
+		return
+	var cell_count: int = bmap.cell_count
+	if cell_count <= 1000:
+		_fail("sphere grid smoke: cell_count too low (%d)" % cell_count)
+		return
+	if bmap.neighbors.size() != cell_count * 6:
+		_fail(
+			"sphere grid smoke: neighbors size %d != cell_count*6 (%d)"
+			% [bmap.neighbors.size(), cell_count * 6]
+		)
+		return
+	if bmap.neighbor_counts.size() != cell_count:
+		_fail(
+			"sphere grid smoke: neighbor_counts size %d != cell_count (%d)"
+			% [bmap.neighbor_counts.size(), cell_count]
+		)
+		return
+	if bmap.gameplay_tile_count() != cell_count:
+		_fail(
+			"sphere grid smoke: gameplay_tile_count %d != cell_count %d"
+			% [bmap.gameplay_tile_count(), cell_count]
+		)
+		return
+	if (
+		bmap.grid_width != WorldConquestConfigLib.GRID_W
+		or bmap.grid_height != WorldConquestConfigLib.GRID_H
+	):
+		_fail(
+			"sphere grid smoke: overlay grid %dx%d != GRID_W/H"
+			% [bmap.grid_width, bmap.grid_height]
+		)
+		return
+	for home_name in ["player_home_grid", "enemy_home_grid"]:
+		var home: Vector2i = bmap.get(home_name)
+		if home.y != 0:
+			_fail("sphere grid smoke: %s y=%d (expected 0)" % [home_name, home.y])
+			return
+		if home.x < 0 or home.x >= cell_count:
+			_fail("sphere grid smoke: %s cell_id invalid %s" % [home_name, home])
+			return
+	# WorldConquestScreen._is_on_map_grid: sphere uses cell_id with gy==0, not overlay 360×180.
+	const ON_MAP_PROBE: int = 5000
+	if not (ON_MAP_PROBE >= 0 and ON_MAP_PROBE < cell_count):
+		_fail(
+			"sphere grid smoke: cell_id %d not on-map (_is_on_map_grid equivalent)"
+			% ON_MAP_PROBE
+		)
+		return
+	var claimable: int = 0
+	for cid in range(cell_count):
+		if bmap.is_land_cell_id(cid):
+			claimable += 1
+	if claimable <= 1000:
+		_fail("sphere grid smoke: claimable land too low (%d)" % claimable)
+		return
+	var small: Dictionary = SphereGridLib.generate(8)
+	var small_n: int = int(small.get("cell_count", 0))
+	var expect_small: int = 10 * 8 * 8 + 2
+	if small_n != expect_small:
+		_fail("sphere grid f=8 cell_count %d != %d" % [small_n, expect_small])
+		return
+	var small_counts: PackedByteArray = small.get("neighbor_count", PackedByteArray())
+	for i in range(small_n):
+		var deg: int = int(small_counts[i]) if i < small_counts.size() else -1
+		if deg < 5 or deg > 6:
+			_fail("sphere grid f=8 cell %d neighbor degree %d (expected 5-6)" % [i, deg])
+			return
+	if ClassDB.class_exists("TerritorySim"):
+		var sim = ClassDB.instantiate("TerritorySim")
+		if sim != null and sim.has_method("generate_sphere_grid"):
+			var rust_grid: Dictionary = sim.generate_sphere_grid(2)
+			var rust_n: int = int(rust_grid.get("cell_count", 0))
+			if rust_n != 42:
+				_fail("TerritorySim.generate_sphere_grid(f=2) cell_count %d != 42" % rust_n)
+				return
+			_log("OK  TerritorySim.generate_sphere_grid f=2 cell_count=42")
+	var globe: ArrayMesh = EarthGlobeMeshLib.build_sphere_grid_mesh(bmap, false)
+	if globe.get_surface_count() < 1:
+		_fail("sphere grid smoke: build_sphere_grid_mesh empty")
+		return
+	var fluid: ArrayMesh = EarthGlobeMeshLib.build_sphere_grid_mesh(bmap, true)
+	if fluid.get_surface_count() < 1:
+		_fail("sphere grid smoke: build_sphere_grid_mesh fluid empty")
+		return
+	_log(
+		"OK  sphere grid smoke cells=%d claimable=%d overlay=%dx%d homes=%s vs %s"
+		% [
+			cell_count,
+			claimable,
+			bmap.grid_width,
+			bmap.grid_height,
+			bmap.player_home_grid,
+			bmap.enemy_home_grid,
+		]
+	)
 
 
 func _validate_world_conquest_bench() -> void:
@@ -1884,7 +2015,7 @@ func _validate_builder_authority_refuse() -> void:
 		return
 	# Mock empty bots/structures — refuse must fire before any travel work.
 	var frame: Dictionary = BuilderAgentLib.step_frame(
-		1.0 / 60.0, [], [], {}, 360, null, null, false
+		1.0 / 60.0, [], [], {}, null, null, false
 	)
 	if not bool(frame.get("refused", false)):
 		_fail(
@@ -1893,7 +2024,7 @@ func _validate_builder_authority_refuse() -> void:
 		return
 	# With allow_legacy=true the offline kernel may run (selfcheck path); empty bots is a no-op.
 	var legacy: Dictionary = BuilderAgentLib.step_frame(
-		1.0 / 60.0, [], [], {}, 360, null, null, true
+		1.0 / 60.0, [], [], {}, null, null, true
 	)
 	if bool(legacy.get("refused", false)):
 		_fail("BuilderAgentLib.step_frame should not refuse when allow_legacy=true")

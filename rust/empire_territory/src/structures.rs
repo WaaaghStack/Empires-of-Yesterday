@@ -49,6 +49,9 @@ pub struct StructureStore {
     pub structures: HashMap<i32, StructureRecord>,
     pub persisted_corridors: Vec<PersistedCorridor>,
     pub ready: bool,
+    /// SCD1 tombstones: removed structure id → domain version of the delete.
+    /// Incremental pulls emit these so Godot can drop ghost markers without a full resync.
+    pub tombstones: HashMap<i32, u64>,
 }
 
 pub fn kind_from_str(kind: &str) -> u8 {
@@ -93,6 +96,7 @@ impl StructureStore {
     pub fn clear(&mut self) {
         self.structures.clear();
         self.persisted_corridors.clear();
+        self.tombstones.clear();
         self.ready = false;
     }
 
@@ -102,6 +106,7 @@ impl StructureStore {
         corridors: Vec<PersistedCorridor>,
     ) {
         self.structures.clear();
+        self.tombstones.clear();
         for st in structures {
             self.structures.insert(st.id, st);
         }
@@ -110,14 +115,149 @@ impl StructureStore {
     }
 
     pub fn upsert(&mut self, record: StructureRecord) {
+        self.tombstones.remove(&record.id);
         self.structures.insert(record.id, record);
         self.ready = true;
     }
 
-    pub fn remove(&mut self, sid: i32) {
-        self.structures.remove(&sid);
+    /// Remove structure and record a tombstone at `version` (structures domain epoch).
+    pub fn remove_with_tombstone(&mut self, sid: i32, version: u64) -> bool {
+        if self.structures.remove(&sid).is_some() {
+            self.tombstones.insert(sid, version);
+            true
+        } else {
+            false
+        }
     }
 
+    pub fn remove(&mut self, sid: i32) {
+        let _ = self.remove_with_tombstone(sid, 0);
+    }
+
+    /// Tombstone sids with version > last (for SCD1 incremental pull).
+    pub fn tombstones_since(&self, last: u64) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .tombstones
+            .iter()
+            .filter(|(_, &v)| v > last)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// SCD1 structures pull helper (used by `TerritorySim::pull_domain_since`).
+/// Returns (living structure ids to emit, removed tombstone ids).
+/// Full pulls omit tombstones (client replaces the whole cache).
+pub fn scd1_structures_pull_ids(
+    store: &StructureStore,
+    last: u64,
+    full: bool,
+) -> (Vec<i32>, Vec<i32>) {
+    let mut living: Vec<i32> = store
+        .structures
+        .iter()
+        .filter(|(_, rec)| full || rec.version > last)
+        .map(|(&id, _)| id)
+        .collect();
+    living.sort_unstable();
+    let removed = if full {
+        Vec::new()
+    } else {
+        store.tombstones_since(last)
+    };
+    (living, removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_emits_tombstone_and_upsert_clears() {
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 7,
+            team: 1,
+            kind: KIND_SPAWNER,
+            state: STATE_ACTIVE,
+            gx: 1,
+            gy: 0,
+            path_keys: vec![],
+            path_built: 0.0,
+            path_len: 0,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 1,
+        });
+        assert!(store.remove_with_tombstone(7, 5));
+        assert!(!store.structures.contains_key(&7));
+        assert_eq!(store.tombstones_since(4), vec![7]);
+        assert!(store.tombstones_since(5).is_empty());
+        store.upsert(StructureRecord {
+            id: 7,
+            team: 1,
+            kind: KIND_SPAWNER,
+            state: STATE_ACTIVE,
+            gx: 1,
+            gy: 0,
+            path_keys: vec![],
+            path_built: 0.0,
+            path_len: 0,
+            corridor_synced_built: 0,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 6,
+        });
+        assert!(!store.tombstones.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_then_scd1_pull_emits_removed_ids() {
+        let mut store = StructureStore::default();
+        store.upsert(StructureRecord {
+            id: 42,
+            team: 1,
+            kind: KIND_BARRACKS,
+            state: STATE_ACTIVE,
+            gx: 3,
+            gy: 0,
+            path_keys: vec![1, 2, 3],
+            path_built: 3.0,
+            path_len: 3,
+            corridor_synced_built: 3,
+            health: -1.0,
+            build_remaining: -1.0,
+            spawn_timer: 0.0,
+            version: 2,
+        });
+        // Client last_version = 2 is caught up; remove stamps tombstone v=3.
+        assert!(store.remove_with_tombstone(42, 3));
+        let (living, removed) = scd1_structures_pull_ids(&store, 2, false);
+        assert!(
+            living.is_empty(),
+            "deleted structure must not appear in living rows"
+        );
+        assert_eq!(
+            removed,
+            vec![42],
+            "incremental pull must emit removed_ids for tombstone"
+        );
+        // Full seed: no tombstones (replace-all client cache).
+        let (full_living, full_removed) = scd1_structures_pull_ids(&store, 2, true);
+        assert!(full_living.is_empty());
+        assert!(full_removed.is_empty());
+        // Caught-up after applying v=3: no more removed.
+        let (_, rem_caught) = scd1_structures_pull_ids(&store, 3, false);
+        assert!(rem_caught.is_empty());
+    }
+}
+
+impl StructureStore {
     pub fn patch_path_built(&mut self, sid: i32, path_built: f32) -> bool {
         let Some(st) = self.structures.get_mut(&sid) else {
             return false;

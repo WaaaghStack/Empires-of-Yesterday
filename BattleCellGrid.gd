@@ -3,6 +3,9 @@ extends RefCounted
 
 const UnitSimulationStoreLib := preload("res://UnitSimulationStore.gd")
 
+## Rect battle grid only (gx, gy row-major). Sphere WC uses cell_id arrays + graph neighbors.
+## Do not call setup() with sphere map_data — it would size arrays as overlay 360×180.
+
 ## Dominions-style stacking: many units per tile; only enemy presence blocks entry.
 const MAX_SIZE_PER_CELL := 64
 const MASK_FRIENDLY := 1
@@ -22,6 +25,12 @@ var _hostile_count_by_cell: PackedInt32Array = PackedInt32Array()
 
 
 func setup(map_data) -> void:
+	if map_data != null and map_data.sphere_mode:
+		push_error(
+			"BattleCellGrid: rect unit stacking grid is incompatible with sphere WC "
+			+ "(use cell_id-based stores, not gx/gy row-major)."
+		)
+		return
 	battle_data = map_data
 	width = map_data.grid_width if map_data else 0
 	height = map_data.grid_height if map_data else 0

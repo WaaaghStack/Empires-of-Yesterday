@@ -7,8 +7,6 @@ use crate::sim::{
     CLAIM_DOMINANCE_RATIO, MIN_CLAIM_PRESSURE,
 };
 
-const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
 /// Per-team corridor + bridge masks synced from Godot / world-edit authority.
 #[derive(Clone, Debug, Default)]
 pub struct AgentNavMasks<'a> {
@@ -155,16 +153,13 @@ impl<'a> BattleNavView<'a> {
         if !self.is_safe_stance(idx) {
             return false;
         }
-        let w = self.kernel.grid_w;
-        let gx = (idx as i32) % w;
-        let gy = (idx as i32) / w;
-        for (dx, dy) in CARDINAL {
-            let ni = self.kernel.cell_index(gx + dx, gy + dy);
-            if ni >= 0 && self.is_advance_goal(ni as usize) {
-                return true;
+        let mut found = false;
+        self.kernel.for_each_neighbor_idx(idx, |ni| {
+            if !found && self.is_advance_goal(ni) {
+                found = true;
             }
-        }
-        false
+        });
+        found
     }
 
     /// Retreat goal: back on friendly-owned or team infra.
@@ -205,13 +200,36 @@ impl NavGraph for BattleNavView<'_> {
         self.is_passable_cell(idx)
     }
 
-    fn step_cost(&self, idx: usize, ctx: RouteContext) -> i32 {
-        if self.is_infra(idx) {
+    fn step_cost(&self, _from: usize, to: usize, ctx: RouteContext) -> i32 {
+        if self.is_infra(to) {
             ctx.land_step
-        } else if self.is_land_cell(idx) {
+        } else if self.is_land_cell(to) {
             ctx.land_step
         } else {
             ctx.water_step
         }
+    }
+
+    fn uses_graph_neighbors(&self) -> bool {
+        self.kernel.graph_topology
+    }
+
+    fn neighbor_at(&self, idx: usize, slot: usize) -> Option<usize> {
+        if !self.kernel.graph_topology || idx >= self.kernel.neighbors.len() || slot >= 6 {
+            return None;
+        }
+        let ni = self.kernel.neighbors[idx][slot];
+        if ni >= 0 {
+            Some(ni as usize)
+        } else {
+            None
+        }
+    }
+
+    fn neighbor_count_of(&self, idx: usize) -> usize {
+        if !self.kernel.graph_topology || idx >= self.kernel.neighbor_count.len() {
+            return 0;
+        }
+        self.kernel.neighbor_count[idx] as usize
     }
 }

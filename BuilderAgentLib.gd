@@ -58,6 +58,12 @@ static func path_built_after_seg(seg_from_idx: int) -> float:
 	return float(seg_from_idx + 2)
 
 
+static func _gameplay_grid_w(map_data) -> int:
+	if map_data == null:
+		return 0
+	return map_data.cell_count if map_data.sphere_mode else map_data.grid_width
+
+
 static func find_structure(structures: Array, sid: int) -> Dictionary:
 	if sid < 0:
 		return {}
@@ -77,7 +83,7 @@ static func assign_builder_jobs(
 	bots: Array,
 	queues: Dictionary,
 	structures: Array,
-	grid_w: int,
+	map_data,
 	team_filter: int = -1,
 ) -> void:
 	for bot: Dictionary in bots:
@@ -94,7 +100,7 @@ static func assign_builder_jobs(
 				q.remove_at(0)
 				continue
 			q.remove_at(0)
-			start_builder_job_chained(bot, sid, structures, grid_w)
+			start_builder_job_chained(bot, sid, structures, map_data)
 			break
 
 
@@ -113,13 +119,13 @@ static func start_builder_job(bot: Dictionary, sid: int, structures: Array) -> v
 ## Assign CONNECTING work from the bot's physical grid position (orbit, chain, or
 ## prior job end). Does not call start_builder_job — seg indices come from pos.
 static func start_builder_job_chained(
-	bot: Dictionary, sid: int, structures: Array, grid_w: int
+	bot: Dictionary, sid: int, structures: Array, map_data
 ) -> void:
-	var from_pos: Vector2 = work_grid_pos(bot, structures, grid_w)
+	var from_pos: Vector2 = work_grid_pos(bot, structures, map_data)
 	var st: Dictionary = find_structure(structures, sid)
 	if st.is_empty():
 		return
-	_apply_bot_job_from_position(bot, sid, st, from_pos, grid_w, true)
+	_apply_bot_job_from_position(bot, sid, st, from_pos, map_data, true)
 
 
 static func _apply_bot_job_from_position(
@@ -127,13 +133,14 @@ static func _apply_bot_job_from_position(
 	sid: int,
 	st: Dictionary,
 	from_pos: Vector2,
-	grid_w: int,
+	map_data,
 	allow_chain: bool,
 ) -> void:
 	bot["state"] = STATE_WORKING
 	bot["job_sid"] = sid
 	bot["return_t"] = 0.0
 	bot.erase("chain_active")
+	var grid_w: int = _gameplay_grid_w(map_data)
 	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
 	var path_built: float = float(st.get("path_built", 1.0))
 	var work_seg: int = next_seg_index(path_built)
@@ -141,13 +148,13 @@ static func _apply_bot_job_from_position(
 		bot["seg_from_idx"] = work_seg
 		bot["seg_t"] = 0.0
 		return
-	var snap: Dictionary = _snap_pos_to_work_path(packed, grid_w, from_pos, work_seg)
+	var snap: Dictionary = _snap_pos_to_work_path(packed, map_data, from_pos, work_seg)
 	bot["seg_from_idx"] = int(snap.get("seg_from_idx", work_seg))
 	bot["seg_t"] = float(snap.get("seg_t", 0.0))
 	if not allow_chain:
 		return
 	var seg_idx: int = int(bot.get("seg_from_idx", work_seg))
-	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
+	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w, map_data)
 	var target := Vector2(float(from_cell.x), float(from_cell.y))
 	if from_pos.distance_squared_to(target) > 0.01:
 		bot["chain_gx_f"] = from_pos.x
@@ -160,16 +167,38 @@ static func _apply_bot_job_from_position(
 
 
 static func _snap_pos_to_work_path(
-	packed: PackedInt32Array, grid_w: int, pos: Vector2, work_seg: int
+	packed: PackedInt32Array, map_data, pos: Vector2, work_seg: int
 ) -> Dictionary:
 	if packed.size() < 2 or work_seg >= packed.size() - 1:
 		return {"seg_from_idx": work_seg, "seg_t": 0.0}
+	var grid_w: int = _gameplay_grid_w(map_data)
+	if map_data != null and map_data.sphere_mode:
+		# Nearest path vertex by angular distance on cell_positions (not cell_id delta).
+		var best_seg: int = work_seg
+		var best_d: float = INF
+		var pos_key: int = int(round(pos.x))
+		if pos_key < 0 or pos_key >= map_data.cell_positions.size():
+			return {"seg_from_idx": work_seg, "seg_t": 0.0}
+		var pref: Vector3 = map_data.cell_positions[pos_key].normalized()
+		for seg_idx in range(work_seg, packed.size() - 1):
+			var d: float = INF
+			for slot in range(2):
+				var key: int = packed[seg_idx + slot]
+				if key < 0 or key >= map_data.cell_positions.size():
+					continue
+				var p: Vector3 = map_data.cell_positions[key].normalized()
+				var ang: float = acos(clampf(pref.dot(p), -1.0, 1.0))
+				d = minf(d, ang)
+			if d < best_d:
+				best_d = d
+				best_seg = seg_idx
+		return {"seg_from_idx": best_seg, "seg_t": 0.0}
 	var best_seg: int = work_seg
 	var best_t: float = 0.0
 	var best_d2: float = INF
 	for seg_idx in range(work_seg, packed.size() - 1):
-		var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
-		var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w)
+		var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w, map_data)
+		var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w, map_data)
 		var a := Vector2(float(from_cell.x), float(from_cell.y))
 		var b := Vector2(float(to_cell.x), float(to_cell.y))
 		var ab: Vector2 = b - a
@@ -186,7 +215,7 @@ static func _snap_pos_to_work_path(
 	return {"seg_from_idx": best_seg, "seg_t": best_t}
 
 
-static func work_grid_pos(bot: Dictionary, structures: Array, grid_w: int) -> Vector2:
+static func work_grid_pos(bot: Dictionary, structures: Array, map_data) -> Vector2:
 	var state: String = str(bot.get("state", ""))
 	var home: Vector2i = Vector2i(int(bot.get("home_gx", 0)), int(bot.get("home_gy", 0)))
 	if state == STATE_IDLE:
@@ -209,22 +238,60 @@ static func work_grid_pos(bot: Dictionary, structures: Array, grid_w: int) -> Ve
 		)
 		return chain_from.lerp(chain_to, chain_t)
 	var st: Dictionary = find_structure(structures, int(bot.get("job_sid", -1)))
+	var grid_w: int = _gameplay_grid_w(map_data)
 	if st.is_empty() or grid_w <= 0:
 		return orbit_grid(home, float(bot.get("orbit_angle", 0.0)))
 	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
 	var seg_idx: int = int(bot.get("seg_from_idx", 0))
 	if packed.size() < 2 or seg_idx >= packed.size() - 1:
 		return Vector2(float(int(st.get("gx", 0))), float(int(st.get("gy", 0))))
-	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w)
-	var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w)
+	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w, map_data)
+	var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w, map_data)
 	var t: float = clampf(float(bot.get("seg_t", 0.0)), 0.0, 1.0)
+	# Sphere cell_ids are not spatial — keep discrete for logic; visuals use work_sphere_world_pos.
+	if map_data != null and map_data.sphere_mode:
+		return Vector2(float(from_cell.x if t < 1.0 else to_cell.x), 0.0)
 	return Vector2(float(from_cell.x), float(from_cell.y)).lerp(
 		Vector2(float(to_cell.x), float(to_cell.y)), t
 	)
 
 
-static func begin_builder_return(bot: Dictionary, structures: Array, grid_w: int) -> void:
-	var pos: Vector2 = work_grid_pos(bot, structures, grid_w)
+## Sphere-safe world position: slerp between graph path cells (never lerp cell_id numbers).
+static func work_sphere_world_pos(
+	bot: Dictionary, structures: Array, map_data, globe, lift: float
+) -> Vector3:
+	if globe == null or map_data == null:
+		return Vector3.ZERO
+	var home: Vector2i = Vector2i(int(bot.get("home_gx", 0)), int(bot.get("home_gy", 0)))
+	var state: String = str(bot.get("state", ""))
+	if state == STATE_IDLE:
+		return globe.orbit_surface_pos(home, float(bot.get("orbit_angle", 0.0)), lift)
+	if state == STATE_RETURNING:
+		var ret_t: float = clampf(float(bot.get("return_t", 0.0)), 0.0, 1.0)
+		var from_cid: int = int(round(float(bot.get("return_gx_f", home.x))))
+		return globe.grid_lerp_surface_pos(Vector2i(from_cid, 0), home, ret_t, lift)
+	if bool(bot.get("chain_active", false)):
+		var chain_t: float = clampf(float(bot.get("chain_t", 0.0)), 0.0, 1.0)
+		var a := Vector2i(int(round(float(bot.get("chain_gx_f", home.x)))), 0)
+		var b := Vector2i(int(round(float(bot.get("chain_tx_f", a.x)))), 0)
+		return globe.grid_lerp_surface_pos(a, b, chain_t, lift)
+	var st: Dictionary = find_structure(structures, int(bot.get("job_sid", -1)))
+	if st.is_empty():
+		return globe.orbit_surface_pos(home, float(bot.get("orbit_angle", 0.0)), lift)
+	var packed: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+	var seg_idx: int = int(bot.get("seg_from_idx", 0))
+	var grid_w: int = _gameplay_grid_w(map_data)
+	if packed.size() < 2 or seg_idx >= packed.size() - 1 or grid_w <= 0:
+		var gx: int = int(st.get("gx", 0))
+		return globe.grid_lerp_surface_pos(Vector2i(gx, 0), Vector2i(gx, 0), 0.0, lift)
+	var from_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx], grid_w, map_data)
+	var to_cell: Vector2i = OutpostBuildLib.grid_from_packed_key(packed[seg_idx + 1], grid_w, map_data)
+	var t: float = clampf(float(bot.get("seg_t", 0.0)), 0.0, 1.0)
+	return globe.grid_lerp_surface_pos(from_cell, to_cell, t, lift)
+
+
+static func begin_builder_return(bot: Dictionary, structures: Array, map_data) -> void:
+	var pos: Vector2 = work_grid_pos(bot, structures, map_data)
 	bot["return_gx_f"] = pos.x
 	bot["return_gy_f"] = pos.y
 	bot["state"] = STATE_RETURNING
@@ -236,7 +303,7 @@ static func begin_builder_return(bot: Dictionary, structures: Array, grid_w: int
 ## After a job ends: start the next queued CONNECTING job from the bot's current
 ## position, or begin the return-to-orbit lerp only when the team queue is empty.
 static func try_assign_next_job(
-	bot: Dictionary, queues: Dictionary, structures: Array, grid_w: int
+	bot: Dictionary, queues: Dictionary, structures: Array, map_data
 ) -> bool:
 	var team: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
 	var q: Array = job_queue_for_team(queues, team)
@@ -247,9 +314,9 @@ static func try_assign_next_job(
 			q.remove_at(0)
 			continue
 		q.remove_at(0)
-		start_builder_job_chained(bot, sid, structures, grid_w)
+		start_builder_job_chained(bot, sid, structures, map_data)
 		return true
-	begin_builder_return(bot, structures, grid_w)
+	begin_builder_return(bot, structures, map_data)
 	return false
 
 
@@ -295,11 +362,11 @@ static func step_frame(
 	bots: Array,
 	structures: Array,
 	queues: Dictionary,
-	grid_w: int,
 	map_data = null,
 	tile_control = null,
 	allow_legacy: bool = false,
 ) -> Dictionary:
+	var grid_w: int = _gameplay_grid_w(map_data)
 	var result := {
 		"visual_dirty": false,
 		"cell_arrivals": [],
@@ -348,7 +415,7 @@ static func step_frame(
 		var st: Dictionary = find_structure(structures, job_sid)
 		if st.is_empty() or str(st.get("state", "")) != OutpostBuildLib.STATE_CONNECTING:
 			var team_bad: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-			if not try_assign_next_job(bot, queues, structures, grid_w):
+			if not try_assign_next_job(bot, queues, structures, map_data):
 				if not result["reassign_teams"].has(team_bad):
 					result["reassign_teams"].append(team_bad)
 			result["visual_dirty"] = true
@@ -361,7 +428,7 @@ static func step_frame(
 			if bool(done_early.get("is_corridor_link", false)):
 				result["completed_corridor_sids"].append(int(done_early.get("sid", -1)))
 			var team_done: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-			if not try_assign_next_job(bot, queues, structures, grid_w):
+			if not try_assign_next_job(bot, queues, structures, map_data):
 				if not result["reassign_teams"].has(team_done):
 					result["reassign_teams"].append(team_done)
 			result["visual_dirty"] = true
@@ -382,7 +449,7 @@ static func step_frame(
 				if bool(done_full.get("is_corridor_link", false)):
 					result["completed_corridor_sids"].append(int(done_full.get("sid", -1)))
 				var team_full: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-				if not try_assign_next_job(bot, queues, structures, grid_w):
+				if not try_assign_next_job(bot, queues, structures, map_data):
 					if not result["reassign_teams"].has(team_full):
 						result["reassign_teams"].append(team_full)
 				job_finished = true
@@ -394,7 +461,7 @@ static func step_frame(
 				if bool(done_seg.get("is_corridor_link", false)):
 					result["completed_corridor_sids"].append(int(done_seg.get("sid", -1)))
 				var team_seg: int = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
-				if not try_assign_next_job(bot, queues, structures, grid_w):
+				if not try_assign_next_job(bot, queues, structures, map_data):
 					if not result["reassign_teams"].has(team_seg):
 						result["reassign_teams"].append(team_seg)
 				job_finished = true
@@ -406,7 +473,7 @@ static func step_frame(
 		bot["seg_t"] = seg_t
 		result["visual_dirty"] = true
 	for team_var in result["reassign_teams"]:
-		assign_builder_jobs(bots, queues, structures, grid_w, int(team_var))
+		assign_builder_jobs(bots, queues, structures, map_data, int(team_var))
 	if map_data != null:
 		result["building_timer_result"] = step_building_timers(dt, structures, map_data, tile_control)
 	return result
@@ -480,13 +547,13 @@ static func run_selfcheck() -> Dictionary:
 	}
 	var fake_map = BattleMapDataLib.new()
 	fake_map.grid_width = GRID_W
-	assign_builder_jobs(bots, queues, structures, GRID_W)
+	assign_builder_jobs(bots, queues, structures, fake_map)
 	var cells: int = 0
 	var steps: int = 0
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
 		var frame: Dictionary = step_frame(
-			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null, true
+			SELFCHECK_DT, bots, structures, queues, fake_map, null, true
 		)
 		for ev: Dictionary in frame.get("cell_arrivals", []):
 			cells += 1
@@ -535,17 +602,17 @@ static func run_chain_selfcheck() -> Dictionary:
 	var queues: Dictionary = {"friendly": [1, 2], "hostile": []}
 	var fake_map = BattleMapDataLib.new()
 	fake_map.grid_width = GRID_W
-	assign_builder_jobs(bots, queues, structures, GRID_W)
+	assign_builder_jobs(bots, queues, structures, fake_map)
 	var steps: int = 0
 	var saw_returning: bool = false
 	var saw_chain: bool = false
 	var jobs_done: int = 0
 	var chain_assign_ok: bool = false
-	var prev_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
+	var prev_pos: Vector2 = work_grid_pos(bot, structures, fake_map)
 	while steps < SELFCHECK_MAX_STEPS:
 		steps += 1
 		var frame: Dictionary = step_frame(
-			SELFCHECK_DT, bots, structures, queues, GRID_W, fake_map, null, true
+			SELFCHECK_DT, bots, structures, queues, fake_map, null, true
 		)
 		if str(bot.get("state", "")) == STATE_RETURNING:
 			var still_connecting: int = 0
@@ -556,7 +623,7 @@ static func run_chain_selfcheck() -> Dictionary:
 				saw_returning = true
 		if bool(bot.get("chain_active", false)):
 			saw_chain = true
-		var cur_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
+		var cur_pos: Vector2 = work_grid_pos(bot, structures, fake_map)
 		if cur_pos.distance_squared_to(prev_pos) > 36.0:
 			var jump_fail: String = (
 				"FAIL builder chain selfcheck pos jump %.1f cells"
@@ -571,7 +638,7 @@ static func run_chain_selfcheck() -> Dictionary:
 				jobs_done += 1
 				var job2_sid: int = int(bot.get("job_sid", -1))
 				if job2_sid == 2:
-					var end_pos: Vector2 = work_grid_pos(bot, structures, GRID_W)
+					var end_pos: Vector2 = work_grid_pos(bot, structures, fake_map)
 					if end_pos.distance_squared_to(Vector2(2.0, 0.0)) < 4.0:
 						chain_assign_ok = true
 			elif sid_done == 2:

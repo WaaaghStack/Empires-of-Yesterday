@@ -219,6 +219,18 @@ static func _collect_candidates(
 	max_count: int,
 	difficulty: int,
 ) -> Array[Vector2i]:
+	if map_data.sphere_mode:
+		return _collect_candidates_sphere(
+			map_data,
+			owners,
+			sources,
+			enemy_home,
+			player_home,
+			vision,
+			stride,
+			max_count,
+			difficulty,
+		)
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	var seen: Dictionary = {}
@@ -275,6 +287,80 @@ static func _collect_candidates(
 	return out
 
 
+static func _collect_candidates_sphere(
+	map_data,
+	owners: PackedByteArray,
+	sources: Array[Vector2i],
+	enemy_home: Vector2i,
+	player_home: Vector2i,
+	vision: int,
+	stride: int,
+	max_count: int,
+	difficulty: int,
+) -> Array[Vector2i]:
+	var n: int = map_data.cell_count
+	var seen: Dictionary = {}
+	var out: Array[Vector2i] = []
+	var dist: PackedInt32Array = PackedInt32Array()
+	dist.resize(n)
+	dist.fill(-1)
+	var queue: Array[int] = []
+	for src: Vector2i in sources:
+		var cid: int = src.x
+		if cid < 0 or cid >= n or dist[cid] >= 0:
+			continue
+		dist[cid] = 0
+		queue.append(cid)
+	var qi: int = 0
+	while qi < queue.size() and out.size() < max_count:
+		var cur: int = queue[qi]
+		qi += 1
+		var cur_d: int = dist[cur]
+		if cur_d > vision:
+			continue
+		if cur_d > 0 and cur_d % stride == 0:
+			if map_data.is_land_cell(cur, 0):
+				var idx: int = cur
+				if idx >= 0 and idx < owners.size() and int(owners[idx]) != BattleTileControlLib.OWNER_FRIENDLY:
+					var key: String = str(cur)
+					if not seen.has(key):
+						seen[key] = true
+						out.append(Vector2i(cur, 0))
+		for nbr in map_data.get_neighbors(cur):
+			if nbr < 0 or nbr >= n:
+				continue
+			var nd: int = cur_d + 1
+			if nd > vision or dist[nbr] >= 0:
+				continue
+			dist[nbr] = nd
+			queue.append(nbr)
+	if out.is_empty() and difficulty == Difficulty.BEGINNER:
+		var rng := RandomNumberGenerator.new()
+		rng.seed = int(map_data.map_seed) ^ 0xEAEA
+		var fallback: Array[int] = []
+		if enemy_home.x >= 0 and enemy_home.x < n:
+			fallback.append(enemy_home.x)
+		for _i in range(8):
+			if fallback.is_empty():
+				break
+			var pick: int = fallback[rng.randi_range(0, fallback.size() - 1)]
+			for nbr in map_data.get_neighbors(pick):
+				if nbr < 0 or nbr >= n or dist[nbr] < 0 or dist[nbr] > vision:
+					continue
+				if not map_data.is_land_cell(nbr, 0):
+					continue
+				if int(owners[nbr]) == BattleTileControlLib.OWNER_FRIENDLY:
+					continue
+				var key2: String = str(nbr)
+				if seen.has(key2):
+					continue
+				seen[key2] = true
+				out.append(Vector2i(nbr, 0))
+				if out.size() >= mini(8, max_count):
+					break
+	return out
+
+
 static func _score_outpost_cell(
 	map_data,
 	owners: PackedByteArray,
@@ -290,7 +376,7 @@ static func _score_outpost_cell(
 	var owner: int = int(owners[idx])
 	if owner == BattleTileControlLib.OWNER_FRIENDLY:
 		return 0.0
-	if not _spacing_ok(cand, structures):
+	if not _spacing_ok(map_data, cand, structures):
 		return 0.0
 
 	var score: float = 0.0
@@ -304,8 +390,8 @@ static func _score_outpost_cell(
 	if _has_owner_neighbor(owners, map_data, cand, BattleTileControlLib.OWNER_FRIENDLY):
 		score += 6.0 * _contest_weight(difficulty)
 
-	var dist_player: float = float(cand.distance_to(player_home))
-	var dist_enemy: float = float(cand.distance_to(enemy_home))
+	var dist_player: float = _geo_distance(map_data, cand, player_home)
+	var dist_enemy: float = _geo_distance(map_data, cand, enemy_home)
 	score += _advance_weight(difficulty) * maxf(0.0, 48.0 - dist_player * 0.35)
 	score -= dist_enemy * 0.08
 	return score
@@ -326,23 +412,63 @@ static func _score_bridge_cell(
 	if int(owners[idx]) == BattleTileControlLib.OWNER_FRIENDLY:
 		return 0.0
 	var score: float = 18.0 + _advance_weight(difficulty) * 6.0
-	score += maxf(0.0, 40.0 - float(cand.distance_to(player_home)) * 0.25)
+	score += maxf(0.0, 40.0 - _geo_distance(map_data, cand, player_home) * 0.25)
 	return score
 
 
-static func _spacing_ok(cand: Vector2i, structures: Array) -> bool:
-	var min_d2: int = CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS
+## Sphere: angular distance (radians scaled ~cells); rect: Euclidean cell distance.
+static func _geo_distance(map_data, a: Vector2i, b: Vector2i) -> float:
+	if map_data != null and map_data.sphere_mode:
+		if (
+			a.x < 0
+			or b.x < 0
+			or a.x >= map_data.cell_positions.size()
+			or b.x >= map_data.cell_positions.size()
+		):
+			return 9999.0
+		var pa: Vector3 = map_data.cell_positions[a.x].normalized()
+		var pb: Vector3 = map_data.cell_positions[b.x].normalized()
+		var ang: float = acos(clampf(pa.dot(pb), -1.0, 1.0))
+		var cell_ang: float = sqrt(TAU * 2.0 / maxf(1.0, float(map_data.cell_count)))
+		return ang / maxf(cell_ang, 1e-6)
+	return float(a.distance_to(b))
+
+
+static func _spacing_ok(map_data, cand: Vector2i, structures: Array) -> bool:
+	var min_d: int = CFG.MIN_SPAWNER_SPACING_CELLS
 	for st: Dictionary in structures:
-		var dx: int = cand.x - int(st.get("gx", 0))
-		var dy: int = cand.y - int(st.get("gy", 0))
-		if dx * dx + dy * dy < min_d2:
-			return false
+		var bx: int = int(st.get("gx", 0))
+		var by: int = int(st.get("gy", 0))
+		if map_data != null and map_data.sphere_mode:
+			if (
+				cand.x < 0
+				or bx < 0
+				or cand.x >= map_data.cell_positions.size()
+				or bx >= map_data.cell_positions.size()
+			):
+				continue
+			var pa: Vector3 = map_data.cell_positions[cand.x].normalized()
+			var pb: Vector3 = map_data.cell_positions[bx].normalized()
+			var ang: float = acos(clampf(pa.dot(pb), -1.0, 1.0))
+			var cell_ang: float = sqrt(TAU * 2.0 / maxf(1.0, float(map_data.cell_count)))
+			if ang < cell_ang * float(min_d):
+				return false
+		else:
+			var dx: int = cand.x - bx
+			var dy: int = cand.y - by
+			if dx * dx + dy * dy < min_d * min_d:
+				return false
 	return true
 
 
 static func _has_owner_neighbor(
 	owners: PackedByteArray, map_data, cell: Vector2i, want_owner: int
 ) -> bool:
+	if map_data.sphere_mode:
+		for nbr in map_data.get_neighbors(cell.x):
+			if nbr >= 0 and nbr < owners.size() and int(owners[nbr]) == want_owner:
+				return true
+		return false
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	for d: Vector2i in _DIRS:

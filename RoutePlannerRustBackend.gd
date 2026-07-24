@@ -21,6 +21,7 @@ static func route_kind_for_build_kind(build_kind: String) -> int:
 var ready: bool = false
 var _planner: RefCounted
 var _grid_w: int = 0
+var _sphere_mode: bool = false
 
 
 static func extension_available() -> bool:
@@ -34,12 +35,13 @@ func setup_map(map_data, structures: Array) -> bool:
 	_planner = ClassDB.instantiate("RoutePlanner")
 	if _planner == null:
 		return false
-	_grid_w = map_data.grid_width
 	OutpostBuildLib.prepare_land_components(map_data)
 	var packed: Dictionary = OutpostBuildLib.pack_route_snapshot(map_data, structures)
 	if packed.is_empty():
 		_free()
 		return false
+	_sphere_mode = map_data.sphere_mode
+	_grid_w = int(packed.grid_w)
 	if not _planner.call(
 		"set_map_snapshot",
 		packed.grid_w,
@@ -48,9 +50,16 @@ func setup_map(map_data, structures: Array) -> bool:
 		packed.land_mask,
 		packed.bridge_mask,
 		packed.land_comp,
+		packed.get("graph_neighbors", PackedInt32Array()),
+		packed.get("graph_neighbor_count", PackedByteArray()),
 	):
 		_free()
 		return false
+	var positions: PackedFloat32Array = packed.get("cell_positions", PackedFloat32Array())
+	if not positions.is_empty() and _planner.has_method("set_cell_positions"):
+		if not _planner.call("set_cell_positions", positions):
+			_free()
+			return false
 	ready = true
 	return true
 
@@ -85,7 +94,6 @@ func setup_map_for_team(map_data, structures: Array, team: int) -> bool:
 	_planner = ClassDB.instantiate("RoutePlanner")
 	if _planner == null:
 		return false
-	_grid_w = map_data.grid_width
 	OutpostBuildLib.prepare_land_components(map_data)
 	var packed: Dictionary = OutpostBuildLib.pack_route_snapshot_for_team(
 		map_data, structures, team
@@ -93,6 +101,8 @@ func setup_map_for_team(map_data, structures: Array, team: int) -> bool:
 	if packed.is_empty():
 		_free()
 		return false
+	_sphere_mode = map_data.sphere_mode
+	_grid_w = int(packed.grid_w)
 	if not _planner.call(
 		"set_map_snapshot",
 		packed.grid_w,
@@ -101,9 +111,16 @@ func setup_map_for_team(map_data, structures: Array, team: int) -> bool:
 		packed.land_mask,
 		packed.bridge_mask,
 		packed.land_comp,
+		packed.get("graph_neighbors", PackedInt32Array()),
+		packed.get("graph_neighbor_count", PackedByteArray()),
 	):
 		_free()
 		return false
+	var positions: PackedFloat32Array = packed.get("cell_positions", PackedFloat32Array())
+	if not positions.is_empty() and _planner.has_method("set_cell_positions"):
+		if not _planner.call("set_cell_positions", positions):
+			_free()
+			return false
 	ready = true
 	return true
 
@@ -131,7 +148,7 @@ func rebuild_portals(
 	_planner.call("rebuild_portal_graph", source_keys, bridge_keys)
 
 
-func decode_route_result(res: Dictionary) -> Dictionary:
+func decode_route_result(res: Dictionary, map_data = null) -> Dictionary:
 	var empty: Dictionary = {
 		"path_packed": PackedInt32Array(),
 		"source": Vector2i(-1, -1),
@@ -145,8 +162,11 @@ func decode_route_result(res: Dictionary) -> Dictionary:
 		return empty
 	var source_key: int = int(res.get("source_key", -1))
 	var source := Vector2i(-1, -1)
-	if source_key >= 0 and _grid_w > 0:
-		source = OutpostBuildLib.grid_from_packed_key(source_key, _grid_w)
+	if source_key >= 0:
+		if _sphere_mode:
+			source = Vector2i(source_key, 0)
+		elif _grid_w > 0:
+			source = OutpostBuildLib.grid_from_packed_key(source_key, _grid_w, map_data)
 	return {
 		"path_packed": path,
 		"source": source,
@@ -193,3 +213,4 @@ func _free() -> void:
 	ready = false
 	_planner = null
 	_grid_w = 0
+	_sphere_mode = false

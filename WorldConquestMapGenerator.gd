@@ -5,9 +5,17 @@ const BattleMapDataLib := preload("res://BattleMapData.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
 const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
 const WorldMapBakeLib := preload("res://WorldMapBakeLib.gd")
+const SphereGridLibScript := preload("res://SphereGridLib.gd")
+const WorldPackLibScript := preload("res://WorldPackLib.gd")
 
 
 static func generate(map_id: String, run_seed: int):
+	if WorldConquestConfigLib.SPHERE_GRID_ENABLED:
+		return _generate_sphere(map_id, run_seed)
+	return _generate_rect(map_id, run_seed)
+
+
+static func _generate_rect(map_id: String, run_seed: int):
 	var def: Dictionary = WorldMapCatalogLib.get_definition(map_id)
 	var w: int = int(def.get("grid_w", WorldConquestConfigLib.GRID_W))
 	var h: int = int(def.get("grid_h", WorldConquestConfigLib.GRID_H))
@@ -65,6 +73,98 @@ static func generate(map_id: String, run_seed: int):
 	return data
 
 
+static func _generate_sphere(map_id: String, run_seed: int):
+	var def: Dictionary = WorldMapCatalogLib.get_definition(map_id)
+	var ow: int = int(def.get("grid_w", WorldConquestConfigLib.GRID_W))
+	var oh: int = int(def.get("grid_h", WorldConquestConfigLib.GRID_H))
+	var frequency: int = WorldConquestConfigLib.SPHERE_GRID_FREQUENCY
+
+	var grid: Dictionary = WorldPackLibScript.load_or_build_sphere_grid(frequency)
+	var cell_count: int = int(grid.cell_count)
+
+	var land_bits: PackedByteArray = _load_land_bits(def, ow, oh, run_seed)
+	var elev_base: PackedFloat32Array = _load_elevation_norm_base(def, ow, oh, run_seed, land_bits)
+	var cached: Dictionary = WorldPackLibScript.try_load_world_cells(map_id, frequency)
+	var cell_land: PackedByteArray
+	var cell_elev: PackedFloat32Array
+	if (
+		cached.is_empty()
+		or cached.cell_land.size() != cell_count
+		or cached.cell_elev.size() != cell_count
+	):
+		cell_land = SphereGridLibScript.sample_land_bits(grid, land_bits, ow, oh)
+		cell_elev = SphereGridLibScript.sample_elevation(grid, elev_base, ow, oh)
+		WorldPackLibScript.save_world_cells(map_id, frequency, cell_land, cell_elev)
+	else:
+		cell_land = cached.cell_land
+		cell_elev = cached.cell_elev
+	cell_elev = _apply_elev_seed_noise_cells(cell_elev, cell_land, run_seed)
+	var cell_coast: PackedByteArray = _build_coast_bits_sphere(cell_land, grid)
+
+	var data = BattleMapDataLib.new()
+	data.sphere_mode = true
+	data.sphere_frequency = frequency
+	data.cell_count = cell_count
+	data.overlay_width = ow
+	data.overlay_height = oh
+	data.grid_width = ow
+	data.grid_height = oh
+	data.cell_positions = grid.positions
+	data.cell_lat = grid.lat
+	data.cell_lon = grid.lon
+	data.neighbors = grid.neighbors
+	data.neighbor_counts = grid.neighbor_count
+	data.sphere_faces = grid.faces
+	data.equirect_to_cell = WorldPackLibScript.load_or_build_equirect_lut(grid, ow, oh)
+
+	data.map_seed = run_seed
+	data.terrain_tag = str(def.get("terrain_tag", map_id))
+	data.terrain_mix = {"grass": 0.5, "water": 0.35, "mountain": 0.08, "sand": 0.05, "mud": 0.02}
+	data.cell_size = WorldConquestConfigLib.CELL_SIZE
+	data.map_size = Vector2(float(ow), float(oh))
+	data.player_allocation = WorldConquestConfigLib.PLAYER_FORCE
+	data.enemy_allocation = WorldConquestConfigLib.ENEMY_FORCE
+	data.node_id = "world_conquest"
+	data.node_type = "world_conquest"
+	data.mass_unit_mode = false
+	data.contact_column = ow / 2
+	data.objective_sectors_required = 0
+	data.placed_structures = []
+	data.bridge_corridors = []
+	data.resource_deposits = []
+
+	data.terrain_cells = PackedByteArray()
+	data.terrain_cells.resize(cell_count)
+	data.cover_cells = PackedByteArray()
+	data.cover_cells.resize(cell_count)
+	data.blocked_cells = PackedByteArray()
+	data.blocked_cells.resize(cell_count)
+	data.tile_height = PackedFloat32Array()
+	data.tile_height.resize(cell_count)
+
+	for cid in range(cell_count):
+		var land: bool = cell_land[cid] > 0
+		var elev: float = cell_elev[cid]
+		if not land:
+			data.terrain_cells[cid] = BattleMapDataLib.Terrain.WATER
+			data.tile_height[cid] = 0.0
+		elif elev > 0.72:
+			data.terrain_cells[cid] = BattleMapDataLib.Terrain.MOUNTAIN
+			data.tile_height[cid] = elev
+		elif elev < 0.22 and cell_coast[cid] > 0:
+			data.terrain_cells[cid] = BattleMapDataLib.Terrain.SAND
+			data.tile_height[cid] = elev * 0.5
+		else:
+			data.terrain_cells[cid] = BattleMapDataLib.Terrain.GRASS
+			data.tile_height[cid] = elev * 0.65
+
+	data.rebuild_terrain_arrays()
+	data.sync_blocked_from_terrain()
+	_place_sphere_spawns(data, cell_land, grid, run_seed)
+	_scatter_resource_blobs_sphere(data, run_seed)
+	return data
+
+
 static func globe_colors_for_map(map_id: String) -> Dictionary:
 	var def: Dictionary = WorldMapCatalogLib.get_definition(map_id)
 	return {
@@ -107,6 +207,22 @@ static func _load_elevation_norm(
 	return _procedural_elevation(w, h, seed_val, land_bits)
 
 
+static func _load_elevation_norm_base(
+	def: Dictionary, w: int, h: int, _seed_val: int, land_bits: PackedByteArray
+) -> PackedFloat32Array:
+	var path: String = str(def.get("elevation_path", ""))
+	if path != "":
+		var loaded: Dictionary = WorldMapBakeLib.read_elev_bin(path)
+		if not loaded.is_empty():
+			var elev: PackedFloat32Array = loaded.get("elevation", PackedFloat32Array())
+			if int(loaded.get("grid_w", 0)) == w and int(loaded.get("grid_h", 0)) == h:
+				return elev
+	var map_id: String = str(def.get("id", WorldMapCatalogLib.MAP_EARTH))
+	if map_id == WorldMapCatalogLib.MAP_EARTH:
+		return WorldMapBakeLib.generate_earth_elevation_norm(w, h, land_bits)
+	return _procedural_elevation(w, h, _seed_val, land_bits)
+
+
 static func _apply_elev_seed_noise(
 	elev: PackedFloat32Array, land_bits: PackedByteArray, seed_val: int
 ) -> PackedFloat32Array:
@@ -115,6 +231,20 @@ static func _apply_elev_seed_noise(
 	rng.seed = seed_val ^ 0x5A17E4
 	for i in out.size():
 		if land_bits[i] == 0:
+			out[i] = 0.0
+			continue
+		out[i] = clampf(out[i] + rng.randf_range(-0.05, 0.07), 0.0, 1.0)
+	return out
+
+
+static func _apply_elev_seed_noise_cells(
+	cell_elev: PackedFloat32Array, cell_land: PackedByteArray, seed_val: int
+) -> PackedFloat32Array:
+	var out: PackedFloat32Array = cell_elev.duplicate()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val ^ 0x5A17E4
+	for i in out.size():
+		if cell_land[i] == 0:
 			out[i] = 0.0
 			continue
 		out[i] = clampf(out[i] + rng.randf_range(-0.05, 0.07), 0.0, 1.0)
@@ -186,6 +316,88 @@ static func _build_coast_bits(land_bits: PackedByteArray, w: int, h: int) -> Pac
 					break
 			coast[idx] = 1 if is_coast else 0
 	return coast
+
+
+static func _build_coast_bits_sphere(
+	cell_land: PackedByteArray, grid: Dictionary
+) -> PackedByteArray:
+	var cell_count: int = int(grid.cell_count)
+	var coast := PackedByteArray()
+	coast.resize(cell_count)
+	var neighbors: PackedInt32Array = grid.neighbors
+	var neighbor_counts: PackedByteArray = grid.neighbor_count
+
+	for cid in range(cell_count):
+		if cell_land[cid] == 0:
+			coast[cid] = 0
+			continue
+		var is_coast: bool = false
+		var ncount: int = int(neighbor_counts[cid])
+		var base: int = cid * 6
+		for slot in range(ncount):
+			var nbr: int = neighbors[base + slot]
+			if nbr < 0 or nbr >= cell_count:
+				continue
+			if cell_land[nbr] == 0:
+				is_coast = true
+				break
+		coast[cid] = 1 if is_coast else 0
+	return coast
+
+
+static func _place_sphere_spawns(
+	data, cell_land: PackedByteArray, grid: Dictionary, seed_val: int
+) -> void:
+	var positions: PackedVector3Array = grid.positions
+	var cell_count: int = int(grid.cell_count)
+	var land_cells: Array[int] = []
+	for cid in range(cell_count):
+		if cell_land[cid] > 0 and data.is_land_cell_id(cid):
+			land_cells.append(cid)
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val ^ 0xE471
+
+	var player_cid: int = -1
+	var enemy_cid: int = -1
+	if land_cells.is_empty():
+		player_cid = 0
+		enemy_cid = 0
+	else:
+		player_cid = land_cells[rng.randi_range(0, land_cells.size() - 1)]
+		enemy_cid = _furthest_land_cell(positions, land_cells, player_cid)
+		player_cid = _furthest_land_cell(positions, land_cells, enemy_cid)
+
+	var player := Vector2i(player_cid, 0)
+	var enemy := Vector2i(enemy_cid, 0)
+	data.player_home_grid = player
+	data.enemy_home_grid = enemy
+	data.player_capital_grid = player
+	data.enemy_capital_grid = enemy
+	var psz: float = 8.0
+	var esz: float = 8.0
+	data.player_spawn_zone = Rect2(
+		float(player.x) - psz, float(player.y) - psz, psz * 2.0, psz * 2.0
+	)
+	data.enemy_spawn_zone = Rect2(
+		float(enemy.x) - esz, float(enemy.y) - esz, esz * 2.0, esz * 2.0
+	)
+	data.player_spawn_cells = [player]
+	data.enemy_spawn_cells = [enemy]
+
+
+static func _furthest_land_cell(
+	positions: PackedVector3Array, land_cells: Array[int], from_cid: int
+) -> int:
+	var from_pos: Vector3 = positions[from_cid]
+	var best_cid: int = from_cid
+	var min_dot: float = 2.0
+	for cid in land_cells:
+		var dot: float = from_pos.dot(positions[cid])
+		if dot < min_dot:
+			min_dot = dot
+			best_cid = cid
+	return best_cid
 
 
 static func _place_spawns_and_capitals(
@@ -286,6 +498,110 @@ static func _scatter_resource_blobs(data, seed_val: int) -> void:
 			placed_centers.append(center)
 			next_id += 1
 			placed += 1
+
+
+static func _scatter_resource_blobs_sphere(data, seed_val: int) -> void:
+	var rng := RandomNumberGenerator.new()
+	var placed_centers: Array[int] = []
+	var next_id: int = 1
+	for type_i in range(WorldConquestConfigLib.RESOURCE_TYPE_COUNT):
+		rng.seed = seed_val ^ (0xB10B0000 + type_i * 0x9E37)
+		var terrain_want: int = _terrain_for_resource_type(type_i)
+		var candidates: Array[int] = []
+		for cid in range(data.cell_count):
+			if not data.is_land_cell_id(cid):
+				continue
+			if int(data.get_cell_terrain(cid, 0)) != terrain_want:
+				continue
+			if _too_close_to_spawn_sphere(data, cid):
+				continue
+			candidates.append(cid)
+		var tries: int = 0
+		var placed: int = 0
+		while placed < WorldConquestConfigLib.RESOURCE_BLOBS_PER_TYPE and tries < 8000:
+			tries += 1
+			if candidates.is_empty():
+				break
+			var center: int = candidates[rng.randi_range(0, candidates.size() - 1)]
+			if _too_close_to_blob_sphere(data, center, placed_centers):
+				continue
+			var size_tier: int = rng.randi_range(1, 3)
+			var blob: Dictionary = _grow_resource_blob_sphere(
+				data, center, size_tier, type_i, next_id, rng
+			)
+			if blob.is_empty():
+				continue
+			data.resource_deposits.append(blob)
+			placed_centers.append(center)
+			next_id += 1
+			placed += 1
+
+
+static func _too_close_to_spawn_sphere(data, cell_id: int) -> bool:
+	var spots: Array[Vector2i] = [data.player_home_grid, data.enemy_home_grid]
+	var pos: Vector3 = data.cell_positions[cell_id]
+	var min_cos: float = cos(deg_to_rad(float(WorldConquestConfigLib.RESOURCE_SPAWN_EXCLUSION)))
+	for spot in spots:
+		if spot.x < 0:
+			continue
+		var other: Vector3 = data.cell_positions[spot.x]
+		if pos.dot(other) > min_cos:
+			return true
+	return false
+
+
+static func _too_close_to_blob_sphere(
+	data, center: int, placed: Array[int]
+) -> bool:
+	var pos: Vector3 = data.cell_positions[center]
+	var min_cos: float = cos(deg_to_rad(float(WorldConquestConfigLib.RESOURCE_BLOB_MIN_SPACING)))
+	for other in placed:
+		var other_pos: Vector3 = data.cell_positions[other]
+		if pos.dot(other_pos) > min_cos:
+			return true
+	return false
+
+
+static func _grow_resource_blob_sphere(
+	data,
+	center: int,
+	size_tier: int,
+	type_i: int,
+	dep_id: int,
+	rng: RandomNumberGenerator,
+) -> Dictionary:
+	var want: int = int(data.get_cell_terrain(center, 0))
+	var target_n: int = WorldConquestConfigLib.RESOURCE_BLOB_CELL_COUNT[size_tier]
+	var keys := PackedInt32Array()
+	var queue: Array[int] = [center]
+	var seen: Dictionary = {center: true}
+	while not queue.is_empty() and keys.size() < target_n:
+		var cur: int = queue.pop_front()
+		if not data.is_land_cell_id(cur):
+			continue
+		if int(data.get_cell_terrain(cur, 0)) != want:
+			continue
+		keys.append(cur)
+		var nbrs: Array[int] = data.get_neighbors(cur)
+		nbrs.shuffle()
+		for nbr in nbrs:
+			if seen.has(nbr):
+				continue
+			if rng.randf() > 0.62:
+				continue
+			seen[nbr] = true
+			queue.append(nbr)
+	if keys.size() < 3:
+		return {}
+	return {
+		"id": dep_id,
+		"type": type_i,
+		"gx": center,
+		"gy": 0,
+		"size": size_tier,
+		"yield_per_sec": WorldConquestConfigLib.RESOURCE_YIELD_BY_SIZE[size_tier],
+		"cell_keys": keys,
+	}
 
 
 static func _terrain_for_resource_type(type_i: int) -> int:

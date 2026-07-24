@@ -51,6 +51,7 @@ fn peak_intensity(peak: f32, power_scale: f32, frame_peak_max: f32) -> f32 {
 }
 
 /// Bake RGBA8 bytes (w*h*4) from per-tile pressures.
+/// Returns empty when grid dimensions do not match pressure/land arrays (e.g. graph cell_count vs 360×180).
 pub fn bake_fluid_rgba(
     grid_w: i32,
     grid_h: i32,
@@ -62,7 +63,11 @@ pub fn bake_fluid_rgba(
     let w = grid_w as usize;
     let h = grid_h as usize;
     let n = w * h;
-    if n == 0 || land_mask.len() < n {
+    if n == 0
+        || land_mask.len() < n
+        || friendly_power.len() < n
+        || hostile_power.len() < n
+    {
         return Vec::new();
     }
 

@@ -463,7 +463,7 @@ func pressure_hostile_at(idx: int) -> float:
 
 func grid_cell_count() -> int:
 	if battle_data != null:
-		return battle_data.grid_width * battle_data.grid_height
+		return battle_data.gameplay_tile_count()
 	if tile_control != null:
 		return tile_control.owners.size()
 	return 0
@@ -527,8 +527,11 @@ func count_claimable_bridge_cells() -> Dictionary:
 			var idx: int = int(key)
 			if idx < 0 or idx >= grid_cell_count():
 				continue
-			var gx: int = idx % battle_data.grid_width
-			var gy: int = idx / battle_data.grid_width
+			var gx: int = idx
+			var gy: int = 0
+			if not battle_data.sphere_mode:
+				gx = idx % battle_data.grid_width
+				gy = idx / battle_data.grid_width
 			if not WorldConquestOutpostBuildLib.is_water_cell(battle_data, gx, gy):
 				continue
 			water_total += 1
@@ -778,6 +781,18 @@ func get_network_built_mask(team: int) -> PackedByteArray:
 	if rust_field == null:
 		return PackedByteArray()
 	return rust_field.get_network_built_mask(team)
+
+
+func get_network_planned_mask(team: int) -> PackedByteArray:
+	if rust_field == null:
+		return PackedByteArray()
+	return rust_field.get_network_planned_mask(team)
+
+
+func get_network_route_mask(team: int) -> PackedByteArray:
+	if rust_field == null:
+		return PackedByteArray()
+	return rust_field.get_network_route_mask(team)
 
 
 func get_logistics_strain() -> Dictionary:
@@ -1180,7 +1195,10 @@ func _check_conquest_world() -> void:
 func _owner_at(gx: int, gy: int) -> int:
 	if tile_control == null or battle_data == null:
 		return BattleTileControlLib.OWNER_NEUTRAL
-	if gx < 0 or gy < 0 or gx >= battle_data.grid_width or gy >= battle_data.grid_height:
+	if battle_data.sphere_mode:
+		if gy != 0 or gx < 0 or gx >= battle_data.cell_count:
+			return BattleTileControlLib.OWNER_NEUTRAL
+	elif gx < 0 or gy < 0 or gx >= battle_data.grid_width or gy >= battle_data.grid_height:
 		return BattleTileControlLib.OWNER_NEUTRAL
 	return int(tile_control.owners[battle_data.cell_index(gx, gy)])
 

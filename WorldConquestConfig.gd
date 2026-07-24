@@ -5,6 +5,8 @@ extends RefCounted
 
 const GRID_W := 360
 const GRID_H := 180
+const SPHERE_GRID_FREQUENCY := 80
+const SPHERE_GRID_ENABLED := true
 const DEFAULT_WORLD_MAP_ID := "earth"
 const CELL_SIZE := 1.0
 
@@ -75,6 +77,12 @@ const LOGISTICS_DRAIN_HANGAR := 0.06
 const LOGISTICS_DRAIN_CORRIDOR := 0.03
 const LOGISTICS_STRAIN_SENSITIVITY := 1.0
 const MAX_NETWORK_ROAD_CELLS_PER_FRAME := 24
+## Cell-paint roads via equirect overlay — OFF.
+## Equirect Voronoi paint cannot draw a clean 3-wide ribbon (became island-sized blobs).
+## Roads use MultiMesh ribbons: white centerlane + black side lanes (~3 cell widths).
+const ROAD_CELL_PAINT := false
+## Paths at or under this length (after spur trim) count as spurs for hierarchy paint.
+const ROAD_SPUR_MAX_CELLS := 16
 ## Legacy builder visuals (unused when logistics authority is on).
 const BUILDER_BOTS_PER_HOME := 4
 const BUILDER_SURFACE_LIFT := 2.85

@@ -9,7 +9,8 @@ use crate::pathfind::nav_rules::{
 };
 use crate::sim::{TerritoryKernel, OWNER_FRIENDLY};
 
-const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+/// After free-goal BFS misses, skip free search for this many replan cycles (C1/C4 FPS).
+const FREE_GOAL_MISS_SKIP_TICKS: u8 = 8;
 
 type CellKey = (i32, i32);
 
@@ -99,6 +100,10 @@ pub struct BomberLayer {
     living_by_hangar: HashMap<i32, u32>,
     /// Live air occupancy: cell → bomber id (one living bomber per air cell).
     occupant_at: HashMap<CellKey, u32>,
+    /// Soft free-goal claims: goal cell → bomber id (C2 stampede cap).
+    goal_claims: HashMap<CellKey, u32>,
+    /// Per-team countdown: skip free-goal BFS while > 0 after a free miss (C4).
+    free_miss_cd: [u8; 3],
     next_id: u32,
     pub friendly_corridor: Vec<u8>,
     pub hostile_corridor: Vec<u8>,
@@ -117,6 +122,8 @@ impl BomberLayer {
             config,
             living_by_hangar: HashMap::new(),
             occupant_at: HashMap::new(),
+            goal_claims: HashMap::new(),
+            free_miss_cd: [0; 3],
             next_id: 1,
             friendly_corridor: Vec::new(),
             hostile_corridor: Vec::new(),
@@ -151,6 +158,7 @@ impl BomberLayer {
         if self.nav_masks_epoch == 0 {
             self.nav_masks_epoch = 1;
         }
+        self.free_miss_cd = [0; 3];
     }
 
     pub fn living_count(&self) -> u32 {
@@ -352,6 +360,9 @@ impl BomberLayer {
         if n == 0 {
             return;
         }
+        for cd in self.free_miss_cd.iter_mut() {
+            *cd = cd.saturating_sub(1);
+        }
 
         let mut urgent: Vec<(usize, bool)> = Vec::new();
         let mut normal: Vec<(usize, bool)> = Vec::new();
@@ -522,22 +533,26 @@ impl BomberLayer {
             return;
         }
 
-        let masks = AgentNavMasks {
-            friendly_corridor: &self.friendly_corridor,
-            hostile_corridor: &self.hostile_corridor,
-            friendly_bridge: &self.friendly_bridge,
-            hostile_bridge: &self.hostile_bridge,
-        };
+        self.clear_goal_claim_for_bomber(except_id);
 
-        if !prefer_alternate_goal && is_air_strike_target_at(kernel, &masks, team, gx, gy) {
-            self.bombers[bomber_i].goal_gx = gx;
-            self.bombers[bomber_i].goal_gy = gy;
-            self.bombers[bomber_i].deploy_path = vec![start_idx];
-            self.bombers[bomber_i].deploy_path_pos = 0;
-            self.bombers[bomber_i].step_gx = -1;
-            self.bombers[bomber_i].step_gy = -1;
-            self.note_strike_search_result(bomber_i, kernel, true);
-            return;
+        {
+            let masks = AgentNavMasks {
+                friendly_corridor: &self.friendly_corridor,
+                hostile_corridor: &self.hostile_corridor,
+                friendly_bridge: &self.friendly_bridge,
+                hostile_bridge: &self.hostile_bridge,
+            };
+            if !prefer_alternate_goal && is_air_strike_target_at(kernel, &masks, team, gx, gy) {
+                self.bombers[bomber_i].goal_gx = gx;
+                self.bombers[bomber_i].goal_gy = gy;
+                self.claim_goal(gx, gy, except_id);
+                self.bombers[bomber_i].deploy_path = vec![start_idx];
+                self.bombers[bomber_i].deploy_path_pos = 0;
+                self.bombers[bomber_i].step_gx = -1;
+                self.bombers[bomber_i].step_gy = -1;
+                self.note_strike_search_result(bomber_i, kernel, true);
+                return;
+            }
         }
 
         self.nav_search.ensure_capacity(kernel.tile_count);
@@ -547,24 +562,36 @@ impl BomberLayer {
         } else {
             None
         };
-        // Prefer next free strike goal; if none free, allow contested targets.
-        let mut path = Self::find_strike_path(
-            &mut self.nav_search,
-            kernel,
-            &self.friendly_corridor,
-            &self.hostile_corridor,
-            &self.friendly_bridge,
-            &self.hostile_bridge,
-            &self.occupant_at,
-            gx,
-            gy,
-            start_idx,
-            team,
-            except_id,
-            max_expand,
-            exclude_start,
-            true,
-        );
+        // Prefer free strike goals only when free-miss cooldown is clear (C1/C4).
+        let team_i = team as usize;
+        let try_free = team_i < self.free_miss_cd.len() && self.free_miss_cd[team_i] == 0;
+        let mut path = if try_free {
+            Self::find_strike_path(
+                &mut self.nav_search,
+                kernel,
+                &self.friendly_corridor,
+                &self.hostile_corridor,
+                &self.friendly_bridge,
+                &self.hostile_bridge,
+                &self.occupant_at,
+                &self.goal_claims,
+                gx,
+                gy,
+                start_idx,
+                team,
+                except_id,
+                max_expand,
+                exclude_start,
+                true,
+            )
+        } else {
+            None
+        };
+        if try_free && path.is_none() {
+            if team_i < self.free_miss_cd.len() {
+                self.free_miss_cd[team_i] = FREE_GOAL_MISS_SKIP_TICKS;
+            }
+        }
         if path.is_none() {
             path = Self::find_strike_path(
                 &mut self.nav_search,
@@ -574,6 +601,7 @@ impl BomberLayer {
                 &self.friendly_bridge,
                 &self.hostile_bridge,
                 &self.occupant_at,
+                &self.goal_claims,
                 gx,
                 gy,
                 start_idx,
@@ -585,10 +613,19 @@ impl BomberLayer {
             );
         }
 
-        let still_on_strike = is_air_strike_target_at(kernel, &masks, team, gx, gy);
+        let still_on_strike = {
+            let masks = AgentNavMasks {
+                friendly_corridor: &self.friendly_corridor,
+                hostile_corridor: &self.hostile_corridor,
+                friendly_bridge: &self.friendly_bridge,
+                hostile_bridge: &self.hostile_bridge,
+            };
+            is_air_strike_target_at(kernel, &masks, team, gx, gy)
+        };
         if path.is_none() && prefer_alternate_goal && still_on_strike {
             self.bombers[bomber_i].goal_gx = gx;
             self.bombers[bomber_i].goal_gy = gy;
+            self.claim_goal(gx, gy, except_id);
             self.bombers[bomber_i].deploy_path = vec![start_idx];
             self.bombers[bomber_i].deploy_path_pos = 0;
             self.bombers[bomber_i].step_gx = -1;
@@ -604,6 +641,7 @@ impl BomberLayer {
                 let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
                 self.bombers[bomber_i].goal_gx = goal_x;
                 self.bombers[bomber_i].goal_gy = goal_y;
+                self.claim_goal(goal_x, goal_y, except_id);
                 self.bombers[bomber_i].deploy_path = route.path;
                 self.bombers[bomber_i].deploy_path_pos = 0;
                 self.sync_step_from_deploy_path(kernel, bomber_i);
@@ -616,6 +654,7 @@ impl BomberLayer {
                 let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
                 self.bombers[bomber_i].goal_gx = goal_x;
                 self.bombers[bomber_i].goal_gy = goal_y;
+                self.claim_goal(goal_x, goal_y, except_id);
                 self.bombers[bomber_i].deploy_path = route.path;
                 self.bombers[bomber_i].deploy_path_pos = 0;
                 self.bombers[bomber_i].step_gx = -1;
@@ -632,6 +671,14 @@ impl BomberLayer {
         self.note_strike_search_result(bomber_i, kernel, false);
     }
 
+    fn claim_goal(&mut self, gx: i32, gy: i32, bomber_id: u32) {
+        self.goal_claims.insert((gx, gy), bomber_id);
+    }
+
+    fn clear_goal_claim_for_bomber(&mut self, bomber_id: u32) {
+        self.goal_claims.retain(|_, &mut id| id != bomber_id);
+    }
+
     fn find_strike_path(
         nav_search: &mut SearchKernel,
         kernel: &TerritoryKernel,
@@ -640,6 +687,7 @@ impl BomberLayer {
         friendly_bridge: &[u8],
         hostile_bridge: &[u8],
         occupant_at: &HashMap<CellKey, u32>,
+        goal_claims: &HashMap<CellKey, u32>,
         gx: i32,
         gy: i32,
         start_idx: i32,
@@ -682,9 +730,14 @@ impl BomberLayer {
             }
             let cx = (idx as i32) % w;
             let cy = (idx as i32) / w;
-            match occupant_at.get(&(cx, cy)) {
-                None => true,
-                Some(&oid) => oid == except_id,
+            let key = (cx, cy);
+            match occupant_at.get(&key) {
+                Some(&oid) if oid != except_id => return false,
+                _ => {}
+            }
+            match goal_claims.get(&key) {
+                Some(&cid) if cid != except_id => return false,
+                _ => true,
             }
         };
         nav_search
@@ -738,7 +791,7 @@ impl BomberLayer {
         }
     }
 
-    /// Free air cell at hangar or a free cardinal neighbor; never stack bombers.
+    /// Free air cell at hangar or a free graph/cardinal neighbor; never stack bombers.
     fn find_spawn_air_cell(
         &self,
         kernel: &TerritoryKernel,
@@ -748,14 +801,23 @@ impl BomberLayer {
         if self.is_in_bounds(kernel, hx, hy) && !self.air_occupied_by_other(hx, hy, u32::MAX) {
             return Some((hx, hy));
         }
-        for (dx, dy) in CARDINAL {
-            let gx = hx + dx;
-            let gy = hy + dy;
-            if self.is_in_bounds(kernel, gx, gy) && !self.air_occupied_by_other(gx, gy, u32::MAX) {
-                return Some((gx, gy));
-            }
+        let hidx = kernel.cell_index(hx, hy);
+        if hidx < 0 {
+            return None;
         }
-        None
+        let w = kernel.grid_w;
+        let mut pick: Option<(i32, i32)> = None;
+        kernel.for_each_neighbor_idx(hidx as usize, |ni| {
+            if pick.is_some() {
+                return;
+            }
+            let gx = ni as i32 % w;
+            let gy = ni as i32 / w;
+            if self.is_in_bounds(kernel, gx, gy) && !self.air_occupied_by_other(gx, gy, u32::MAX) {
+                pick = Some((gx, gy));
+            }
+        });
+        pick
     }
 
     fn sync_step_from_deploy_path(&mut self, kernel: &TerritoryKernel, bomber_i: usize) {
@@ -805,6 +867,10 @@ impl BomberLayer {
             .collect();
         for (gx, gy, id) in clear {
             self.clear_occupant(gx, gy, id);
+            self.clear_goal_claim_for_bomber(id);
+        }
+        if !dead.is_empty() {
+            self.free_miss_cd = [0; 3];
         }
         self.bombers.retain(|b| {
             if dead.contains(&b.id) {

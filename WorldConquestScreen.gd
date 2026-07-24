@@ -109,6 +109,12 @@ var _builder_job_queue_hostile: Array[int] = []
 var _builder_visual_dirty: bool = true
 var _builder_visual_clock: float = 0.0
 var _network_road_pending: PackedInt32Array = PackedInt32Array()
+## Parallel to _network_road_pending: road class byte per queued cell (paint hierarchy).
+var _network_road_pending_class: PackedByteArray = PackedByteArray()
+## Intended final class per cell (spur/arterial/bridge); planned paint upgrades to this when built.
+var _road_class_by_cell: Dictionary = {}
+## Center cell id → PackedInt32Array of two shoulder cell ids (black | white | black).
+var _road_shoulders_by_center: Dictionary = {}
 var _soldier_visual_dirty: bool = true
 var _soldier_visual_clock: float = 0.0
 var _bomber_visual_dirty: bool = true
@@ -667,10 +673,17 @@ func _try_place_structure() -> void:
 	if route_planner == null or not route_planner.ready:
 		build_hint_label.text = "Route planner not ready."
 		return
-	# Event-driven: rebuild only when structure/road versions advanced since last portal build.
-	_ensure_route_portals_for_team(BattleTileControlLib.OWNER_FRIENDLY, _player_home)
+	# Force FRIENDLY portals — enemy AI may have left HOSTILE graph loaded.
+	_ensure_route_portals_for_team(BattleTileControlLib.OWNER_FRIENDLY, _player_home, true)
 	build_hint_label.text = "Planning route…"
-	if CFG.ROUTE_ASYNC_PLACEMENT:
+	# Sphere: use sync placement (same path as enemy AI). Async + shared planner was
+	# player-only failing while HOSTILE AI kept succeeding.
+	var use_async: bool = (
+		CFG.ROUTE_ASYNC_PLACEMENT
+		and battle_data != null
+		and not battle_data.sphere_mode
+	)
+	if use_async:
 		var precheck: Dictionary = _placement_precheck(grid, _build_mode)
 		if str(precheck.get("reject", "")) != "":
 			build_hint_label.text = str(precheck.get("reject", ""))
@@ -751,10 +764,17 @@ func _commit_placed_structure(
 		return -1
 	if kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
 		path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
+		# Spur trim: keep only attach→landing so logistics grows a short branch onto built∪planned.
+		if _builder_authority_active() and territory_sim != null:
+			var route_mask: PackedByteArray = territory_sim.get_network_route_mask(team)
+			path_packed = OutpostBuildLib.trim_path_to_network_spur(path_packed, route_mask)
+	if path_packed.is_empty():
+		return -1
 	var landing: Vector2i = placement.get("landing", Vector2i(-1, -1))
 	if landing.x < 0:
 		return -1
 	var src: Vector2i = placement.get("source", Vector2i(-1, -1))
+	var road_class: int = OutpostBuildLib.classify_road_class(kind, path_packed.size())
 	var st: Dictionary = {
 		"id": _next_structure_id,
 		"team": team,
@@ -767,6 +787,7 @@ func _commit_placed_structure(
 		"path_keys": path_packed,
 		"path_len": path_packed.size(),
 		"path_built": 1.0,
+		"road_class": road_class,
 	}
 	if kind == OutpostBuildLib.KIND_SPAWNER or kind == OutpostBuildLib.KIND_BARRACKS or kind == OutpostBuildLib.KIND_HANGAR:
 		st["health"] = CFG.OUTPOST_MAX_HEALTH
@@ -789,6 +810,9 @@ func _commit_placed_structure(
 	_outpost_road_dirty = true
 	_outpost_marker_dirty = true
 	_resource_links_dirty = true
+	_stamp_planned_road_paint(path_packed, road_class)
+	if globe_map != null and globe_map.has_method("register_network_road_path"):
+		globe_map.register_network_road_path(path_packed)
 	_enqueue_builder_job(placed_sid, team)
 	if kind == OutpostBuildLib.KIND_CORRIDOR_LINK:
 		if _outpost_construction_queue != null:
@@ -956,15 +980,11 @@ func _placement_precheck_for_team(click: Vector2i, build_kind: String, team: int
 			return result
 	result["landing"] = landing
 	for st: Dictionary in structures:
-		var dx: int = landing.x - int(st.get("gx", 0))
-		var dy: int = landing.y - int(st.get("gy", 0))
-		if dx * dx + dy * dy < CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS:
+		if _structure_too_close(landing, int(st.get("gx", 0)), int(st.get("gy", 0))):
 			result["reject"] = "Too close to another structure."
 			return result
 	for corridor: Dictionary in battle_data.bridge_corridors:
-		var cdx: int = landing.x - int(corridor.get("gx", 0))
-		var cdy: int = landing.y - int(corridor.get("gy", 0))
-		if cdx * cdx + cdy * cdy < CFG.MIN_SPAWNER_SPACING_CELLS * CFG.MIN_SPAWNER_SPACING_CELLS:
+		if _structure_too_close(landing, int(corridor.get("gx", 0)), int(corridor.get("gy", 0))):
 			result["reject"] = "Too close to an existing land bridge."
 			return result
 	var kind_reject: String = _placement_kind_reject(landing, sources, build_kind)
@@ -1138,7 +1158,7 @@ func _tick_overlay_owner_reconcile(_delta: float) -> void:
 		or territory_sim.rust_field == null
 	):
 		return
-	var total: int = battle_data.grid_width * battle_data.grid_height
+	var total: int = battle_data.gameplay_tile_count()
 	if total <= 0:
 		return
 	var budget: int = CFG.OVERLAY_RECONCILE_CELLS_PER_FRAME
@@ -1160,7 +1180,11 @@ func _tick_overlay_owner_reconcile(_delta: float) -> void:
 		_overlay_reconcile_cursor = (_overlay_reconcile_cursor + 1) % total
 		var owner: int = rf.owner_at_index(idx)
 		var expected: int = EarthGlobeMapLib.owner_display_byte_for(owner)
-		var cached: int = globe_map.get_owner_cache_byte(idx)
+		var cached: int = (
+			globe_map.get_owner_cache_byte_for_cell(idx)
+			if battle_data.sphere_mode
+			else globe_map.get_owner_cache_byte(idx)
+		)
 		if expected == cached:
 			continue
 		fix_idxs.append(idx)
@@ -1295,6 +1319,14 @@ func _apply_scd1_structures(batch: Dictionary) -> void:
 			if row is Dictionary:
 				battle_data.placed_structures.append((row as Dictionary).duplicate())
 				dirty_sids.append(int(row.get("id", -1)))
+		# Full seed also replaces corridor ribbons from domain pack when present (B4).
+		if batch.has("bridge_corridors") and battle_data != null:
+			var corridors: Array = batch.get("bridge_corridors", [])
+			if corridors is Array:
+				battle_data.bridge_corridors.clear()
+				for c in corridors:
+					if c is Dictionary:
+						battle_data.bridge_corridors.append((c as Dictionary).duplicate())
 	else:
 		var by_id: Dictionary = {}
 		for st in battle_data.placed_structures:
@@ -1314,6 +1346,18 @@ func _apply_scd1_structures(batch: Dictionary) -> void:
 			else:
 				battle_data.placed_structures.append(r.duplicate())
 			dirty_sids.append(sid)
+		# Tombstones: drop deleted sids from render cache (B1).
+		var removed: PackedInt32Array = batch.get("removed_ids", PackedInt32Array())
+		if removed.size() > 0:
+			var drop: Dictionary = {}
+			for i in range(removed.size()):
+				drop[int(removed[i])] = true
+				dirty_sids.append(int(removed[i]))
+			var kept: Array = []
+			for st in battle_data.placed_structures:
+				if st is Dictionary and not drop.has(int(st.get("id", -1))):
+					kept.append(st)
+			battle_data.placed_structures = kept
 	# Budget: only refresh markers for changed sids (full empty list rebuild only on full seed).
 	if globe_map != null and dirty_sids.size() > 0:
 		if bool(batch.get("full", false)):
@@ -1329,8 +1373,97 @@ func _apply_scd1_roads(batch: Dictionary) -> void:
 		return
 	var idxs: PackedInt32Array = batch.get("indices", PackedInt32Array())
 	for i in range(idxs.size()):
-		_network_road_pending.append(int(idxs[i]))
+		var cell: int = int(idxs[i])
+		var cls: int = int(_road_class_by_cell.get(cell, OutpostBuildLib.ROAD_CLASS_ARTERIAL))
+		if cls == OutpostBuildLib.ROAD_CLASS_NONE or cls == OutpostBuildLib.ROAD_CLASS_PLANNED:
+			cls = OutpostBuildLib.ROAD_CLASS_ARTERIAL
+		if cls == OutpostBuildLib.ROAD_CLASS_PLANNED_SHOULDER or cls == OutpostBuildLib.ROAD_CLASS_SHOULDER:
+			_enqueue_network_road_paint(cell, OutpostBuildLib.ROAD_CLASS_SHOULDER)
+		else:
+			_paint_road_center_and_shoulders(cell, cls)
 	_drain_network_road_visuals()
+
+
+func _stamp_planned_road_paint(path: PackedInt32Array, road_class: int) -> void:
+	if not CFG.ROAD_CELL_PAINT or path.is_empty() or battle_data == null:
+		return
+	var bridge_path: bool = road_class == OutpostBuildLib.ROAD_CLASS_BRIDGE
+	var path_set: Dictionary = {}
+	for pk in path:
+		path_set[int(pk)] = true
+	# Cosmetic 3-wide: every path cell is white; exactly two side cells are black.
+	for i in range(path.size()):
+		var key: int = int(path[i])
+		if key < 0:
+			continue
+		var prev: int = int(_road_class_by_cell.get(key, OutpostBuildLib.ROAD_CLASS_NONE))
+		var keep: int = _prefer_road_class(prev, road_class)
+		_road_class_by_cell[key] = keep
+		var shoulders: PackedInt32Array = OutpostBuildLib.road_shoulder_cells(
+			battle_data, path, i, bridge_path
+		)
+		_road_shoulders_by_center[key] = shoulders
+		var center_paint: int = keep if i == 0 else OutpostBuildLib.ROAD_CLASS_PLANNED
+		_enqueue_network_road_paint(key, center_paint)
+		var shoulder_paint: int = (
+			OutpostBuildLib.ROAD_CLASS_SHOULDER
+			if i == 0
+			else OutpostBuildLib.ROAD_CLASS_PLANNED_SHOULDER
+		)
+		for s in shoulders:
+			var sk: int = int(s)
+			if sk < 0 or path_set.has(sk):
+				continue
+			var existing: int = int(_road_class_by_cell.get(sk, OutpostBuildLib.ROAD_CLASS_NONE))
+			if _road_class_rank(existing) >= _road_class_rank(OutpostBuildLib.ROAD_CLASS_SPUR):
+				continue
+			_road_class_by_cell[sk] = OutpostBuildLib.ROAD_CLASS_SHOULDER
+			_enqueue_network_road_paint(sk, shoulder_paint)
+
+
+func _paint_road_center_and_shoulders(center: int, center_class: int) -> void:
+	_enqueue_network_road_paint(center, center_class)
+	var shoulders: Variant = _road_shoulders_by_center.get(center, PackedInt32Array())
+	if shoulders is PackedInt32Array:
+		for s in shoulders:
+			var sk: int = int(s)
+			if sk < 0:
+				continue
+			var existing: int = int(_road_class_by_cell.get(sk, OutpostBuildLib.ROAD_CLASS_NONE))
+			if _road_class_rank(existing) >= _road_class_rank(OutpostBuildLib.ROAD_CLASS_SPUR):
+				continue
+			_road_class_by_cell[sk] = OutpostBuildLib.ROAD_CLASS_SHOULDER
+			_enqueue_network_road_paint(sk, OutpostBuildLib.ROAD_CLASS_SHOULDER)
+
+
+func _prefer_road_class(a: int, b: int) -> int:
+	# bridge > arterial > spur > shoulder > planned > planned_shoulder > none
+	return a if _road_class_rank(a) >= _road_class_rank(b) else b
+
+
+func _road_class_rank(cls: int) -> int:
+	match cls:
+		OutpostBuildLib.ROAD_CLASS_BRIDGE:
+			return 6
+		OutpostBuildLib.ROAD_CLASS_ARTERIAL:
+			return 5
+		OutpostBuildLib.ROAD_CLASS_SPUR:
+			return 4
+		OutpostBuildLib.ROAD_CLASS_SHOULDER:
+			return 3
+		OutpostBuildLib.ROAD_CLASS_PLANNED:
+			return 2
+		OutpostBuildLib.ROAD_CLASS_PLANNED_SHOULDER:
+			return 1
+		_:
+			return 0
+
+
+func _enqueue_network_road_paint(cell: int, road_class: int) -> void:
+	if cell < 0:
+		return
+	_network_road_pending.append(cell)
+	_network_road_pending_class.append(road_class)
 
 
 func _apply_scd1_agents(batch: Dictionary) -> void:
@@ -1562,11 +1695,12 @@ func _rebuild_route_portals_for_team(team: int, route_home: Vector2i) -> void:
 		return
 	if route_home.x < 0:
 		route_home = _player_home if team == BattleTileControlLib.OWNER_FRIENDLY else _enemy_home
-	var network_built: PackedByteArray = PackedByteArray()
+	# Option B: built ∪ planned so simultaneous connects can spur onto reserved corridors.
+	var network_route: PackedByteArray = PackedByteArray()
 	if _builder_authority_active() and territory_sim != null:
-		network_built = territory_sim.get_network_built_mask(team)
+		network_route = territory_sim.get_network_route_mask(team)
 	route_planner.update_infra_for_team(
-		battle_data, _placement_structures(), team, network_built
+		battle_data, _placement_structures(), team, network_route
 	)
 	route_planner.rebuild_portals(battle_data, _placement_structures(), route_home, team)
 
@@ -1683,14 +1817,25 @@ func _finish_place_from_route(
 ) -> void:
 	if battle_data == null or _build_mode == "":
 		return
-	var route: Dictionary = route_planner.decode_route_result(res)
+	var route: Dictionary = route_planner.decode_route_result(res, battle_data)
 	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
+	var source: Vector2i = route.get("source", Vector2i(-1, -1))
 	if path_packed.is_empty():
+		# Match sync placement: player gets standalone fallback when async routing fails.
 		if _build_mode == OutpostBuildLib.KIND_CORRIDOR_LINK:
 			build_hint_label.text = "No route found for this land bridge."
-		else:
+			return
+		_ensure_route_portals_for_team(BattleTileControlLib.OWNER_FRIENDLY, _player_home, true)
+		var sync_placement: Dictionary = _resolve_placement(grid, true, _build_mode)
+		if str(sync_placement.get("reject", "")) != "":
+			build_hint_label.text = str(sync_placement.get("reject", "Could not place outpost here."))
+			return
+		path_packed = sync_placement.get("path_packed", PackedInt32Array())
+		landing = sync_placement.get("landing", landing)
+		source = sync_placement.get("source", landing)
+		if path_packed.is_empty():
 			build_hint_label.text = "Could not place outpost here."
-		return
+			return
 	elif _build_mode != OutpostBuildLib.KIND_CORRIDOR_LINK and not OutpostBuildLib.path_is_cardinal_dense(battle_data, path_packed):
 		path_packed = OutpostBuildLib.densify_path_cardinal(battle_data, path_packed)
 	if not EconomyLib.can_afford_build(_supply, _friendly_resources, _build_mode):
@@ -1702,7 +1847,7 @@ func _finish_place_from_route(
 	var placement: Dictionary = {
 		"landing": landing,
 		"path_packed": path_packed,
-		"source": route.get("source", Vector2i(-1, -1)),
+		"source": source,
 	}
 	var placed_sid: int = _commit_placed_structure(
 		placement, BattleTileControlLib.OWNER_FRIENDLY, _build_mode, grid
@@ -1716,7 +1861,7 @@ func _finish_place_from_route(
 func _apply_hover_route_preview(res: Dictionary) -> void:
 	if globe_map == null or battle_data == null:
 		return
-	var route: Dictionary = route_planner.decode_route_result(res)
+	var route: Dictionary = route_planner.decode_route_result(res, battle_data)
 	var path_packed: PackedInt32Array = route.get("path_packed", PackedInt32Array())
 	if path_packed.is_empty():
 		_clear_placement_preview()
@@ -1782,6 +1927,12 @@ func _world_session_active() -> bool:
 
 func _builder_authority_active() -> bool:
 	return territory_sim != null and territory_sim.builder_authority_active()
+
+
+func _gameplay_grid_w() -> int:
+	if battle_data != null and battle_data.sphere_mode:
+		return battle_data.cell_count
+	return battle_data.grid_width if battle_data else 0
 
 
 func _resource_wallet_active() -> bool:
@@ -2418,6 +2569,9 @@ func _init_builder_agents() -> void:
 	_builder_job_queue_friendly.clear()
 	_builder_job_queue_hostile.clear()
 	_network_road_pending = PackedInt32Array()
+	_network_road_pending_class = PackedByteArray()
+	_road_class_by_cell.clear()
+	_road_shoulders_by_center.clear()
 	if territory_sim != null and territory_sim.rust_live_ready:
 		territory_sim.configure_builders(_player_home, _enemy_home)
 		_seed_network_road_visuals()
@@ -2427,23 +2581,38 @@ func _init_builder_agents() -> void:
 func _seed_network_road_visuals() -> void:
 	if territory_sim == null:
 		return
+	if globe_map != null and globe_map.has_method("register_network_road_path"):
+		for st: Dictionary in _placement_structures():
+			var pk: PackedInt32Array = st.get("path_keys", PackedInt32Array())
+			globe_map.register_network_road_path(pk)
+		if battle_data != null:
+			for corridor: Dictionary in battle_data.bridge_corridors:
+				var cpk: PackedInt32Array = corridor.get("path_keys", PackedInt32Array())
+				globe_map.register_network_road_path(cpk)
 	for team in [BattleTileControlLib.OWNER_FRIENDLY, BattleTileControlLib.OWNER_HOSTILE]:
 		var mask: PackedByteArray = territory_sim.get_network_built_mask(team)
 		for idx in range(mask.size()):
 			if mask[idx] != 0:
-				_network_road_pending.append(idx)
+				var cls: int = int(_road_class_by_cell.get(idx, OutpostBuildLib.ROAD_CLASS_ARTERIAL))
+				_enqueue_network_road_paint(idx, cls)
 
 
 func _drain_network_road_visuals() -> void:
 	if globe_map == null or _network_road_pending.is_empty():
 		return
 	var cap: int = CFG.MAX_NETWORK_ROAD_CELLS_PER_FRAME
-	var batch := PackedInt32Array()
 	var n: int = mini(cap, _network_road_pending.size())
-	if n > 0:
-		batch = _network_road_pending.slice(0, n)
-		_network_road_pending = _network_road_pending.slice(n, _network_road_pending.size())
-	if not batch.is_empty():
+	if n <= 0:
+		return
+	var batch: PackedInt32Array = _network_road_pending.slice(0, n)
+	var classes: PackedByteArray = _network_road_pending_class.slice(0, n)
+	_network_road_pending = _network_road_pending.slice(n, _network_road_pending.size())
+	_network_road_pending_class = _network_road_pending_class.slice(
+		n, _network_road_pending_class.size()
+	)
+	if CFG.ROAD_CELL_PAINT:
+		globe_map.apply_road_paint_delta(batch, classes)
+	else:
 		globe_map.apply_network_road_cells(batch)
 
 
@@ -2483,7 +2652,7 @@ func _assign_builder_jobs(team_filter: int = -1) -> void:
 		_builder_agents,
 		_builder_queues_dict(),
 		battle_data.placed_structures,
-		battle_data.grid_width,
+		battle_data,
 		team_filter,
 	)
 	_builder_visual_dirty = true
@@ -2499,7 +2668,7 @@ func _start_builder_job(bot: Dictionary, sid: int) -> void:
 func _begin_builder_return(bot: Dictionary) -> void:
 	if battle_data == null:
 		return
-	BuilderAgentLib.begin_builder_return(bot, battle_data.placed_structures, battle_data.grid_width)
+	BuilderAgentLib.begin_builder_return(bot, battle_data.placed_structures, battle_data)
 	_builder_visual_dirty = true
 
 
@@ -2538,7 +2707,14 @@ func _update_builder_agents(dt: float) -> void:
 		if bool(frame.get("visual_dirty", false)):
 			_outpost_road_dirty = true
 		for cell_key in frame.get("new_built_cells", PackedInt32Array()):
-			_network_road_pending.append(int(cell_key))
+			var ck: int = int(cell_key)
+			var cls: int = int(_road_class_by_cell.get(ck, OutpostBuildLib.ROAD_CLASS_ARTERIAL))
+			if cls == OutpostBuildLib.ROAD_CLASS_NONE or cls == OutpostBuildLib.ROAD_CLASS_PLANNED:
+				cls = OutpostBuildLib.ROAD_CLASS_ARTERIAL
+			if cls == OutpostBuildLib.ROAD_CLASS_PLANNED_SHOULDER or cls == OutpostBuildLib.ROAD_CLASS_SHOULDER:
+				_enqueue_network_road_paint(ck, OutpostBuildLib.ROAD_CLASS_SHOULDER)
+			else:
+				_paint_road_center_and_shoulders(ck, cls)
 		# Cell growth: path_built applied from PresentationTxn in _flush; local patch for same-frame cache.
 		for ev_var in frame.get("cell_arrivals", []):
 			_on_rust_builder_cell_arrival(ev_var)
@@ -2558,7 +2734,6 @@ func _update_builder_agents(dt: float) -> void:
 		_builder_agents,
 		battle_data.placed_structures,
 		_builder_queues_dict(),
-		battle_data.grid_width,
 		battle_data,
 		tctrl,
 	)
@@ -2665,7 +2840,7 @@ func _builder_work_grid_pos(bot: Dictionary) -> Vector2:
 		var home_fb: Vector2i = _builder_home_grid(bot)
 		return BuilderAgentLib.orbit_grid(home_fb, float(bot.get("orbit_angle", 0.0)))
 	return BuilderAgentLib.work_grid_pos(
-		bot, battle_data.placed_structures, battle_data.grid_width
+		bot, battle_data.placed_structures, battle_data
 	)
 
 
@@ -2683,12 +2858,24 @@ func _update_builder_visuals(_delta: float) -> void:
 	var positions: Array = []
 	var teams := PackedByteArray()
 	teams.resize(_builder_agents.size())
+	var sphere: bool = battle_data != null and battle_data.sphere_mode
 	for i in range(_builder_agents.size()):
 		var bot: Dictionary = _builder_agents[i]
-		var grid_pos: Vector2 = _builder_work_grid_pos(bot)
-		positions.append(
-			globe_map.grid_float_surface_pos(grid_pos.x, grid_pos.y, CFG.BUILDER_SURFACE_LIFT)
-		)
+		if sphere:
+			positions.append(
+				BuilderAgentLib.work_sphere_world_pos(
+					bot,
+					battle_data.placed_structures,
+					battle_data,
+					globe_map,
+					CFG.BUILDER_SURFACE_LIFT,
+				)
+			)
+		else:
+			var grid_pos: Vector2 = _builder_work_grid_pos(bot)
+			positions.append(
+				globe_map.grid_float_surface_pos(grid_pos.x, grid_pos.y, CFG.BUILDER_SURFACE_LIFT)
+			)
 		teams[i] = int(bot.get("team", BattleTileControlLib.OWNER_FRIENDLY))
 	globe_map.sync_builders(positions, teams)
 
@@ -3427,7 +3614,33 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _is_on_map_grid(gx: int, gy: int) -> bool:
+	if battle_data == null:
+		return false
+	if battle_data.sphere_mode:
+		return gy == 0 and gx >= 0 and gx < battle_data.cell_count
 	return gx >= 0 and gy >= 0 and gx < battle_data.grid_width and gy < battle_data.grid_height
+
+
+func _structure_too_close(a: Vector2i, bx: int, by: int) -> bool:
+	var min_d: int = CFG.MIN_SPAWNER_SPACING_CELLS
+	if battle_data != null and battle_data.sphere_mode:
+		# Angular spacing via unit-sphere positions (cell_id Euclidean is meaningless).
+		if (
+			a.x < 0
+			or bx < 0
+			or a.x >= battle_data.cell_positions.size()
+			or bx >= battle_data.cell_positions.size()
+		):
+			return false
+		var pa: Vector3 = battle_data.cell_positions[a.x].normalized()
+		var pb: Vector3 = battle_data.cell_positions[bx].normalized()
+		var ang: float = acos(clampf(pa.dot(pb), -1.0, 1.0))
+		# Rough cell arc length ≈ sqrt(4π / N); require min_d hops of that scale.
+		var cell_ang: float = sqrt(TAU * 2.0 / maxf(1.0, float(battle_data.cell_count)))
+		return ang < cell_ang * float(min_d)
+	var dx: int = a.x - bx
+	var dy: int = a.y - by
+	return dx * dx + dy * dy < min_d * min_d
 
 
 func _pct(tiles: int) -> int:

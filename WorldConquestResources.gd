@@ -104,9 +104,9 @@ static func tick(
 	var deposits: Array = map_data.resource_deposits
 	if deposits.is_empty():
 		return result
-	var w: int = map_data.grid_width
-	var h: int = map_data.grid_height
-	var n: int = w * h
+	var w: int = map_data.cell_count if map_data.sphere_mode else map_data.grid_width
+	var h: int = 1 if map_data.sphere_mode else map_data.grid_height
+	var n: int = map_data.gameplay_tile_count()
 	_ensure_bufs(n)
 	var friendly_roads: Dictionary = _road_cells_for_team_cached(
 		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY, network_key
@@ -201,7 +201,7 @@ static func tick(
 					state["yield_acc"] = 0.0
 					links_dirty = true
 		if str(state.get("phase", "")) == PHASE_HAULING:
-			var credited: Array = _tick_hauling(state, delta, w)
+			var credited: Array = _tick_hauling(state, delta, w, map_data)
 			var wallet: Array = result.friendly if team == BattleTileControlLib.OWNER_FRIENDLY else result.hostile
 			wallet[int(state.get("type", 0))] += float(credited[0])
 			if result.pulses.size() >= pulse_cap:
@@ -232,7 +232,7 @@ static func _reset_site(dep_id: int) -> void:
 	_site_states.erase("dep_%d" % dep_id)
 
 
-static func _tick_hauling(state: Dictionary, delta: float, grid_w: int) -> Array:
+static func _tick_hauling(state: Dictionary, delta: float, grid_w: int, map_data = null) -> Array:
 	var haul: PackedInt32Array = state.get("haul_path", PackedInt32Array())
 	if haul.size() < 2:
 		return [0.0, []]
@@ -258,27 +258,44 @@ static func _tick_hauling(state: Dictionary, delta: float, grid_w: int) -> Array
 	state["pulses"] = alive
 	var vis: Array = []
 	for pulse: Dictionary in alive:
-		var pos: Vector2i = _pos_along_path(haul, float(pulse.get("t", 0.0)), grid_w)
-		vis.append({"gx": pos.x, "gy": pos.y, "t": float(pulse.get("t", 0.0))})
+		var sample: Dictionary = _sample_along_path(
+			haul, float(pulse.get("t", 0.0)), grid_w, map_data
+		)
+		sample["t"] = float(pulse.get("t", 0.0))
+		vis.append(sample)
 	return [credited, vis]
 
 
-static func _pos_along_path(path: PackedInt32Array, t: float, grid_w: int) -> Vector2i:
+## Sample a haul path. On sphere, never lerp cell_ids (they are not spatial coords) —
+## return segment endpoints + frac so the globe can slerp in world space.
+static func _sample_along_path(
+	path: PackedInt32Array, t: float, grid_w: int, map_data = null
+) -> Dictionary:
 	var max_i: int = path.size() - 1
-	if max_i <= 0:
-		return OutpostBuildLib.grid_from_packed_key(path[0], grid_w) if path.size() > 0 else Vector2i(-1, -1)
+	if max_i < 0:
+		return {"gx": -1, "gy": -1}
+	if max_i == 0:
+		var only: Vector2i = OutpostBuildLib.grid_from_packed_key(path[0], grid_w, map_data)
+		return {"gx": only.x, "gy": only.y}
 	var f: float = clampf(t, 0.0, 1.0) * float(max_i)
 	var i0: int = int(floor(f))
 	var i1: int = mini(i0 + 1, max_i)
-	if i0 == i1:
-		return OutpostBuildLib.grid_from_packed_key(path[i0], grid_w)
 	var frac: float = f - float(i0)
-	var a: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i0], grid_w)
-	var b: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i1], grid_w)
-	return Vector2i(
-		int(round(lerpf(float(a.x), float(b.x), frac))),
-		int(round(lerpf(float(a.y), float(b.y), frac))),
-	)
+	var a: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i0], grid_w, map_data)
+	var b: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i1], grid_w, map_data)
+	if map_data != null and map_data.sphere_mode:
+		return {"gx": a.x, "gy": a.y, "nx": b.x, "ny": b.y, "frac": frac}
+	if i0 == i1:
+		return {"gx": a.x, "gy": a.y}
+	return {
+		"gx": int(round(lerpf(float(a.x), float(b.x), frac))),
+		"gy": int(round(lerpf(float(a.y), float(b.y), frac))),
+	}
+
+
+static func _pos_along_path(path: PackedInt32Array, t: float, grid_w: int, map_data = null) -> Vector2i:
+	var sample: Dictionary = _sample_along_path(path, t, grid_w, map_data)
+	return Vector2i(int(sample.get("gx", -1)), int(sample.get("gy", -1)))
 
 
 static func _road_cells_for_team_cached(
@@ -335,7 +352,7 @@ static func _build_haul_path(
 		return PackedInt32Array()
 	# Haul visuals + credit: deposit (path[0]) → join → hub/outpost (path[-1]).
 	var join_key: int = link_path[link_path.size() - 1]
-	var hub_key: int = _nearest_hub_key(join_key, hubs, w)
+	var hub_key: int = _nearest_hub_key(join_key, hubs, w, map_data)
 	var out := PackedInt32Array()
 	out.append_array(link_path)
 	if hub_key < 0 or join_key == hub_key:
@@ -344,7 +361,7 @@ static func _build_haul_path(
 	for hub in hubs:
 		if hub.x >= 0:
 			road_targets[_key(hub.x, hub.y, w)] = true
-	var road_path: PackedInt32Array = _bfs_on_roads(join_key, road_targets, roads, w, h)
+	var road_path: PackedInt32Array = _bfs_on_roads(map_data, join_key, road_targets, roads, w, h)
 	if road_path.is_empty():
 		return out
 	for i in range(1, road_path.size()):
@@ -352,7 +369,19 @@ static func _build_haul_path(
 	return out
 
 
-static func _nearest_hub_key(from_key: int, hubs: Array[Vector2i], w: int) -> int:
+static func _nearest_hub_key(from_key: int, hubs: Array[Vector2i], w: int, map_data = null) -> int:
+	if map_data != null and map_data.sphere_mode:
+		var best: int = -1
+		var best_d: int = 0x3FFFFFFF
+		for hub in hubs:
+			if hub.x < 0:
+				continue
+			var hk: int = hub.x
+			var d: int = _sphere_graph_distance(map_data, from_key, hk)
+			if d >= 0 and d < best_d:
+				best_d = d
+				best = hk
+		return best
 	var best: int = -1
 	var best_d: int = 0x3FFFFFFF
 	var fx: int = from_key % w
@@ -369,6 +398,31 @@ static func _nearest_hub_key(from_key: int, hubs: Array[Vector2i], w: int) -> in
 			best_d = d
 			best = hk
 	return best
+
+
+static func _sphere_graph_distance(map_data, from_key: int, to_key: int) -> int:
+	if map_data == null or from_key == to_key:
+		return 0 if from_key == to_key else -1
+	var n: int = map_data.cell_count
+	if from_key < 0 or from_key >= n or to_key < 0 or to_key >= n:
+		return -1
+	var dist: PackedInt32Array = PackedInt32Array()
+	dist.resize(n)
+	dist.fill(-1)
+	var queue: Array[int] = [from_key]
+	dist[from_key] = 0
+	var qi: int = 0
+	while qi < queue.size():
+		var cur: int = queue[qi]
+		qi += 1
+		if cur == to_key:
+			return dist[cur]
+		for nbr in map_data.get_neighbors(cur):
+			if nbr < 0 or nbr >= n or dist[nbr] >= 0:
+				continue
+			dist[nbr] = dist[cur] + 1
+			queue.append(nbr)
+	return -1
 
 
 static func _bfs_to_targets(
@@ -388,6 +442,21 @@ static func _bfs_to_targets(
 	_bfs_gen[start_key] = gen
 	_bfs_queue.append(start_key)
 	var head: int = 0
+	if map_data.sphere_mode:
+		while head < _bfs_queue.size():
+			var cur: int = _bfs_queue[head]
+			head += 1
+			if targets.has(cur) or (not roads.is_empty() and roads.has(cur)):
+				return cur
+			for nbr in map_data.get_neighbors(cur):
+				if _bfs_gen[nbr] == gen:
+					continue
+				if not _can_traverse_link(map_data, grid, nbr, 0, team, roads):
+					continue
+				_bfs_gen[nbr] = gen
+				_bfs_parent[nbr] = cur
+				_bfs_queue.append(nbr)
+		return -1
 	while head < _bfs_queue.size():
 		var cur: int = _bfs_queue[head]
 		head += 1
@@ -416,6 +485,7 @@ static func _bfs_to_targets(
 
 
 static func _bfs_on_roads(
+	map_data,
 	start_key: int,
 	targets: Dictionary,
 	roads: Dictionary,
@@ -429,6 +499,21 @@ static func _bfs_on_roads(
 	_bfs_gen[start_key] = gen
 	_bfs_queue.append(start_key)
 	var head: int = 0
+	if map_data != null and map_data.sphere_mode:
+		while head < _bfs_queue.size():
+			var cur: int = _bfs_queue[head]
+			head += 1
+			if targets.has(cur):
+				return _reconstruct_path(cur)
+			for nbr in map_data.get_neighbors(cur):
+				if _bfs_gen[nbr] == gen:
+					continue
+				if not roads.has(nbr) and nbr != start_key:
+					continue
+				_bfs_gen[nbr] = gen
+				_bfs_parent[nbr] = cur
+				_bfs_queue.append(nbr)
+		return PackedInt32Array()
 	while head < _bfs_queue.size():
 		var cur: int = _bfs_queue[head]
 		head += 1
@@ -464,7 +549,8 @@ static func _can_traverse_link(
 	team: int,
 	roads: Dictionary,
 ) -> bool:
-	var key: int = _key(gx, gy, map_data.grid_width)
+	var key_w: int = map_data.cell_count if map_data.sphere_mode else map_data.grid_width
+	var key: int = _key(gx, gy, key_w)
 	if roads.has(key):
 		return true
 	if not map_data.is_land_cell(gx, gy):

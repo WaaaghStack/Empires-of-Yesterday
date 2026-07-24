@@ -6,12 +6,13 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 
 | Doc | Contents |
 |-----|----------|
-| [DESIGN.md](../DESIGN.md) | Fantasy, controls, dictionary, structures/units, map gen, **WorldDataset + PresentationTxn** architecture, **design locks**, Godot version story |
-| [PERFORMANCE.md](../PERFORMANCE.md) | Frame budgets, PresentationTxn, MultiMesh roads, construction drain order, catch-up cap, env knobs, F3 HUD |
-| [RUST.md](../RUST.md) | Build GDExtension, authority module list, TerritorySim API, env vars |
+| [DESIGN.md](../DESIGN.md) | Fantasy, controls, dictionary, structures/units, map gen, **WorldDataset + SCD1** architecture, **design locks**, Godot version story |
+| [PERFORMANCE.md](../PERFORMANCE.md) | Frame budgets, SCD1 live paint, MultiMesh roads, construction drain order, catch-up cap, env knobs, F3 HUD |
+| [RUST.md](../RUST.md) | Build GDExtension, authority module list, TerritorySim SCD1 API, env vars |
 | [QA_LIFECYCLE.md](../QA_LIFECYCLE.md) | When/how to run headless QA and smoke tests |
 | [README.md](../README.md) | Quick start, play summary, Rust requirement for live |
-| [REQUEST_SCD1_VERSIONED_PULL.md](REQUEST_SCD1_VERSIONED_PULL.md) | **Proposal:** SCD1 main tables + domain monotonic pulls; full snaps only at start/gap |
+| [REQUEST_SCD1_VERSIONED_PULL.md](REQUEST_SCD1_VERSIONED_PULL.md) | SCD1 main tables + domain monotonic pulls; full snaps only at start/gap |
+| [AUDIT_CELL_WORLD_BUGS_UX.md](AUDIT_CELL_WORLD_BUGS_UX.md) | Cell-world / SCD1 / pathing / build UX audit + implement status |
 
 ## Architecture snapshot (live Play)
 
@@ -33,6 +34,8 @@ Treat **Godot 4.6+ with a matching `empire_territory` DLL** as the live developm
 ## Design locks (short index)
 
 See [DESIGN.md](../DESIGN.md) § Design locks for full text. IDs: **A13/F1** enemy AI outpost+bridge only; **A14** bomber no upkeep; **F2** player standalone outpost fallback; **F3** logistics strain subtle; **F4** logistics owns roads; **F5** win formula ignores units; **F6** unit caps; **F7** haul visual cap.
+
+**Open direction:** roads likely removed → teleport / air-drop concept for ground reach — [DESIGN.md](../DESIGN.md) § Direction — roads likely removed.
 
 ## Related paths
 

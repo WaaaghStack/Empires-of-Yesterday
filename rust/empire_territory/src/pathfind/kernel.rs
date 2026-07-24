@@ -1,7 +1,42 @@
 //! Single goal-directed search kernel (A* with optional uniform-cost mode).
 
 use crate::pathfind::graph::NavGraph;
-use crate::route::{heuristic, reconstruct_path, wrap_x, CARDINAL};
+use crate::route::{reconstruct_path, wrap_x, CARDINAL};
+
+fn for_each_neighbor<G: NavGraph>(
+    graph: &G,
+    cur: i32,
+    w: i32,
+    h: i32,
+    mut visit: impl FnMut(i32, i32, i32),
+) {
+    if graph.uses_graph_neighbors() {
+        let cur_ui = cur as usize;
+        let n = graph.neighbor_count_of(cur_ui);
+        for slot in 0..n {
+            if let Some(nui) = graph.neighbor_at(cur_ui, slot) {
+                let ni = nui as i32;
+                let nx = ni % w;
+                let ny = ni / w;
+                visit(ni, nx, ny);
+            }
+        }
+        return;
+    }
+    let cx = cur % w;
+    let cy = cur / w;
+    for (dx, dy) in CARDINAL {
+        let ny = cy + dy;
+        if ny < 0 || ny >= h {
+            continue;
+        }
+        let Some(nx) = wrap_x(cx + dx, w, graph.wrap_longitude()) else {
+            continue;
+        };
+        let ni = ny * w + nx;
+        visit(ni, nx, ny);
+    }
+}
 
 /// Optional search tube around a source→goal segment (longitude-aware).
 #[derive(Clone, Copy, Debug)]
@@ -82,9 +117,10 @@ impl RouteContext {
         Self::astar_with_costs(allow_water, infra_only, 1, 2)
     }
 
-    /// Land bridge: water allowed; favor water slightly so A* does not march around continents.
+    /// Land bridge: water allowed. Mild land premium — geometric + geodesic bias
+    /// already discourage continent marches; a large land tax forces bay-hugging.
     pub const fn land_bridge_astar() -> Self {
-        Self::astar_with_costs(true, false, 8, 1)
+        Self::astar_with_costs(true, false, 2, 1)
     }
 
     pub const fn astar_with_costs(
@@ -218,7 +254,7 @@ impl SearchKernel {
             }
             let sx = sk % w;
             let sy = sk / w;
-            if !Self::in_corridor(ctx, sx, sy, w) {
+            if !Self::in_corridor(graph, ctx, sx, sy, w) {
                 continue;
             }
             self.search.stamp[ui] = self.search.gen;
@@ -251,29 +287,19 @@ impl SearchKernel {
                     },
                 ));
             }
-            let cx = cur % w;
-            let cy = cur / w;
-            for (dx, dy) in CARDINAL {
-                let ny = cy + dy;
-                if ny < 0 || ny >= h {
-                    continue;
-                }
-                let Some(nx) = wrap_x(cx + dx, w, graph.wrap_longitude()) else {
-                    continue;
-                };
-                let ni = ny * w + nx;
+            for_each_neighbor(graph, cur, w, h, |ni, nx, ny| {
                 let nui = ni as usize;
                 if !graph.passable(nui, ctx) || self.search.stamp[nui] == self.search.gen {
-                    continue;
+                    return;
                 }
-                if !Self::in_corridor(ctx, nx, ny, w) {
-                    continue;
+                if !Self::in_corridor(graph, ctx, nx, ny, w) {
+                    return;
                 }
                 self.search.stamp[nui] = self.search.gen;
                 self.search.parent[nui] = cur;
                 self.search.source_key[nui] = self.search.source_key[cur_ui];
                 self.search.queue.push_back(ni);
-            }
+            });
         }
         None
     }
@@ -288,6 +314,14 @@ impl SearchKernel {
         half_widths: &[i32],
         per_band_max_expand: usize,
     ) -> Option<(RoutePath, SearchStats)> {
+        if graph.uses_graph_neighbors() {
+            return self.find_path(
+                graph,
+                sources,
+                goal,
+                base_ctx.with_max_expand(per_band_max_expand),
+            );
+        }
         let w = graph.grid_w();
         let gx = goal % w;
         let gy = goal / w;
@@ -325,7 +359,10 @@ impl SearchKernel {
         best
     }
 
-    fn in_corridor(ctx: RouteContext, px: i32, py: i32, grid_w: i32) -> bool {
+    fn in_corridor<G: NavGraph>(graph: &G, ctx: RouteContext, px: i32, py: i32, grid_w: i32) -> bool {
+        if graph.uses_graph_neighbors() {
+            return true;
+        }
         match ctx.corridor {
             Some(band) => band.contains(px, py, grid_w),
             None => true,
@@ -352,7 +389,7 @@ impl SearchKernel {
             }
             let sx = sk % w;
             let sy = sk / w;
-            if !Self::in_corridor(ctx, sx, sy, w) {
+            if !Self::in_corridor(graph, ctx, sx, sy, w) {
                 continue;
             }
             self.search.stamp[ui] = self.search.gen;
@@ -385,29 +422,19 @@ impl SearchKernel {
                     },
                 ));
             }
-            let cx = cur % w;
-            let cy = cur / w;
-            for (dx, dy) in CARDINAL {
-                let ny = cy + dy;
-                if ny < 0 || ny >= h {
-                    continue;
-                }
-                let Some(nx) = wrap_x(cx + dx, w, graph.wrap_longitude()) else {
-                    continue;
-                };
-                let ni = ny * w + nx;
+            for_each_neighbor(graph, cur, w, h, |ni, nx, ny| {
                 let nui = ni as usize;
                 if !graph.passable(nui, ctx) || self.search.stamp[nui] == self.search.gen {
-                    continue;
+                    return;
                 }
-                if !Self::in_corridor(ctx, nx, ny, w) {
-                    continue;
+                if !Self::in_corridor(graph, ctx, nx, ny, w) {
+                    return;
                 }
                 self.search.stamp[nui] = self.search.gen;
                 self.search.parent[nui] = cur;
                 self.search.source_key[nui] = self.search.source_key[cur as usize];
                 self.search.queue.push_back(ni);
-            }
+            });
         }
         None
     }
@@ -423,6 +450,7 @@ impl SearchKernel {
         let w = graph.grid_w();
         let h = graph.grid_h();
         let gen = self.search.gen;
+        let goal_ui = goal as usize;
         self.heap.clear();
         for &sk in sources {
             if sk < 0 {
@@ -434,26 +462,32 @@ impl SearchKernel {
             }
             let sx = sk % w;
             let sy = sk / w;
-            if !Self::in_corridor(ctx, sx, sy, w) {
+            if !Self::in_corridor(graph, ctx, sx, sy, w) {
                 continue;
             }
             self.search.g_score[ui] = 0;
             self.search.stamp[ui] = gen;
             self.search.parent[ui] = -1;
             self.search.source_key[ui] = sk;
-            let f = heuristic(sk, goal, w);
+            let f = graph.heuristic(sk, goal);
             heap_push(&mut self.heap, sk, f);
         }
         if self.heap.is_empty() {
             return None;
         }
         let mut expanded = 0usize;
-        while let Some((cur, _f)) = heap_pop(&mut self.heap) {
+        while let Some((cur, f_popped)) = heap_pop(&mut self.heap) {
             if expanded >= ctx.max_expand {
                 return None;
             }
             let cur_ui = cur as usize;
             if self.search.stamp[cur_ui] != gen {
+                continue;
+            }
+            let cur_g = self.search.g_score[cur_ui];
+            // Skip stale heap entries (a better g was found after this push).
+            let f_now = cur_g.saturating_add(graph.heuristic(cur, goal));
+            if f_popped > f_now {
                 continue;
             }
             expanded += 1;
@@ -469,27 +503,33 @@ impl SearchKernel {
                     },
                 ));
             }
-            let cx = cur % w;
-            let cy = cur / w;
-            let cur_g = self.search.g_score[cur_ui];
-            for (dx, dy) in CARDINAL {
-                let ny = cy + dy;
-                if ny < 0 || ny >= h {
-                    continue;
-                }
-                let Some(nx) = wrap_x(cx + dx, w, graph.wrap_longitude()) else {
-                    continue;
-                };
-                let ni = ny * w + nx;
+            for_each_neighbor(graph, cur, w, h, |ni, nx, ny| {
                 let nui = ni as usize;
                 if !graph.passable(nui, ctx) {
-                    continue;
+                    return;
                 }
-                if !Self::in_corridor(ctx, nx, ny, w) {
-                    continue;
+                if !Self::in_corridor(graph, ctx, nx, ny, w) {
+                    return;
                 }
-                let tentative = cur_g + graph.step_cost(nui, ctx);
-                if self.search.stamp[nui] != gen || tentative < self.search.g_score[nui] {
+                let src_key = self.search.source_key[cur_ui];
+                let step = graph
+                    .step_cost(cur_ui, nui, ctx)
+                    .saturating_add(graph.geodesic_deviation(src_key, goal, ni));
+                let tentative = cur_g.saturating_add(step);
+                let unseen = self.search.stamp[nui] != gen;
+                let better = unseen || tentative < self.search.g_score[nui];
+                let tie_better = if !unseen && tentative == self.search.g_score[nui] {
+                    let old_parent = self.search.parent[nui];
+                    let old_align = if old_parent < 0 {
+                        i32::MIN
+                    } else {
+                        graph.edge_alignment(old_parent as usize, nui, goal_ui)
+                    };
+                    graph.edge_alignment(cur_ui, nui, goal_ui) > old_align
+                } else {
+                    false
+                };
+                if better || tie_better {
                     self.search.stamp[nui] = gen;
                     self.search.g_score[nui] = tentative;
                     self.search.parent[nui] = cur;
@@ -497,10 +537,10 @@ impl SearchKernel {
                     heap_push(
                         &mut self.heap,
                         ni,
-                        tentative + heuristic(ni, goal, w),
+                        tentative.saturating_add(graph.heuristic(ni, goal)),
                     );
                 }
-            }
+            });
         }
         None
     }
@@ -575,6 +615,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         }
     }
 
@@ -599,5 +642,88 @@ mod tests {
             "expand_count={}",
             stats.expand_count
         );
+    }
+
+    #[test]
+    fn geometric_sphere_cost_prefers_shorter_chords() {
+        // Diamond: 0→1→3 is short; 0→2→3 is long (same hop count).
+        let mut neighbors = vec![[-1i32; 6]; 4];
+        let mut neighbor_count = vec![0u8; 4];
+        let edges = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 3), (3, 1), (2, 3), (3, 2)];
+        for (a, b) in edges {
+            let slot = neighbor_count[a] as usize;
+            neighbors[a][slot] = b as i32;
+            neighbor_count[a] += 1;
+        }
+        let positions = vec![
+            [0.0, 0.0, 1.0],
+            [0.05, 0.0, 0.9987], // near 0
+            [0.8, 0.0, 0.6],     // far from 0 and 3
+            [0.1, 0.0, 0.995],   // near 1
+        ];
+        let snap = RouteSnapshot {
+            grid_w: 4,
+            grid_h: 1,
+            wrap_longitude: false,
+            land_mask: vec![1u8; 4],
+            bridge_mask: vec![0u8; 4],
+            land_comp: vec![0; 4],
+            graph_neighbors: neighbors,
+            graph_neighbor_count: neighbor_count,
+            cell_positions: positions,
+        };
+        let mut kernel = SearchKernel::new(4);
+        let ctx = RouteContext::astar(false, false).with_max_expand(64);
+        let (path, _) = kernel
+            .find_path(&snap, &[0], 3, ctx)
+            .expect("geometric path");
+        assert_eq!(path.path, vec![0, 1, 3], "path={:?}", path.path);
+    }
+
+    #[test]
+    fn geodesic_penalty_avoids_bay_detour() {
+        // 0 ---- 1 ---- 3  (on great-circle band)
+        //  \           /
+        //   ---- 2 ----     (2 is far off-plane → expensive)
+        let mut neighbors = vec![[-1i32; 6]; 4];
+        let mut neighbor_count = vec![0u8; 4];
+        let edges = [
+            (0, 1),
+            (1, 0),
+            (1, 3),
+            (3, 1),
+            (0, 2),
+            (2, 0),
+            (2, 3),
+            (3, 2),
+        ];
+        for (a, b) in edges {
+            let slot = neighbor_count[a] as usize;
+            neighbors[a][slot] = b as i32;
+            neighbor_count[a] += 1;
+        }
+        let positions = vec![
+            [0.0, 0.0, 1.0],
+            [0.1, 0.0, 0.995],
+            [0.05, 0.7, 0.7], // off the equator plane of 0→3
+            [0.2, 0.0, 0.98],
+        ];
+        let snap = RouteSnapshot {
+            grid_w: 4,
+            grid_h: 1,
+            wrap_longitude: false,
+            land_mask: vec![0u8; 4], // all water
+            bridge_mask: vec![0u8; 4],
+            land_comp: vec![-1; 4],
+            graph_neighbors: neighbors,
+            graph_neighbor_count: neighbor_count,
+            cell_positions: positions,
+        };
+        let mut kernel = SearchKernel::new(4);
+        let ctx = RouteContext::land_bridge_astar().with_max_expand(64);
+        let (path, _) = kernel
+            .find_path(&snap, &[0], 3, ctx)
+            .expect("bridge path");
+        assert_eq!(path.path, vec![0, 1, 3], "path={:?}", path.path);
     }
 }

@@ -24,8 +24,15 @@ const _TEAM_TIE := 3
 
 
 ## Build a smooth Creeper-style influence image from discrete tile owners.
+## Rect battle maps only — sphere WC fluid is owned by EarthGlobeMap.
 static func build_fluid_image(map_data, owners: PackedByteArray, diffuse_passes: int = DIFFUSE_PASSES, power_scale: float = 1.0) -> Image:
 	if map_data == null or owners.is_empty():
+		return null
+	if map_data.sphere_mode:
+		push_warning(
+			"BattleTileFluidField.build_fluid_image: rect fluid bake skipped in sphere WC "
+			+ "(EarthGlobeMap owns fluid)."
+		)
 		return null
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
@@ -326,6 +333,12 @@ static func build_fluid_image_from_powers(
 	diffuse_passes: int = 0,
 ) -> Image:
 	if map_data == null or friendly_power.is_empty() or hostile_power.is_empty():
+		return null
+	if map_data.sphere_mode:
+		push_warning(
+			"BattleTileFluidField.build_fluid_image_from_powers: rect fluid bake skipped in sphere WC "
+			+ "(EarthGlobeMap owns fluid)."
+		)
 		return null
 	var f: PackedFloat32Array = friendly_power
 	var hs: PackedFloat32Array = hostile_power

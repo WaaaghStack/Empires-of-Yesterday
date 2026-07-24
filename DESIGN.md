@@ -50,8 +50,8 @@ The objective is **total conquest**: own every reachable claimable land tile, or
 | **Home pump** | Capital tile injects `HOME_START_POWER × (1 + force × 0.01)` × `WORLD_CONQUEST_PRESSURE_SCALE` (1/2000) per inject interval. | `BattleTileControl.home_spawn_rate_for_force` |
 | **Supply** | Player wallet. Starts at `STARTING_SUPPLY` (1200); income `INCOME_PER_TILE_PER_SEC` (0.8) per owned tile. Spent on outposts (400), barracks (400), hangars (400), and bridges (250). | `WorldConquestScreen`, `WorldConquestConfig`, `EconomyCatalog` |
 | **Outpost (spawner)** | Player-placed pressure pump. Lands on the exact clicked tile; placement is allowed on any land tile except enemy-held ones. Connects to the network by road, then builds for `OUTPOST_BUILD_SEC`; takes `OUTPOST_ENEMY_DPS` while building on hostile ground. | `WorldConquestOutpostBuild.gd`, `WorldConquestScreen._resolve_placement` |
-| **Barracks** | Supply cost 400; build `BARRACKS_BUILD_SEC` (60 s). Spawns **soldiers** every `BARRACKS_SPAWN_INTERVAL_SEC` (10 s) for Aurelium (`SOLDIER_SPAWN_AURELIUM_COST` = 3). Cap **5** living per barracks; global soldier cap **100**. | `EconomyCatalog`, `world_session.rs`, `agents.rs` |
-| **Hangar** | Supply cost 400; build `HANGAR_BUILD_SEC` (60 s). Spawns **bombers** every `HANGAR_SPAWN_INTERVAL_SEC` (10 s) for Aurelium (`BOMBER_SPAWN_AURELIUM_COST` = 3). Cap **5** living per hangar; global bomber cap **100**. | `EconomyCatalog`, `world_session.rs`, `bombers.rs` |
+| **Barracks** | Supply cost 400; build `BARRACKS_BUILD_SEC` (**5 s**, same as outpost). Spawns **soldiers** every `BARRACKS_SPAWN_INTERVAL_SEC` (10 s) for Aurelium (`SOLDIER_SPAWN_AURELIUM_COST` = 3). Cap **5** living per barracks; global soldier cap **100**. | `EconomyCatalog`, `world_session.rs`, `agents.rs` |
+| **Hangar** | Supply cost 400; build `HANGAR_BUILD_SEC` (**5 s**, same as outpost). Spawns **bombers** every `HANGAR_SPAWN_INTERVAL_SEC` (10 s) for Aurelium (`BOMBER_SPAWN_AURELIUM_COST` = 3). Cap **5** living per hangar; global bomber cap **100**. | `EconomyCatalog`, `world_session.rs`, `bombers.rs` |
 | **Soldier** | Ground unit: aura pressure + erode enemy pressure; moves on land/infra. **Aurelium upkeep** `SOLDIER_UPKEEP_AURELIUM_PER_SEC` (0.15); deficit applies `SOLDIER_UPKEEP_DEFICIT_DPS`. Orphan damage if barracks destroyed. | `WorldConquestConfig`, `agents.rs` |
 | **Bomber** | Air unit: bombs enemy infrastructure/pressure. **No Aurelium upkeep** (spawn cost only) — intentional (Design lock A14). | `bombers.rs`, `EconomyCatalog` units.bomber |
 | **Land bridge (corridor link)** | Water-only crossing from your network to a foreign coast. Built cells become claimable and conduct pressure (`BRIDGE_PRESSURE_FLOW_MULT` = **2.8**) and count as roads for logistics. | `nearest_corridor_path_to_target`, `bridge_corridors`, `WorldConquestConfig` |
@@ -86,8 +86,8 @@ The objective is **total conquest**: own every reachable claimable land tile, or
 | Kind | Supply | Build | Role |
 |------|--------|-------|------|
 | Outpost (`spawner`) | 400 | `OUTPOST_BUILD_SEC` (5 s) after road | Pressure pump |
-| Barracks | 400 | 60 s | Spawns soldiers (Aurelium) |
-| Hangar | 400 | 60 s | Spawns bombers (Aurelium) |
+| Barracks | 400 | 5 s | Spawns soldiers (Aurelium) |
+| Hangar | 400 | 5 s | Spawns bombers (Aurelium) |
 | Land Bridge (`corridor_link`) | 250 | road/corridor only | Water crossing + road |
 
 ### Outpost / barracks / hangar placement (`WorldConquestScreen._resolve_placement`)
@@ -170,10 +170,19 @@ Product choices locked for the current ship target (code may implement them as i
 | **A14** | **Bombers have no Aurelium upkeep**; soldiers have upkeep. Intentional. |
 | **F2** | **Standalone outpost fallback** allowed for the **player only** when no route exists; logged as a `RunLog` warning. |
 | **F3** | **Logistics strain** affects inject / output mult; may be subtle to the player — intentional for now. |
-| **F4** | **Builder bots** are presentation legacy; **logistics** owns roads under live WorldDataset authority. |
+| **F4** | **Builder bots** are presentation legacy; **logistics** owns roads under live WorldDataset authority. (**Direction:** roads may be removed — see DESIGN.md § Direction — roads likely removed.) |
 | **F5** | Win is **land conquest** or **zero enemy pressure**; units do not alter the win formula. |
 | **F6** | Cap **5** living units per barracks/hangar structure; global **100** soldiers and **100** bombers. |
 | **F7** | Resource haul **visuals** capped (`RESOURCE_MAX_VISUAL_PULSES`); economy still gets **full credit**. |
+
+### Direction — roads likely removed (open)
+
+**Intent (2026-07-22):** Cell-path **roads are not working out** and will probably be **removed entirely**. Ground-unit reach beyond local movement will move to a **teleport / projection** concept instead of road networks. Candidate shapes (undecided):
+
+- **Air-drop ships** (or similar projection vehicles), and/or
+- A **teleporting building** / gate structure
+
+Until that lands: keep current logistics/roads code as living authority; do not invest heavily in further road-path polish except critical play blockers. Land bridges may still matter for **pressure / claimable ocean crossings** even if road ribbons go away — revisit when the teleport design is chosen.
 
 ---
 

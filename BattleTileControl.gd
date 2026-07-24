@@ -37,6 +37,7 @@ const HEIGHT_MAX := 100.0
 const FLOW_CONDUCTIVITY := 0.32
 const MIN_FLOW_DELTA := 0.1
 const MAX_OUTFLOW_FRAC := 0.5
+static var _diffuse_sphere_warned: bool = false
 ## Ignore tiny pressure for territory claims (visual fade handled in BattleTileFluidField).
 const MIN_CLAIM_PRESSURE := 0.04
 ## Base home power; per-round and start pressure scale by committed force (see home_spawn_rate_for_force).
@@ -146,7 +147,7 @@ var _claim_ratio_mult: PackedFloat32Array = PackedFloat32Array()
 
 func setup(map_data) -> void:
 	_map_data = map_data
-	_tile_count = map_data.grid_width * map_data.grid_height if map_data else 0
+	_tile_count = map_data.gameplay_tile_count() if map_data else 0
 	owners.resize(_tile_count)
 	owners.fill(OWNER_NEUTRAL)
 	_friendly_reachable = _bfs_reachable(map_data, _spawn_cells(map_data, true))
@@ -169,16 +170,26 @@ func setup(map_data) -> void:
 	_active_dirty_list.clear()
 	_grad_targets.resize(4)
 	_grad_amounts.resize(4)
-	for idx in range(_tile_count):
-		var gx: int = idx % map_data.grid_width
-		var gy: int = idx / map_data.grid_width
-		var claimable: bool = _is_claimable_index(idx)
-		claimable_mask[idx] = 1 if claimable else 0
-		_elevation[idx] = tile_elevation(map_data, gx, gy) if claimable else 0.0
-		_terrain_flow_mult[idx] = _flow_mult_for_tile(map_data, gx, gy, claimable)
-		_claim_ratio_mult[idx] = _claim_mult_for_tile(map_data, gx, gy, claimable)
-		if not claimable:
-			owners[idx] = OWNER_UNCLAIMABLE
+	if map_data.sphere_mode:
+		for cell_id in range(map_data.cell_count):
+			var claimable: bool = _is_claimable_index(cell_id)
+			claimable_mask[cell_id] = 1 if claimable else 0
+			_elevation[cell_id] = tile_elevation(map_data, cell_id, 0) if claimable else 0.0
+			_terrain_flow_mult[cell_id] = _flow_mult_for_tile(map_data, cell_id, 0, claimable)
+			_claim_ratio_mult[cell_id] = _claim_mult_for_tile(map_data, cell_id, 0, claimable)
+			if not claimable:
+				owners[cell_id] = OWNER_UNCLAIMABLE
+	else:
+		for idx in range(_tile_count):
+			var gx: int = idx % map_data.grid_width
+			var gy: int = idx / map_data.grid_width
+			var claimable: bool = _is_claimable_index(idx)
+			claimable_mask[idx] = 1 if claimable else 0
+			_elevation[idx] = tile_elevation(map_data, gx, gy) if claimable else 0.0
+			_terrain_flow_mult[idx] = _flow_mult_for_tile(map_data, gx, gy, claimable)
+			_claim_ratio_mult[idx] = _claim_mult_for_tile(map_data, gx, gy, claimable)
+			if not claimable:
+				owners[idx] = OWNER_UNCLAIMABLE
 	claimable_tile_count = 0
 	for idx2 in range(_tile_count):
 		if claimable_mask[idx2] != 0:
@@ -305,16 +316,28 @@ func propagate_round(map_data, store, cell_grid = null) -> void:
 	f_count.fill(0)
 	h_count.fill(0)
 	if cell_grid != null:
-		for i in range(_tile_count):
-			f_count[i] = cell_grid.friendly_count_at_cell(i % map_data.grid_width, i / map_data.grid_width)
-			h_count[i] = cell_grid.hostile_count_at_cell(i % map_data.grid_width, i / map_data.grid_width)
+		if map_data.sphere_mode:
+			for i in range(_tile_count):
+				f_count[i] = cell_grid.friendly_count_at_cell(i, 0)
+				h_count[i] = cell_grid.hostile_count_at_cell(i, 0)
+		else:
+			for i in range(_tile_count):
+				f_count[i] = cell_grid.friendly_count_at_cell(
+					i % map_data.grid_width, i / map_data.grid_width
+				)
+				h_count[i] = cell_grid.hostile_count_at_cell(
+					i % map_data.grid_width, i / map_data.grid_width
+				)
 	elif store != null:
 		for i in range(store.count):
 			if not store.is_alive(i):
 				continue
 			var gx: int = store.grid_x[i]
 			var gy: int = store.grid_y[i]
-			if gx < 0 or gy < 0 or gx >= map_data.grid_width or gy >= map_data.grid_height:
+			if map_data.sphere_mode:
+				if gy != 0 or gx < 0 or gx >= map_data.cell_count:
+					continue
+			elif gx < 0 or gy < 0 or gx >= map_data.grid_width or gy >= map_data.grid_height:
 				continue
 			var idx: int = map_data.cell_index(gx, gy)
 			if store.side[i] == UnitSimulationStoreLib.Side.FRIENDLY:
@@ -452,7 +475,12 @@ func _gradient_flow_pass_into(
 	for idx in range(_tile_count):
 		if claimable_mask[idx] == 0:
 			continue
-		_gradient_flow_tile(map_data, w, h, idx % w, idx / w, src, dst)
+		var gx: int = idx
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = idx % w
+			gy = idx / w
+		_gradient_flow_tile(map_data, w, h, gx, gy, src, dst)
 
 
 func _gradient_flow_active(map_data, w: int, h: int, src: PackedFloat32Array, dst: PackedFloat32Array) -> void:
@@ -460,11 +488,21 @@ func _gradient_flow_active(map_data, w: int, h: int, src: PackedFloat32Array, ds
 	for idx in _active_indices:
 		_active_seen[idx] = 1
 	for idx in _active_indices:
+		var gx: int = idx
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = idx % w
+			gy = idx / w
 		_gradient_flow_tile(
-			map_data, w, h, idx % w, idx / w, src, dst, _active_scratch
+			map_data, w, h, gx, gy, src, dst, _active_scratch
 		)
 	for ni in _active_scratch:
-		_gradient_flow_tile(map_data, w, h, ni % w, ni / w, src, dst)
+		var ngx: int = ni
+		var ngy: int = 0
+		if not map_data.sphere_mode:
+			ngx = ni % w
+			ngy = ni / w
+		_gradient_flow_tile(map_data, w, h, ngx, ngy, src, dst)
 		_active_seen[ni] = 0
 
 
@@ -527,13 +565,19 @@ func _outflow_pass(map_data, w: int, h: int, src: PackedFloat32Array) -> PackedF
 
 
 func _home_base_tile_index(map_data, zone: Rect2, is_player: bool = true) -> int:
-	if map_data == null or zone.size.x <= 1.0 or zone.size.y <= 1.0:
+	if map_data == null:
 		return -1
-	var hq: Vector2i = (
-		map_data.player_home_grid if is_player else map_data.enemy_home_grid
-	)
-	if hq.x >= 0 and map_data.is_land_cell(hq.x, hq.y):
-		return map_data.cell_index(hq.x, hq.y)
+	if map_data.sphere_mode:
+		var hq: Vector2i = map_data.player_home_grid if is_player else map_data.enemy_home_grid
+		if hq.x >= 0 and hq.x < map_data.cell_count and map_data.is_land_cell_id(hq.x):
+			return hq.x
+		return -1
+	if zone.size.x <= 1.0 or zone.size.y <= 1.0:
+		var hq: Vector2i = (
+			map_data.player_home_grid if is_player else map_data.enemy_home_grid
+		)
+		if hq.x >= 0 and map_data.is_land_cell(hq.x, hq.y):
+			return map_data.cell_index(hq.x, hq.y)
 	var center_world: Vector2 = zone.position + zone.size * 0.5
 	var center: Vector2i = map_data.world_to_grid(center_world)
 	if center.x >= 0 and center.y >= 0 and map_data.is_land_cell(center.x, center.y):
@@ -566,9 +610,12 @@ func _claim_home_base_tile(map_data, zone: Rect2, owner: int) -> void:
 			idx = -1
 	if idx < 0:
 		return
-	var gx: int = idx % map_data.grid_width
-	var gy: int = idx / map_data.grid_width
-	_claim_at(gx, gy, owner)
+	if map_data.sphere_mode:
+		_claim_at(idx, 0, owner)
+	else:
+		var gx: int = idx % map_data.grid_width
+		var gy: int = idx / map_data.grid_width
+		_claim_at(gx, gy, owner)
 
 
 func _preserve_home_base_ownership(map_data) -> void:
@@ -623,7 +670,10 @@ func _inject_at_grid(
 ) -> void:
 	if map_data == null:
 		return
-	if gx < 0 or gy < 0 or gx >= map_data.grid_width or gy >= map_data.grid_height:
+	if map_data.sphere_mode:
+		if gx < 0 or gx >= map_data.cell_count:
+			return
+	elif gx < 0 or gy < 0 or gx >= map_data.grid_width or gy >= map_data.grid_height:
 		return
 	var idx: int = map_data.cell_index(gx, gy)
 	if not _is_claimable_index(idx):
@@ -645,8 +695,12 @@ func _inject_placed_spawners(map_data) -> void:
 			_friendly_spawn_rate if team == OWNER_FRIENDLY else _hostile_spawn_rate
 		)
 		var is_friendly: bool = team == OWNER_FRIENDLY
-		for d: Vector2i in _DIRS_CARDINAL:
-			_inject_at_grid(map_data, gx + d.x, gy + d.y, amount, is_friendly)
+		if map_data.sphere_mode:
+			for nbr in map_data.get_neighbors(gx):
+				_inject_at_grid(map_data, nbr, 0, amount, is_friendly)
+		else:
+			for d: Vector2i in _DIRS_CARDINAL:
+				_inject_at_grid(map_data, gx + d.x, gy + d.y, amount, is_friendly)
 
 
 func add_placed_spawner(team: int, gx: int, gy: int, kind: String = "spawner") -> void:
@@ -755,6 +809,10 @@ func _cardinal_neighbor_indices(map_data, gx: int, gy: int) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	if map_data == null:
 		return out
+	if map_data.sphere_mode:
+		for nbr in map_data.get_neighbors(gx):
+			out.append(nbr)
+		return out
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	for d: Vector2i in _CARDINAL_DIRS:
@@ -775,9 +833,13 @@ func _cardinal_neighbor_indices(map_data, gx: int, gy: int) -> PackedInt32Array:
 
 func tile_probe(map_data, gx: int, gy: int) -> Dictionary:
 	var empty: Dictionary = {"valid": false}
-	if map_data == null or gx < 0 or gy < 0:
+	if map_data == null or gx < 0:
 		return empty
-	if gx >= map_data.grid_width or gy >= map_data.grid_height:
+	if map_data.sphere_mode:
+		if gx >= map_data.cell_count:
+			return empty
+		gy = 0
+	elif gy < 0 or gx >= map_data.grid_width or gy >= map_data.grid_height:
 		return empty
 	var idx: int = map_data.cell_index(gx, gy)
 	if idx < 0 or idx >= _tile_count:
@@ -832,8 +894,11 @@ func count_claimable_bridge_cells(map_data) -> Dictionary:
 			var idx: int = int(key)
 			if idx < 0 or idx >= _tile_count:
 				continue
-			var gx: int = idx % map_data.grid_width
-			var gy: int = idx / map_data.grid_width
+			var gx: int = idx
+			var gy: int = 0
+			if not map_data.sphere_mode:
+				gx = idx % map_data.grid_width
+				gy = idx / map_data.grid_width
 			if not WorldConquestOutpostBuildLib.is_water_cell(map_data, gx, gy):
 				continue
 			water_total += 1
@@ -913,8 +978,11 @@ func _sync_corridor_path_cells(
 	if src_idx < 0 or src_idx >= land_reach.size() or land_reach[src_idx] == 0:
 		return
 	if synced_cells <= 1 and src_idx < corridor_land.size():
-		var src_gx: int = src_idx % map_data.grid_width
-		var src_gy: int = src_idx / map_data.grid_width
+		var src_gx: int = src_idx
+		var src_gy: int = 0
+		if not map_data.sphere_mode:
+			src_gx = src_idx % map_data.grid_width
+			src_gy = src_idx / map_data.grid_width
 		if map_data.is_land_cell(src_gx, src_gy) and corridor_land[src_idx] == 0:
 			corridor_land[src_idx] = 1
 	if synced_cells >= built_cells:
@@ -939,8 +1007,11 @@ func _sync_corridor_path_cells(
 			continue
 		if not chain_ok:
 			continue
-		var gx: int = cell_key % map_data.grid_width
-		var gy: int = cell_key / map_data.grid_width
+		var gx: int = cell_key
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = cell_key % map_data.grid_width
+			gy = cell_key / map_data.grid_width
 		if WorldConquestOutpostBuildLib.is_water_cell(map_data, gx, gy):
 			if bridge_mask[cell_key] == 0:
 				bridge_mask[cell_key] = 1
@@ -1002,8 +1073,11 @@ func _reconcile_packed_corridor_land(
 		var cell_key: int = int(packed[i])
 		if cell_key < 0 or cell_key >= corridor_land.size():
 			continue
-		var gx: int = cell_key % w
-		var gy: int = cell_key / w
+		var gx: int = cell_key
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = cell_key % w
+			gy = cell_key / w
 		if WorldConquestOutpostBuildLib.is_water_cell(map_data, gx, gy):
 			continue
 		if corridor_land[cell_key] != 0:
@@ -1050,6 +1124,32 @@ func _flood_passable_into_mask(
 	mask: PackedByteArray,
 	touched: PackedInt32Array = PackedInt32Array(),
 ) -> bool:
+	if map_data.sphere_mode:
+		if not map_data.is_passable(start_gx, 0):
+			return false
+		var start_idx: int = start_gx
+		if start_idx < 0 or start_idx >= mask.size():
+			return false
+		var any_new: bool = false
+		if mask[start_idx] == 0:
+			mask[start_idx] = 1
+			any_new = true
+			touched.append(start_idx)
+		var queue: PackedInt32Array = PackedInt32Array([start_gx])
+		var head: int = 0
+		while head < queue.size():
+			var cur: int = queue[head]
+			head += 1
+			for nbr in map_data.get_neighbors(cur):
+				if not map_data.is_passable(nbr, 0):
+					continue
+				if mask[nbr] != 0:
+					continue
+				mask[nbr] = 1
+				any_new = true
+				touched.append(nbr)
+				queue.append(nbr)
+		return any_new
 	if not map_data.is_passable(start_gx, start_gy):
 		return false
 	var w: int = map_data.grid_width
@@ -1093,8 +1193,11 @@ func _apply_claimable_cells(map_data, cell_indices: PackedInt32Array) -> bool:
 		var idx: int = int(cell_key)
 		if idx < 0 or idx >= _tile_count:
 			continue
-		var gx: int = idx % w
-		var gy: int = idx / w
+		var gx: int = idx
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = idx % w
+			gy = idx / w
 		var was: int = claimable_mask[idx]
 		var now: bool = _is_claimable_index(idx)
 		if now == (was != 0):
@@ -1124,8 +1227,11 @@ func _apply_reachability_to_claimable(map_data) -> void:
 		return
 	var w: int = map_data.grid_width
 	for idx in range(_tile_count):
-		var gx: int = idx % w
-		var gy: int = idx / w
+		var gx: int = idx
+		var gy: int = 0
+		if not map_data.sphere_mode:
+			gx = idx % w
+			gy = idx / w
 		var was: int = claimable_mask[idx]
 		var now: bool = _is_claimable_index(idx)
 		claimable_mask[idx] = 1 if now else 0
@@ -1227,6 +1333,13 @@ func _mark_active_dirty(idx: int) -> void:
 	_active_dirty_list.append(idx)
 	if _map_data == null:
 		return
+	if _map_data.sphere_mode:
+		for nbr in _map_data.get_neighbors(idx):
+			if nbr < 0 or nbr >= _tile_count or _active_dirty_mark[nbr] != 0:
+				continue
+			_active_dirty_mark[nbr] = 1
+			_active_dirty_list.append(nbr)
+		return
 	var w: int = _map_data.grid_width
 	var gx: int = idx % w
 	var gy: int = idx / w
@@ -1243,6 +1356,13 @@ func _is_tile_active(idx: int) -> bool:
 		return false
 	if pressure_friendly[idx] > ACTIVE_PRESSURE_EPS or pressure_hostile[idx] > ACTIVE_PRESSURE_EPS:
 		return true
+	if _map_data != null and _map_data.sphere_mode:
+		for nbr in _map_data.get_neighbors(idx):
+			if claimable_mask[nbr] == 0:
+				continue
+			if owners[nbr] == OWNER_CONTESTED or owners[idx] != owners[nbr]:
+				return true
+		return false
 	var w: int = _map_data.grid_width
 	var gx: int = idx % w
 	var gy: int = idx / w
@@ -1322,19 +1442,30 @@ func _rebuild_active_indices() -> void:
 			or pressure_hostile[idx] > ACTIVE_PRESSURE_EPS
 		)
 		if not active:
-			var w: int = _map_data.grid_width
-			var gx: int = idx % w
-			var gy: int = idx / w
-			for d in _CARDINAL_DIRS:
-				var ni: int = _map_data.cell_index(gx + d.x, gy + d.y)
-				if claimable_mask[ni] == 0:
-					continue
-				if (
-					owners[ni] == OWNER_CONTESTED
-					or owners[idx] != owners[ni]
-				):
-					active = true
-					break
+			if _map_data.sphere_mode:
+				for nbr in _map_data.get_neighbors(idx):
+					if claimable_mask[nbr] == 0:
+						continue
+					if (
+						owners[nbr] == OWNER_CONTESTED
+						or owners[idx] != owners[nbr]
+					):
+						active = true
+						break
+			else:
+				var w: int = _map_data.grid_width
+				var gx: int = idx % w
+				var gy: int = idx / w
+				for d in _CARDINAL_DIRS:
+					var ni: int = _map_data.cell_index(gx + d.x, gy + d.y)
+					if claimable_mask[ni] == 0:
+						continue
+					if (
+						owners[ni] == OWNER_CONTESTED
+						or owners[idx] != owners[ni]
+					):
+						active = true
+						break
 		if active:
 			_active_indices.append(idx)
 			_active_seen[idx] = 1
@@ -1369,6 +1500,13 @@ func _resolve_ownership_from_pressure() -> void:
 
 
 func _diffuse_pressure_height_biased(map_data) -> void:
+	if map_data != null and map_data.sphere_mode:
+		if not _diffuse_sphere_warned:
+			_diffuse_sphere_warned = true
+			push_warning(
+				"BattleTileControl._diffuse_pressure_height_biased skipped in sphere_mode (legacy non-live path)"
+			)
+		return
 	if _map_data == null:
 		_diffuse_pressure_once(map_data)
 		return
@@ -1433,6 +1571,13 @@ func _diffuse_pressure_height_biased(map_data) -> void:
 
 
 func _diffuse_pressure_once(map_data) -> void:
+	if map_data != null and map_data.sphere_mode:
+		if not _diffuse_sphere_warned:
+			_diffuse_sphere_warned = true
+			push_warning(
+				"BattleTileControl._diffuse_pressure_once skipped in sphere_mode (legacy non-live path)"
+			)
+		return
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	var nf := pressure_friendly.duplicate()
@@ -1550,6 +1695,19 @@ static func _cell_to_vec2i(cell) -> Vector2i:
 func _emit_from_zone(map_data, zone: Rect2, amount: float, is_friendly: bool) -> void:
 	if map_data == null or zone.size.x <= 1.0 or zone.size.y <= 1.0 or amount <= 0.0:
 		return
+	if map_data.sphere_mode:
+		for cell in _spawn_cells(map_data, is_friendly):
+			var v := _cell_to_vec2i(cell)
+			if v.x < 0:
+				continue
+			var idx: int = map_data.cell_index(v.x, v.y)
+			if not _is_claimable_index(idx):
+				continue
+			if is_friendly:
+				pressure_friendly[idx] += amount
+			else:
+				pressure_hostile[idx] += amount
+		return
 
 	var g0: Vector2i = map_data.world_to_grid(zone.position)
 	var g1: Vector2i = map_data.world_to_grid(zone.position + zone.size)
@@ -1571,6 +1729,14 @@ func _emit_from_zone(map_data, zone: Rect2, amount: float, is_friendly: bool) ->
 # and then flow outward — exactly the Creeper World feel the user wants.
 func _inject_strong_home_pulse(map_data, zone: Rect2, amount: float, is_friendly: bool) -> void:
 	if map_data == null or zone.size.x <= 1.0 or zone.size.y <= 1.0 or amount <= 0.0:
+		return
+	if map_data.sphere_mode:
+		var idx: int = _home_base_tile_index(map_data, zone, is_friendly)
+		if idx < 0:
+			return
+		_inject_pressure_at_index(idx, amount, is_friendly)
+		for nbr in map_data.get_neighbors(idx):
+			_inject_pressure_at_index(nbr, amount * 0.55, is_friendly)
 		return
 
 	var center_world: Vector2 = zone.position + zone.size * 0.5
@@ -1598,6 +1764,12 @@ func _inject_strong_home_pulse(map_data, zone: Rect2, amount: float, is_friendly
 
 func _fill_spawn_zone(map_data, zone: Rect2, owner: int) -> void:
 	if map_data == null or zone.size.x <= 1.0 or zone.size.y <= 1.0:
+		return
+	if map_data.sphere_mode:
+		for cell in _spawn_cells(map_data, owner == OWNER_FRIENDLY):
+			var v := _cell_to_vec2i(cell)
+			if v.x >= 0:
+				_claim_at(v.x, v.y, owner)
 		return
 	var g0: Vector2i = map_data.world_to_grid(zone.position)
 	var g1: Vector2i = map_data.world_to_grid(zone.position + zone.size)
@@ -1653,7 +1825,10 @@ func _adjust_owner_count(owner: int, delta: int) -> void:
 func _claim_at(gx: int, gy: int, owner: int) -> void:
 	if _map_data == null:
 		return
-	if gx < 0 or gy < 0 or gx >= _map_data.grid_width or gy >= _map_data.grid_height:
+	if _map_data.sphere_mode:
+		if gx < 0 or gx >= _map_data.cell_count:
+			return
+	elif gx < 0 or gy < 0 or gx >= _map_data.grid_width or gy >= _map_data.grid_height:
 		return
 	var idx: int = _map_data.cell_index(gx, gy)
 	if claimable_mask[idx] == 0:
@@ -1684,9 +1859,10 @@ func hostile_bridge_reachable_packed() -> PackedByteArray:
 func _is_bridge_water_index(idx: int) -> bool:
 	if _map_data == null or idx < 0 or idx >= _tile_count:
 		return false
-	var gx: int = idx % _map_data.grid_width
-	var gy: int = idx / _map_data.grid_width
-	if _map_data.is_land_cell(gx, gy):
+	if _map_data.sphere_mode:
+		if _map_data.is_land_cell(idx, 0):
+			return false
+	elif _map_data.is_land_cell(idx % _map_data.grid_width, idx / _map_data.grid_width):
 		return false
 	if idx >= _friendly_bridge_reachable.size():
 		return false
@@ -1702,10 +1878,21 @@ func _flow_mult_for_bridge_or_land(map_data, gx: int, gy: int, idx: int) -> floa
 func _is_claimable_index(idx: int) -> bool:
 	if _map_data == null or idx < 0 or idx >= _tile_count:
 		return false
-	var gx: int = idx % _map_data.grid_width
-	var gy: int = idx / _map_data.grid_width
 	if idx >= _friendly_reachable.size() or idx >= _hostile_reachable.size():
 		return false
+	if _map_data.sphere_mode:
+		if _map_data.is_land_cell(idx, 0):
+			return (
+				_friendly_reachable[idx] > 0
+				or _hostile_reachable[idx] > 0
+				or _friendly_corridor_land[idx] > 0
+				or _hostile_corridor_land[idx] > 0
+			)
+		if idx >= _friendly_bridge_reachable.size():
+			return false
+		return _friendly_bridge_reachable[idx] > 0 or _hostile_bridge_reachable[idx] > 0
+	var gx: int = idx % _map_data.grid_width
+	var gy: int = idx / _map_data.grid_width
 	if _map_data.is_land_cell(gx, gy):
 		return (
 			_friendly_reachable[idx] > 0
@@ -1719,13 +1906,38 @@ func _is_claimable_index(idx: int) -> bool:
 
 
 func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
-	var total: int = map_data.grid_width * map_data.grid_height if map_data else 0
+	var total: int = map_data.gameplay_tile_count() if map_data else 0
 	var mask := PackedByteArray()
 	mask.resize(total)
 	mask.fill(0)
 	if map_data == null or total <= 0:
 		return mask
-	var queue: Array = []
+	if map_data.sphere_mode:
+		var queue: PackedInt32Array = PackedInt32Array()
+		for cell in seeds:
+			var v := _cell_to_vec2i(cell)
+			var cid: int = v.x
+			if cid < 0 or cid >= map_data.cell_count:
+				continue
+			if not map_data.is_passable(cid, 0):
+				continue
+			if mask[cid] != 0:
+				continue
+			mask[cid] = 1
+			queue.append(cid)
+		var head: int = 0
+		while head < queue.size():
+			var cur: int = queue[head]
+			head += 1
+			for nbr in map_data.get_neighbors(cur):
+				if not map_data.is_passable(nbr, 0):
+					continue
+				if mask[nbr] != 0:
+					continue
+				mask[nbr] = 1
+				queue.append(nbr)
+		return mask
+	var queue: Array[Vector2i] = []
 	for cell in seeds:
 		var v := _cell_to_vec2i(cell)
 		if v.x < 0 or v.y < 0 or v.x >= map_data.grid_width or v.y >= map_data.grid_height:
@@ -1738,8 +1950,10 @@ func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
 		mask[idx] = 1
 		queue.append(v)
 	var dirs: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
-	while not queue.is_empty():
-		var cur: Vector2i = queue.pop_front()
+	var head: int = 0
+	while head < queue.size():
+		var cur: Vector2i = queue[head]
+		head += 1
 		for d in dirs:
 			var nx: int = cur.x + d.x
 			var ny: int = cur.y + d.y

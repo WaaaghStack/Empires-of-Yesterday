@@ -21,6 +21,11 @@ pub struct RouteSnapshot {
     pub land_mask: Vec<u8>,
     pub bridge_mask: Vec<u8>,
     pub land_comp: Vec<i32>,
+    /// Sphere / graph topology: up to 6 neighbors per cell (-1 = unused).
+    pub graph_neighbors: Vec<[i32; 6]>,
+    pub graph_neighbor_count: Vec<u8>,
+    /// Unit-sphere cell centers (xyz); empty on rect maps.
+    pub cell_positions: Vec<[f32; 3]>,
 }
 
 impl RouteSnapshot {
@@ -71,6 +76,53 @@ impl RouteSnapshot {
             self.land_comp[idx]
         } else {
             -1
+        }
+    }
+
+    pub(crate) fn uses_graph_neighbors(&self) -> bool {
+        !self.graph_neighbors.is_empty()
+    }
+
+    pub(crate) fn has_cell_positions(&self) -> bool {
+        self.cell_positions.len() >= self.tile_count() && self.tile_count() > 0
+    }
+
+    pub(crate) fn cell_pos(&self, idx: usize) -> [f32; 3] {
+        if idx < self.cell_positions.len() {
+            self.cell_positions[idx]
+        } else {
+            [0.0, 0.0, 0.0]
+        }
+    }
+
+    pub(crate) fn for_each_neighbor(&self, cur: i32, mut visit: impl FnMut(i32)) {
+        if self.uses_graph_neighbors() {
+            let cur_ui = cur as usize;
+            if cur_ui >= self.graph_neighbor_count.len() {
+                return;
+            }
+            let n = self.graph_neighbor_count[cur_ui] as usize;
+            for slot in 0..n.min(6) {
+                let ni = self.graph_neighbors[cur_ui][slot];
+                if ni >= 0 {
+                    visit(ni);
+                }
+            }
+            return;
+        }
+        let w = self.grid_w;
+        let h = self.grid_h;
+        let cx = cur % w;
+        let cy = cur / w;
+        for (dx, dy) in CARDINAL {
+            let ny = cy + dy;
+            if ny < 0 || ny >= h {
+                continue;
+            }
+            let Some(nx) = wrap_x(cx + dx, w, self.wrap_longitude) else {
+                continue;
+            };
+            visit(ny * w + nx);
         }
     }
 }
@@ -124,8 +176,6 @@ impl PortalGraph {
 fn infra_reachable_comps(snapshot: &RouteSnapshot, start_key: i32, max_expand: usize) -> Vec<i32> {
     let mut seen_comps: Vec<i32> = Vec::new();
     let mut search = PathSearch::new(snapshot.tile_count());
-    let w = snapshot.grid_w;
-    let h = snapshot.grid_h;
     search.begin();
     let start_ui = start_key as usize;
     if !snapshot.is_infra_cell(start_ui) {
@@ -146,24 +196,14 @@ fn infra_reachable_comps(snapshot: &RouteSnapshot, start_key: i32, max_expand: u
                 seen_comps.push(comp);
             }
         }
-        let cx = cur % w;
-        let cy = cur / w;
-        for (dx, dy) in CARDINAL {
-            let ny = cy + dy;
-            if ny < 0 || ny >= h {
-                continue;
-            }
-            let Some(nx) = wrap_x(cx + dx, w, snapshot.wrap_longitude) else {
-                continue;
-            };
-            let ni = ny * w + nx;
+        snapshot.for_each_neighbor(cur, |ni| {
             let nui = ni as usize;
             if !snapshot.is_infra_cell(nui) || search.stamp[nui] == search.gen {
-                continue;
+                return;
             }
             search.stamp[nui] = search.gen;
             search.queue.push_back(ni);
-        }
+        });
     }
     seen_comps
 }
@@ -264,7 +304,11 @@ pub(crate) fn reconstruct_path(parent: &[i32], goal: i32) -> Vec<i32> {
     out
 }
 
-pub(crate) fn heuristic(cell: i32, goal: i32, w: i32) -> i32 {
+/// Rect-grid Manhattan heuristic (longitude wrap). Sphere / graph mode uses `NavGraph::heuristic`.
+pub(crate) fn heuristic(cell: i32, goal: i32, w: i32, graph_mode: bool) -> i32 {
+    if graph_mode {
+        return 0;
+    }
     let gx = cell % w;
     let gy = cell / w;
     let tx = goal % w;
@@ -307,6 +351,15 @@ pub(crate) fn is_coastal(snapshot: &RouteSnapshot, gx: i32, gy: i32) -> bool {
     }
     if !snapshot.is_land(idx as usize) {
         return false;
+    }
+    if snapshot.uses_graph_neighbors() {
+        let mut coastal = false;
+        snapshot.for_each_neighbor(idx, |ni| {
+            if ni < 0 || snapshot.is_water(ni as usize) {
+                coastal = true;
+            }
+        });
+        return coastal;
     }
     let w = snapshot.grid_w;
     let h = snapshot.grid_h;
@@ -481,6 +534,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         }
     }
 

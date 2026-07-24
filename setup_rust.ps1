@@ -50,7 +50,8 @@ if (-not $cargo) {
 
 Write-Success "Found Rust: $(cargo --version)"
 
-# 2. Build
+# 2. Build (always use this crate's local target/ — ignore sandbox CARGO_TARGET_DIR)
+$env:CARGO_TARGET_DIR = Join-Path $CrateDir "target"
 Write-Info "Building empire_territory (debug)..."
 Push-Location $CrateDir
 cargo build

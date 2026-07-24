@@ -13,6 +13,7 @@ var _structure_authority: bool = false
 ## Cached for per-cell query (B10/I2) — set in setup_from_tile_control.
 var _grid_w: int = 0
 var _grid_h: int = 0
+var _sphere_mode: bool = false
 
 var _sim: RefCounted
 
@@ -76,20 +77,28 @@ func setup_from_tile_control(
 	if _sim == null:
 		return false
 
-	var player_home: int = tile_control._home_base_tile_index(
-		map_data, map_data.player_spawn_zone, true
-	)
-	var enemy_home: int = tile_control._home_base_tile_index(
-		map_data, map_data.enemy_spawn_zone, false
-	)
+	var player_home: int
+	var enemy_home: int
+	if map_data.sphere_mode:
+		player_home = map_data.player_home_grid.x
+		enemy_home = map_data.enemy_home_grid.x
+	else:
+		player_home = tile_control._home_base_tile_index(
+			map_data, map_data.player_spawn_zone, true
+		)
+		enemy_home = tile_control._home_base_tile_index(
+			map_data, map_data.enemy_spawn_zone, false
+		)
 	var spawner_data: Dictionary = _pack_spawners(tile_control._placed_spawners)
-	var wrap_longitude: bool = (
+	var wrap_longitude: bool = false if map_data.sphere_mode else (
 		map_data.node_type == "world_conquest" or tile_control.use_longitude_wrap
 	)
 	var terrain: Dictionary = _pack_terrain_setup(map_data)
+	var grid_w: int = map_data.cell_count if map_data.sphere_mode else map_data.grid_width
+	var grid_h: int = 1 if map_data.sphere_mode else map_data.grid_height
 	var setup_dict: Dictionary = {
-				"grid_w": map_data.grid_width,
-				"grid_h": map_data.grid_height,
+				"grid_w": grid_w,
+				"grid_h": grid_h,
 				"wrap_longitude": wrap_longitude,
 				"claimable": tile_control.claimable_mask,
 				"elevation": tile_control._elevation,
@@ -124,13 +133,17 @@ func setup_from_tile_control(
 	}
 	if use_adaptive_double_pass != null:
 		setup_dict["use_adaptive_double_pass"] = bool(use_adaptive_double_pass)
+	if map_data.sphere_mode:
+		setup_dict["graph_neighbors"] = map_data.neighbors
+		setup_dict["graph_neighbor_count"] = map_data.neighbor_counts
 
 	ready = bool(_sim.call("setup_from_dict", setup_dict))
 	if ready:
 		friendly_tiles = tile_control.friendly_tiles
 		hostile_tiles = tile_control.hostile_tiles
-		_grid_w = int(map_data.grid_width)
-		_grid_h = int(map_data.grid_height)
+		_sphere_mode = map_data.sphere_mode
+		_grid_w = grid_w
+		_grid_h = grid_h
 		_grid_authority = use_active_set and WorldConquestConfigLib.WORLD_DATASET_GRID_AUTHORITY
 		_structure_authority = (
 			use_active_set and WorldConquestConfigLib.WORLD_DATASET_STRUCTURE_AUTHORITY
@@ -141,6 +154,7 @@ func setup_from_tile_control(
 	else:
 		_grid_w = 0
 		_grid_h = 0
+		_sphere_mode = false
 	return ready
 
 
@@ -431,8 +445,8 @@ func _pressure_at_index_layer(idx: int, friendly: bool) -> float:
 	if not ready or _sim == null or idx < 0:
 		return 0.0
 	if _sim.has_method("query_tile") and _grid_w > 0:
-		var gx: int = idx % _grid_w
-		var gy: int = idx / _grid_w
+		var gx: int = idx if _sphere_mode or _grid_h <= 1 else idx % _grid_w
+		var gy: int = 0 if _sphere_mode or _grid_h <= 1 else idx / _grid_w
 		if gy < 0 or (_grid_h > 0 and gy >= _grid_h):
 			return 0.0
 		var probe: Dictionary = _sim.call("query_tile", gx, gy)
@@ -582,6 +596,8 @@ static func bake_fluid_rgba(
 ) -> PackedByteArray:
 	if map_data == null or not extension_available():
 		return PackedByteArray()
+	if map_data.sphere_mode:
+		return PackedByteArray()
 	var mask: PackedByteArray = land_mask
 	if mask.is_empty():
 		mask = _claimable_mask_from_map(map_data)
@@ -602,9 +618,15 @@ static func land_mask_from_map(map_data) -> PackedByteArray:
 
 
 static func _claimable_mask_from_map(map_data) -> PackedByteArray:
+	var mask := PackedByteArray()
+	if map_data.sphere_mode:
+		var n: int = map_data.cell_count
+		mask.resize(n)
+		for cid in range(n):
+			mask[cid] = 1 if map_data.is_land_cell_id(cid) else 0
+		return mask
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
-	var mask := PackedByteArray()
 	mask.resize(w * h)
 	for gy in range(h):
 		for gx in range(w):
@@ -834,6 +856,19 @@ func get_network_built_mask(team: int) -> PackedByteArray:
 	return _sim.call("get_network_built_mask", team)
 
 
+func get_network_planned_mask(team: int) -> PackedByteArray:
+	if not ready or _sim == null or not _sim.has_method("get_network_planned_mask"):
+		return PackedByteArray()
+	return _sim.call("get_network_planned_mask", team)
+
+
+func get_network_route_mask(team: int) -> PackedByteArray:
+	if not ready or _sim == null or not _sim.has_method("get_network_route_mask"):
+		# Fallback: built only (older DLL).
+		return get_network_built_mask(team)
+	return _sim.call("get_network_route_mask", team)
+
+
 func get_logistics_strain() -> Dictionary:
 	if not ready or _sim == null or not _sim.has_method("get_logistics_strain"):
 		return {}
@@ -885,9 +920,7 @@ func structure_store_enter_building(sid: int, build_remaining: float, max_health
 
 
 static func _pack_terrain_setup(map_data) -> Dictionary:
-	var w: int = map_data.grid_width
-	var h: int = map_data.grid_height
-	var n: int = w * h
+	var n: int = map_data.gameplay_tile_count()
 	var passable := PackedByteArray()
 	var land := PackedByteArray()
 	var height := PackedFloat32Array()
@@ -900,16 +933,28 @@ static func _pack_terrain_setup(map_data) -> Dictionary:
 	move.resize(n)
 	defense.resize(n)
 	cover.resize(n)
-	for gy in range(h):
-		for gx in range(w):
-			var idx: int = map_data.cell_index(gx, gy)
-			passable[idx] = 1 if map_data.is_passable(gx, gy) else 0
-			land[idx] = 1 if map_data.is_land_cell(gx, gy) else 0
-			height[idx] = map_data.get_tile_height(gx, gy)
-			move[idx] = map_data.get_move_cost(gx, gy)
-			defense[idx] = map_data.get_defense(gx, gy)
-			if map_data.cover_cells.size() > idx:
-				cover[idx] = map_data.cover_cells[idx]
+	if map_data.sphere_mode:
+		for cid in range(map_data.cell_count):
+			passable[cid] = 1 if map_data.is_passable(cid, 0) else 0
+			land[cid] = 1 if map_data.is_land_cell_id(cid) else 0
+			height[cid] = map_data.get_tile_height(cid, 0)
+			move[cid] = map_data.get_move_cost(cid, 0)
+			defense[cid] = map_data.get_defense(cid, 0)
+			if map_data.cover_cells.size() > cid:
+				cover[cid] = map_data.cover_cells[cid]
+	else:
+		var w: int = map_data.grid_width
+		var h: int = map_data.grid_height
+		for gy in range(h):
+			for gx in range(w):
+				var idx: int = map_data.cell_index(gx, gy)
+				passable[idx] = 1 if map_data.is_passable(gx, gy) else 0
+				land[idx] = 1 if map_data.is_land_cell(gx, gy) else 0
+				height[idx] = map_data.get_tile_height(gx, gy)
+				move[idx] = map_data.get_move_cost(gx, gy)
+				defense[idx] = map_data.get_defense(gx, gy)
+				if map_data.cover_cells.size() > idx:
+					cover[idx] = map_data.cover_cells[idx]
 	return {
 		"passable_mask": passable,
 		"land_mask": land,
@@ -1091,6 +1136,7 @@ func _free() -> void:
 	_structure_authority = false
 	_grid_w = 0
 	_grid_h = 0
+	_sphere_mode = false
 	friendly_tiles = 0
 	hostile_tiles = 0
 

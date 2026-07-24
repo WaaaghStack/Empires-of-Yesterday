@@ -70,12 +70,16 @@ func _test_pure_client_policy() -> void:
 	if client.last_for("structures") != 0:
 		_fail("fresh client last_structures should be 0")
 		return
-	# Cooldown: note full twice quickly — second should deny if we simulate.
-	client._note_full("start")
-	if client._cooldown_ok():
+	# Cooldown: note full twice quickly — second should deny if we simulate (per-domain).
+	client._note_full("structures", "start")
+	if client._cooldown_ok("structures"):
 		_fail("cooldown should block immediately after full")
 		return
-	_log("OK  cooldown blocks repeat full (Policy 3)")
+	# Other domains remain free (B3 per-domain cooldown).
+	if not client._cooldown_ok("agents"):
+		_fail("structures full must not block agents domain cooldown")
+		return
+	_log("OK  cooldown blocks repeat full per domain (Policy 3 / B3)")
 	# Caught-up incremental: high_water == last → empty without full.
 	client.last_version["structures"] = 5
 	# Without sim, pull returns error empty — still not a full mid-match.

@@ -340,6 +340,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         }
     }
 
@@ -404,6 +407,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         };
         let home = snap.cell_index(20, 69);
         let goal_gx = 300i32;
@@ -458,6 +464,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         };
         // seed 424242 player home from EarthMapGenerator
         let home = snap.cell_index(59, 91);
@@ -531,6 +540,9 @@ mod tests {
             land_mask,
             bridge_mask: vec![0u8; n],
             land_comp,
+            graph_neighbors: vec![],
+            graph_neighbor_count: vec![],
+            cell_positions: vec![],
         };
         let mut portal = PortalGraph::default();
         portal.source_keys.push(0);

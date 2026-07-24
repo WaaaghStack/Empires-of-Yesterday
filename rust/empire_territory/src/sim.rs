@@ -60,6 +60,11 @@ pub struct TerritoryKernel {
     pub use_active_set: bool,
     pub use_adaptive_double_pass: bool,
     pub wrap_longitude: bool,
+    /// If non-empty, length == tile_count; each entry up to 6 neighbors (-1 = unused).
+    pub neighbors: Vec<[i32; 6]>,
+    pub neighbor_count: Vec<u8>,
+    /// When true, ignore grid_w/h cardinal topology for neighbor walks.
+    pub graph_topology: bool,
     pub home_inject_enabled: bool,
     pub spawner_inject_interval_rounds: i32,
     pub logistics_friendly_output_mult: f32,
@@ -150,6 +155,9 @@ impl TerritoryKernel {
             use_active_set,
             use_adaptive_double_pass,
             wrap_longitude,
+            neighbors: vec![],
+            neighbor_count: vec![],
+            graph_topology: false,
             home_inject_enabled: true,
             spawner_inject_interval_rounds: 10,
             logistics_friendly_output_mult: 1.0,
@@ -192,6 +200,12 @@ impl TerritoryKernel {
     }
 
     pub fn cell_index(&self, gx: i32, gy: i32) -> i32 {
+        if self.graph_topology {
+            if gy == 0 && gx >= 0 && gx < self.tile_count as i32 {
+                return gx;
+            }
+            return -1;
+        }
         if gy < 0 || gy >= self.grid_h {
             return -1;
         }
@@ -199,6 +213,105 @@ impl TerritoryKernel {
             return -1;
         };
         gy * self.grid_w + nx
+    }
+
+    pub fn set_graph_neighbors(&mut self, neighbors: Vec<[i32; 6]>, neighbor_count: Vec<u8>) {
+        assert_eq!(neighbors.len(), self.tile_count);
+        assert_eq!(neighbor_count.len(), self.tile_count);
+        self.neighbors = neighbors;
+        self.neighbor_count = neighbor_count;
+        self.graph_topology = true;
+        self.wrap_longitude = false;
+    }
+
+    pub(crate) fn collect_neighbors_static(
+        graph_topology: bool,
+        neighbors: &[[i32; 6]],
+        neighbor_count: &[u8],
+        tile_count: usize,
+        w: i32,
+        h: i32,
+        wrap_longitude: bool,
+        idx: usize,
+        scratch: &mut Vec<usize>,
+    ) {
+        scratch.clear();
+        if graph_topology && idx < neighbors.len() {
+            let n = neighbor_count[idx] as usize;
+            for k in 0..n.min(6) {
+                let ni = neighbors[idx][k];
+                if ni >= 0 {
+                    let u = ni as usize;
+                    if u < tile_count {
+                        scratch.push(u);
+                    }
+                }
+            }
+            return;
+        }
+        let gx = (idx as i32) % w;
+        let gy = (idx as i32) / w;
+        for (dx, dy) in CARDINAL {
+            let ny = gy + dy;
+            if ny < 0 || ny >= h {
+                continue;
+            }
+            let Some(nx) = Self::wrap_nx(gx + dx, w, wrap_longitude) else {
+                continue;
+            };
+            let ni = (ny * w + nx) as usize;
+            if ni < tile_count {
+                scratch.push(ni);
+            }
+        }
+    }
+
+    pub(crate) fn collect_neighbors(&self, idx: usize, scratch: &mut Vec<usize>) {
+        Self::collect_neighbors_static(
+            self.graph_topology,
+            &self.neighbors,
+            &self.neighbor_count,
+            self.tile_count,
+            self.grid_w,
+            self.grid_h,
+            self.wrap_longitude,
+            idx,
+            scratch,
+        );
+    }
+
+    pub(crate) fn for_each_neighbor_idx(&self, idx: usize, mut visit: impl FnMut(usize)) {
+        if idx >= self.tile_count {
+            return;
+        }
+        if self.graph_topology && idx < self.neighbors.len() {
+            let n = self.neighbor_count[idx] as usize;
+            for slot in 0..n.min(6) {
+                let ni = self.neighbors[idx][slot];
+                if ni >= 0 {
+                    let u = ni as usize;
+                    if u < self.tile_count {
+                        visit(u);
+                    }
+                }
+            }
+            return;
+        }
+        let gx = (idx as i32) % self.grid_w;
+        let gy = (idx as i32) / self.grid_w;
+        for (dx, dy) in CARDINAL {
+            let ny = gy + dy;
+            if ny < 0 || ny >= self.grid_h {
+                continue;
+            }
+            let Some(nx) = Self::wrap_nx(gx + dx, self.grid_w, self.wrap_longitude) else {
+                continue;
+            };
+            let ni = (ny * self.grid_w + nx) as usize;
+            if ni < self.tile_count {
+                visit(ni);
+            }
+        }
     }
 
     pub fn advance_round(&mut self) {
@@ -363,15 +476,13 @@ impl TerritoryKernel {
                 self.hostile_spawn_rate * self.logistics_hostile_output_mult
             };
             let is_friendly = sp.team == OWNER_FRIENDLY;
-            // Pump adjacent tiles — not the spawner cell (so the tile under it can flip).
-            for (dx, dy) in CARDINAL {
-                let nx = sp.gx + dx;
-                let ny = sp.gy + dy;
-                let ni = self.cell_index(nx, ny);
-                if ni < 0 {
-                    continue;
-                }
-                let ui = ni as usize;
+            let si = self.cell_index(sp.gx, sp.gy);
+            if si < 0 {
+                continue;
+            }
+            let mut neighbor_scratch = Vec::with_capacity(6);
+            self.collect_neighbors(si as usize, &mut neighbor_scratch);
+            for ui in neighbor_scratch {
                 if self.claimable_mask[ui] == 0 {
                     continue;
                 }
@@ -408,6 +519,9 @@ impl TerritoryKernel {
         let h = self.grid_h;
         let tile_count = self.tile_count;
         let wrap_longitude = self.wrap_longitude;
+        let graph_topology = self.graph_topology;
+        let neighbors = self.neighbors.clone();
+        let neighbor_count = self.neighbor_count.clone();
 
         if friendly {
             self.pf_next.copy_from_slice(&self.pressure_friendly);
@@ -441,6 +555,10 @@ impl TerritoryKernel {
                     &self.elevation,
                     &self.terrain_flow_mult,
                     wrap_longitude,
+                    graph_topology,
+                    &neighbors,
+                    &neighbor_count,
+                    tile_count,
                     &mut self.gradient_halo_scratch,
                     &mut self.gradient_pass_seen,
                 );
@@ -457,6 +575,10 @@ impl TerritoryKernel {
                     &self.elevation,
                     &self.terrain_flow_mult,
                     wrap_longitude,
+                    graph_topology,
+                    &neighbors,
+                    &neighbor_count,
+                    tile_count,
                     &mut Vec::new(),
                     &mut self.gradient_pass_seen,
                 );
@@ -481,6 +603,10 @@ impl TerritoryKernel {
                     &self.elevation,
                     &self.terrain_flow_mult,
                     wrap_longitude,
+                    graph_topology,
+                    &neighbors,
+                    &neighbor_count,
+                    tile_count,
                     &mut Vec::new(),
                     &mut self.gradient_pass_seen,
                 );
@@ -505,6 +631,10 @@ impl TerritoryKernel {
     }
 
     fn flow_neighbor_indices(
+        graph_topology: bool,
+        neighbors: &[[i32; 6]],
+        neighbor_count: &[u8],
+        tile_count: usize,
         w: i32,
         h: i32,
         idx: usize,
@@ -512,26 +642,20 @@ impl TerritoryKernel {
         wrap_longitude: bool,
         scratch: &mut Vec<usize>,
     ) {
-        scratch.clear();
-        let gx = (idx as i32) % w;
-        let gy = (idx as i32) / w;
-        for (dx, dy) in CARDINAL {
-            let ny = gy + dy;
-            if ny < 0 || ny >= h {
-                continue;
-            }
-            let Some(nx) = Self::wrap_nx(gx + dx, w, wrap_longitude) else {
-                continue;
-            };
-            let ni = (ny * w + nx) as usize;
-            if ni >= claimable.len() || claimable[ni] == 0 {
-                continue;
-            }
-            if scratch.iter().any(|&x| x == ni) {
-                continue;
-            }
-            scratch.push(ni);
-        }
+        Self::collect_neighbors_static(
+            graph_topology,
+            neighbors,
+            neighbor_count,
+            tile_count,
+            w,
+            h,
+            wrap_longitude,
+            idx,
+            scratch,
+        );
+        scratch.retain(|&ni| ni < claimable.len() && claimable[ni] != 0);
+        scratch.sort_unstable();
+        scratch.dedup();
     }
 
     fn gradient_flow_tile_static(
@@ -544,6 +668,10 @@ impl TerritoryKernel {
         elevation: &[f32],
         flow_mult: &[f32],
         wrap_longitude: bool,
+        graph_topology: bool,
+        graph_neighbors: &[[i32; 6]],
+        neighbor_count: &[u8],
+        tile_count: usize,
         halo_out: &mut Vec<usize>,
         active_seen: &mut [u8],
     ) {
@@ -561,17 +689,21 @@ impl TerritoryKernel {
         let mut want_total = 0.0f32;
         let mut targets = [0usize; 6];
         let mut amounts = [0.0f32; 6];
-        let mut neighbors: Vec<usize> = Vec::with_capacity(6);
+        let mut neighbor_indices: Vec<usize> = Vec::with_capacity(6);
         Self::flow_neighbor_indices(
+            graph_topology,
+            graph_neighbors,
+            neighbor_count,
+            tile_count,
             w,
             h,
             idx,
             claimable,
             wrap_longitude,
-            &mut neighbors,
+            &mut neighbor_indices,
         );
 
-        for &ni in &neighbors {
+        for &ni in &neighbor_indices {
             let p_n = src[ni];
             let h_n = effective_height(p_n, elevation[ni]);
             let dh = h_src - h_n;
@@ -695,15 +827,9 @@ impl TerritoryKernel {
         }
         let epoch = self.nav_epoch;
         self.nav_dirty_stamp[idx] = epoch;
-        let w = self.grid_w;
-        let gx = (idx as i32) % w;
-        let gy = (idx as i32) / w;
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let ni = self.cell_index(gx + dx, gy + dy);
-            if ni < 0 {
-                continue;
-            }
-            let nui = ni as usize;
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for nui in neighbor_scratch {
             if nui < self.tile_count {
                 self.nav_dirty_stamp[nui] = epoch;
             }
@@ -808,18 +934,9 @@ impl TerritoryKernel {
             self.active_dirty_mark[idx] = 1;
             self.active_dirty_list.push(idx);
         }
-        let w = self.grid_w;
-        let gx = (idx as i32) % w;
-        let gy = (idx as i32) / w;
-        for (dx, dy) in CARDINAL {
-            let ny = gy + dy;
-            if ny < 0 || ny >= self.grid_h {
-                continue;
-            }
-            let Some(nx) = Self::wrap_nx(gx + dx, w, self.wrap_longitude) else {
-                continue;
-            };
-            let ni = (ny * w + nx) as usize;
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for ni in neighbor_scratch {
             if ni >= self.tile_count || self.active_dirty_mark[ni] != 0 {
                 continue;
             }
@@ -837,18 +954,9 @@ impl TerritoryKernel {
         {
             return true;
         }
-        let w = self.grid_w;
-        let gx = (idx as i32) % w;
-        let gy = (idx as i32) / w;
-        for (dx, dy) in CARDINAL {
-            let ny = gy + dy;
-            if ny < 0 || ny >= self.grid_h {
-                continue;
-            }
-            let Some(nx) = Self::wrap_nx(gx + dx, w, self.wrap_longitude) else {
-                continue;
-            };
-            let ni = (ny * w + nx) as usize;
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for ni in neighbor_scratch {
             if self.claimable_mask[ni] == 0 {
                 continue;
             }
@@ -1026,6 +1134,9 @@ impl TerritoryKernel {
         }
         self.owner_display[idx] = byte;
         self.push_display_dirty(idx, byte);
+        if self.graph_topology {
+            return;
+        }
         let w = self.grid_w as usize;
         if w >= 2 && idx % w == 0 {
             let seam = idx + w - 1;
@@ -1045,6 +1156,9 @@ impl TerritoryKernel {
     }
 
     fn apply_longitude_seam_to_display(&mut self) {
+        if self.graph_topology {
+            return;
+        }
         let w = self.grid_w as usize;
         if w < 2 {
             return;
@@ -1067,7 +1181,7 @@ impl TerritoryKernel {
             return;
         }
         self.active_seen.fill(0);
-        let w = self.grid_w;
+        let mut neighbor_scratch = Vec::with_capacity(6);
         for idx in 0..self.tile_count {
             if self.claimable_mask[idx] == 0 {
                 continue;
@@ -1075,21 +1189,12 @@ impl TerritoryKernel {
             let mut active = self.pressure_friendly[idx] > ACTIVE_PRESSURE_EPS
                 || self.pressure_hostile[idx] > ACTIVE_PRESSURE_EPS;
             if !active {
-                let gx = (idx as i32) % w;
-                let gy = (idx as i32) / w;
-                for (dx, dy) in CARDINAL {
-                    let ny = gy + dy;
-                    if ny < 0 || ny >= self.grid_h {
+                self.collect_neighbors(idx, &mut neighbor_scratch);
+                for ni in &neighbor_scratch {
+                    if self.claimable_mask[*ni] == 0 {
                         continue;
                     }
-                    let Some(nx) = Self::wrap_nx(gx + dx, w, self.wrap_longitude) else {
-                        continue;
-                    };
-                    let ni = (ny * w + nx) as usize;
-                    if self.claimable_mask[ni] == 0 {
-                        continue;
-                    }
-                    if self.owners[ni] == OWNER_CONTESTED || self.owners[idx] != self.owners[ni] {
+                    if self.owners[*ni] == OWNER_CONTESTED || self.owners[idx] != self.owners[*ni] {
                         active = true;
                         break;
                     }
@@ -1148,6 +1253,49 @@ mod tests {
         // Budget drains at most PATCH_ACTIVE_INDICES_BUDGET cells; leftover stays dirty.
         assert!(k.active_dirty_list.len() < before || before <= PATCH_ACTIVE_INDICES_BUDGET);
         assert!(k.active_indices.len() <= ACTIVE_SET_SOFT_CAP);
+    }
+
+    #[test]
+    fn graph_topology_pressure_flows_to_neighbors() {
+        let sphere = crate::sphere_grid::SphereGrid::generate(2);
+        assert_eq!(sphere.cell_count, 42);
+        let n = sphere.cell_count;
+        let w = n as i32;
+        let h = 1i32;
+        let mut k = TerritoryKernel::new(
+            w,
+            h,
+            vec![1u8; n],
+            vec![0.0f32; n],
+            vec![1.0f32; n],
+            vec![1.0f32; n],
+            vec![OWNER_NEUTRAL; n],
+            vec![0.0f32; n],
+            vec![0.0f32; n],
+            0.0,
+            0.0,
+            0,
+            -1,
+            Vec::new(),
+            0,
+            0,
+            false,
+            false,
+            false,
+        );
+        k.set_graph_neighbors(sphere.neighbors.clone(), sphere.neighbor_count.clone());
+        k.home_inject_enabled = false;
+        k.pressure_friendly[0] = 10.0;
+        k.advance_round();
+        k.advance_round();
+
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        k.collect_neighbors(0, &mut neighbor_scratch);
+        assert!(!neighbor_scratch.is_empty(), "cell 0 should have graph neighbors");
+        let flowed = neighbor_scratch
+            .iter()
+            .any(|&ni| k.pressure_friendly[ni] > 0.0);
+        assert!(flowed, "pressure should spread to graph neighbors from cell 0");
     }
 
     #[test]
