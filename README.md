@@ -17,7 +17,7 @@ See [RUST.md](RUST.md) for build details.
 
 1. **Main Menu → Play** — pick a **theater** (Earth / Pangea / Archipelago) then generate a random run (fixed seed via `RunState.run_seed`). **Custom World…** starts from a theater preset and lets you tweak seed + land/resource/mountain criteria before Generate & Play.
 2. Your capital (blue) and the enemy capital (red) pump pressure continuously.
-3. Earn **Supply** from owned tiles. Spend it on:
+3. Earn **Supply** from owned tiles (starts at 800; income is slow — a blob funds buildings, not a spray). Spend it on:
    - **Outpost (400)** — forward pressure pump; place on any land except enemy-held tiles. **Builds instantly.** Click a placed outpost to set **Pump / Drain / Battery**; **Surge** dumps a Battery tank as one wave.
    - **Barracks (400)** — spawns **soldiers** (Aurelium + Verdantite spawn; Au+Ve upkeep).
    - **Hangar (400)** — spawns **bombers** (Aurelium + Emberstone spawn; no continuous upkeep).

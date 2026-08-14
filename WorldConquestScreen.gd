@@ -98,9 +98,11 @@ var _enemy_supply: float = 0.0
 var _enemy_ai_clock: float = 0.0
 var _enemy_ai_difficulty: int = CFG.ENEMY_AI_DEFAULT_DIFFICULTY
 var _enemy_ai_action_queue: Array[Dictionary] = []
+var _enemy_ai_place_cooldown: float = 0.0
 ## Friendly-side mirror of enemy AI (AI vs AI test mode only).
 var _player_ai_clock: float = 0.0
 var _player_ai_action_queue: Array[Dictionary] = []
+var _player_ai_place_cooldown: float = 0.0
 ## Throttle for empty AI plan soak diagnostics (AI vs AI); msec of last log.
 var _ai_empty_plan_log_msec: int = 0
 ## Throttle for AI placement precheck reject diagnostics (AI vs AI).
@@ -3038,8 +3040,13 @@ func _apply_ai_vs_ai_mode() -> void:
 func _tick_enemy_strategy(dt: float) -> void:
 	if not CFG.ENEMY_AI_ENABLED or battle_data == null or territory_sim == null or dt <= 0.0:
 		return
-	_drain_enemy_ai_queue()
+	if _enemy_ai_place_cooldown > 0.0:
+		_enemy_ai_place_cooldown = maxf(0.0, _enemy_ai_place_cooldown - dt)
+	if _enemy_ai_place_cooldown <= 0.0:
+		_drain_enemy_ai_queue()
 	_enemy_ai_clock += dt
+	if _enemy_ai_place_cooldown > 0.0:
+		return
 	if _enemy_ai_clock < CFG.ENEMY_AI_PLAN_INTERVAL_SEC:
 		return
 	_enemy_ai_clock = 0.0
@@ -3057,8 +3064,13 @@ func _tick_enemy_strategy(dt: float) -> void:
 func _tick_player_strategy(dt: float) -> void:
 	if not CFG.ENEMY_AI_ENABLED or battle_data == null or territory_sim == null or dt <= 0.0:
 		return
-	_drain_player_ai_queue()
+	if _player_ai_place_cooldown > 0.0:
+		_player_ai_place_cooldown = maxf(0.0, _player_ai_place_cooldown - dt)
+	if _player_ai_place_cooldown <= 0.0:
+		_drain_player_ai_queue()
 	_player_ai_clock += dt
+	if _player_ai_place_cooldown > 0.0:
+		return
 	if _player_ai_clock < CFG.ENEMY_AI_PLAN_INTERVAL_SEC:
 		return
 	_player_ai_clock = 0.0
@@ -3143,11 +3155,14 @@ func _drain_enemy_ai_queue() -> void:
 		if sid >= 0:
 			_pay_enemy_placement_cost(kind)
 			_run_enemy_structures_placed += 1
+			_enemy_ai_place_cooldown = CFG.ENEMY_AI_BUILD_COOLDOWN_SEC
+			_enemy_ai_action_queue.clear()
 			_maybe_log_perf_action(
 				"enemy_ai",
 				{"kind": kind, "gx": target.x, "gy": target.y, "sid": sid},
 				1.5,
 			)
+			return
 		else:
 			# Drop failed intent — planner will re-evaluate on next interval.
 			var fail: Dictionary = _resolve_placement_for_team(target, false, kind, team, true)
@@ -3180,11 +3195,14 @@ func _drain_player_ai_queue() -> void:
 			_pay_placement_cost(kind)
 			_run_player_structures_placed += 1
 			_track_player_structure_metrics(kind)
+			_player_ai_place_cooldown = CFG.ENEMY_AI_BUILD_COOLDOWN_SEC
+			_player_ai_action_queue.clear()
 			_maybe_log_perf_action(
 				"player_ai",
 				{"kind": kind, "gx": target.x, "gy": target.y, "sid": sid},
 				1.5,
 			)
+			return
 		else:
 			var fail: Dictionary = _resolve_placement_for_team(target, false, kind, team, true)
 			_maybe_log_ai_place_reject("player", kind, target, str(fail.get("reject", "unknown")))
@@ -3219,6 +3237,7 @@ func _build_enemy_ai_snapshot() -> Dictionary:
 		"player_home": _player_home,
 		"friendly_tiles": _friendly_tiles,
 		"hostile_tiles": _hostile_tiles,
+		"self_tiles": _hostile_tiles,
 		"claimable_tiles": _claimable_tiles,
 		"enemy_supply": _enemy_supply,
 		"difficulty": _enemy_ai_difficulty,
@@ -3252,6 +3271,7 @@ func _build_player_ai_snapshot() -> Dictionary:
 		"connecting_self": _count_connecting_for_team(BattleTileControlLib.OWNER_FRIENDLY),
 		"friendly_tiles": _friendly_tiles,
 		"hostile_tiles": _hostile_tiles,
+		"self_tiles": _friendly_tiles,
 		"claimable_tiles": _claimable_tiles,
 		"difficulty": _enemy_ai_difficulty,
 	}

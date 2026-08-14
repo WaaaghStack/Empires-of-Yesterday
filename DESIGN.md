@@ -1,6 +1,6 @@
 # Empires of Yesterday — Design & Dictionary
 
-**Last updated:** August 13, 2026  
+**Last updated:** August 14, 2026  
 **The game:** World Conquest — a fluid territory-conquest sim (Creeper World style) on a 360×180 Earth globe, with multi-structure logistics and units. This is the only game mode; all legacy modes (galaxy campaign, tactical squads, planet runs, RTS World prototype) were removed.
 
 ---
@@ -42,6 +42,10 @@ Secondary flow from **Custom World…**. Criteria are stored on `RunState` and p
 | AI difficulty | `ai_difficulty` | Beginner / Medium / Expert (`EnemyStrategy`) |
 | Map | `world_map_id` | Catalog id (Earth palette/resolution; land topology is procedural) |
 
+### Match pace
+
+Live play is tuned so a match **breathes**: pressure creeps instead of flooding, units take real time to cross a landmass, and Supply does not refill a building every few seconds. Shared knobs (both sides): slower inject (`PRESSURE_INJECT_INTERVAL_ROUNDS` 14, `PRESSURE_SOURCE_OUTPUT_MULT` 0.42), slower gradient (`FLOW_CONDUCTIVITY` 0.20, `MAX_OUTFLOW_FRAC` 0.38), slower units, `STARTING_SUPPLY` 800, `INCOME_PER_TILE_PER_SEC` 0.15. AI is **not** a click-macro: at most **8** outposts (medium), **70** owned tiles per extra pump, **18 s** cooldown after each place, **12 s** plan interval, and wider outpost spacing than the player. Military still waits for two outposts plus minerals.
+
 ### Controls
 
 | Input | Action |
@@ -72,23 +76,23 @@ Secondary flow from **Custom World…**. Criteria are stored on `RunState` and p
 | **Pressure** | Continuous per-tile influence (sim truth), one float array per side. Not capped by terrain height. | `BattleTileControl.pressure_friendly / pressure_hostile` |
 | **Owners** | Discrete per-tile ownership from **simple majority pressure**: `pf > ph` → friendly, `ph > pf` → hostile, equal (incl. 0/0) → neutral. Enum still reserves `3=contested` for legacy/UI. `4=unclaimable`. HQ homes force-owned. | `BattleTileControl.owners`, `sim::sync_ownership_tile` |
 | **Effective height** | `H = pressure + terrain_elevation` (elevation 0–100, `HEIGHT_MAX`). Gradient flow equalizes `H` across neighbors — fluid pools in basins and only tops mountains when deep enough. | `BattleTileControl.effective_height` |
-| **Gradient flow** | Per-round cardinal-neighbor flow: if `H_src − H_n > MIN_FLOW_DELTA`, move `∝ delta × FLOW_CONDUCTIVITY × edge_flow`, capped at `MAX_OUTFLOW_FRAC` of source per pass. | `BattleTileControl._gradient_flow_tile` |
+| **Gradient flow** | Per-round cardinal-neighbor flow: if `H_src − H_n > MIN_FLOW_DELTA`, move `∝ delta × FLOW_CONDUCTIVITY` (0.20) `× edge_flow`, capped at `MAX_OUTFLOW_FRAC` (0.38) of source per pass. | `BattleTileControl._gradient_flow_tile` |
 | **Cancellation** | Overlapping friendly/hostile pressure subtract (`min` of both removed). | `_propagate_simple_water` |
-| **Home pump** | Capital tile injects `HOME_START_POWER × (1 + force × 0.01)` × `PRESSURE_SOURCE_OUTPUT_MULT` (0.7) × `WORLD_CONQUEST_PRESSURE_SCALE` (1/2000) every `PRESSURE_INJECT_INTERVAL_ROUNDS` (7) sim rounds. | `BattleTileControl.home_spawn_rate_for_force`, `WorldConquestConfig` |
+| **Home pump** | Capital tile injects `HOME_START_POWER × (1 + force × 0.01)` × `PRESSURE_SOURCE_OUTPUT_MULT` (0.42) × `WORLD_CONQUEST_PRESSURE_SCALE` (1/2000) every `PRESSURE_INJECT_INTERVAL_ROUNDS` (14) sim rounds. | `BattleTileControl.home_spawn_rate_for_force`, `WorldConquestConfig` |
 | **Territory overlay (live)** | Ownership overlay with **pressure depth tint** (hybrid): R8 owner/border paint plus interior shading from local pressure depth so fronts read as pooling fluid. **Sim truth unchanged** — gradient flow still uses H = P + E. | `ownership_display.gdshader`, `TerritoryKernel.display_byte_for`, `OVERLAY_OWNERS_ONLY` |
 | **Inspect probe** | Hovered tile shows terrain **elevation** (0–100) and **effective height H** (= own-side pressure + elevation), plus pressures and claimability. | `WorldConquestScreen._update_tile_probe`, `query_tile` |
-| **Supply** | Player wallet. Starts at `STARTING_SUPPLY` (1200); income `INCOME_PER_TILE_PER_SEC` (0.8) per owned tile. Spent on outposts (400), barracks (400), and hangars (400). | `WorldConquestScreen`, `WorldConquestConfig`, `EconomyCatalog` |
+| **Supply** | Player wallet. Starts at `STARTING_SUPPLY` (800); income `INCOME_PER_TILE_PER_SEC` (0.15) per owned tile. Spent on outposts (400), barracks (400), and hangars (400). Opening wallet is two buildings; further pumps wait on the blob. | `WorldConquestScreen`, `WorldConquestConfig`, `EconomyCatalog` |
 | **Outpost (spawner)** | Player-placed pressure pump. Lands on the exact clicked tile; placement is allowed on any land tile except enemy-held ones. **Builds instantly** on valid placement (R1). Modes: **Pump** (default trickle), **Drain** (erode enemy neighbor pressure), **Battery** (store inject in a tank). **Surge** dumps a Battery tank onto Pump neighbor tiles (manual). Enemy capture **loses** the tank. | `WorldConquestOutpostBuild.gd`, `sim::inject_placed_spawners` |
 | **Paint** | One rally pin per side. Beachhead: soldiers ferry to that landmass and hold until a puddle exists (~8 owned cells). Strike: bombers bomb the cell and its land neighbors until the crater is owned. Pin clears on success, cancel, or a new paint. Does not capture by itself (F5). | `TerritorySim.set_team_paint`, `agents.rs`, `bombers.rs` |
 | **Barracks** | Supply cost 400; **instant** place. Spawns **soldiers** every `BARRACKS_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Verdantite. Cap **5** living per barracks; global soldier cap **100**. | `EconomyCatalog`, `world_session.rs`, `agents.rs` |
 | **Hangar** | Supply cost 400; **instant** place. Spawns **bombers** every `HANGAR_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Emberstone. Cap **5** living per hangar; global bomber cap **100**. | `EconomyCatalog`, `world_session.rs`, `bombers.rs` |
-| **Soldier** | Ground unit: aura pressure + erode enemy pressure; moves on land; can **ferry** open water. **Aurelium + Verdantite upkeep**; Au deficit applies `SOLDIER_UPKEEP_DEFICIT_DPS`. Orphan damage if barracks destroyed. | `WorldConquestConfig`, `agents.rs` |
-| **Bomber** | Air unit: bombs any non-team land (incl. unreached islands — **not** ferry-gated). Bomb opens claimability on the struck cell, then majority pressure flips owner. **No continuous mineral upkeep** (spawn cost only) — intentional (Design lock A14). | `bombers.rs`, `battle_nav::is_air_strike_goal`, `world_edit::open_claimable_for_air_strike` |
+| **Soldier** | Ground unit: aura pressure + erode enemy pressure; moves on land at `SOLDIER_MOVE_CELLS_PER_SEC` (0.55); can **ferry** open water. **Aurelium + Verdantite upkeep**; Au deficit applies `SOLDIER_UPKEEP_DEFICIT_DPS`. Orphan damage if barracks destroyed. | `WorldConquestConfig`, `agents.rs` |
+| **Bomber** | Air unit: bombs any non-team land (incl. unreached islands — **not** ferry-gated). Moves at `BOMBER_MOVE_CELLS_PER_SEC` (0.9). Bomb opens claimability on the struck cell, then majority pressure flips owner. **No continuous mineral upkeep** (spawn cost only) — intentional (Design lock A14). | `bombers.rs`, `battle_nav::is_air_strike_goal`, `world_edit::open_claimable_for_air_strike` |
 | **Soldier ferry / beachhead** | When no land frontier remains on the current mass, water becomes allowed. Landing on unowned land runs `extend_beachhead_from_landing` so the new landmass becomes claimable. Open-water move rate is **0.25×** land (`SOLDIER_FERRY_MOVE_MULT`). | `agents.rs`, R2 |
 | **Operational sources** | (Legacy routing helper) home capital + active outposts. Instant placement does not require a route. | `WorldConquestOutpostBuild.operational_sources` |
 | **Roads / bridges / strain** | **Removed (R1).** No road growth, land bridges, corridor ribbons, or logistics strain in live play. | Design lock R1 |
 | **Resource deposits** | Aurelium / Verdantite / Emberstone blobs. When a deposit cell is owned, a **miner** appears on it and emits a small resource-colored shockwave every ~2 s. Yield credits the team wallet from ownership (no haul path). Shockwave visuals capped (`RESOURCE_MAX_VISUAL_SHOCKWAVES`); economy still full credit (F7). | `WorldConquestResources.gd`, `EarthGlobeMap.sync_resource_miners` |
-| **Baseline minerals** | Each team earns a flat `TEAM_BASELINE_MINERAL_PER_SEC` (1.0) of Au, Ve, and Em per sim-second, independent of deposits — so barracks/hangars can fund ferry units off a barren landmass. | `WorldConquestScreen._tick_resources`, `WorldConquestConfig` |
+| **Baseline minerals** | Each team earns a flat `TEAM_BASELINE_MINERAL_PER_SEC` (0.45) of Au, Ve, and Em per sim-second, independent of deposits — enough to start units, but deposits still matter. | `WorldConquestScreen._tick_resources`, `WorldConquestConfig` |
 | **WorldDataset** | Live authority contract: Rust owns grid, structures, world-session tick, and resource wallet. Godot presentation is apply-only. All `WORLD_DATASET_*` flags must be true for Play. | `WorldConquestConfig.world_dataset_live()`, `WorldDatasetAssert.gd` |
 | **SCD1 domain pulls** | Live paint: per-domain monotonic versions; Godot `pull_domain_since` full current rows with `version > last`. Domains: territory, structures, agents, bombers, wallet (roads domain retired). | `domain_version.rs`, `Scd1DomainPull.gd` |
 | **PresentationTxn (legacy/QA)** | Old change feed — **not** the live Play path after SCD1 cutover. | `presentation_txn.rs` (QA only) |
@@ -190,7 +194,7 @@ Product choices locked for the current ship target (code may implement them as i
 
 | ID | Lock |
 |----|------|
-| **A13 / F1** | Enemy AI (and AI vs AI) places **outposts + barracks + hangar** (still **no bridges**). Caps/reserves in `ENEMY_AI_*`. |
+| **A13 / F1** | Enemy AI (and AI vs AI) places **outposts + barracks + hangar** (still **no bridges**). Caps, tile gates, and place cooldown in `ENEMY_AI_*` — the AI must not out-click a human. |
 | **A14** | **Bombers have no continuous mineral upkeep**; soldiers have Aurelium + Verdantite upkeep. Intentional. |
 | **F2** | **Superseded by R1** — structures build immediately on valid placement (no road-connect gate). |
 | **F3** | **Superseded by R1** — logistics strain removed with roads. |
@@ -199,7 +203,7 @@ Product choices locked for the current ship target (code may implement them as i
 | **F6** | Cap **5** living units per barracks/hangar structure; global **100** soldiers and **100** bombers. |
 | **F7** | Resource **shockwave visuals** capped (`RESOURCE_MAX_VISUAL_SHOCKWAVES`); economy still gets **full credit** for owned deposits. Presentation is miner-on-deposit (no haul path). |
 | **R1** | **Roads + land bridges removed.** See § Direction — roads & bridges removed. |
-| **R2** | **Soldier ferry water speed** = `SOLDIER_FERRY_MOVE_MULT` (**0.25×** land). Land/bomber speeds otherwise unchanged. |
+| **R2** | **Soldier ferry water speed** = `SOLDIER_FERRY_MOVE_MULT` (**0.25×** land). Land march is `SOLDIER_MOVE_CELLS_PER_SEC` (0.55); bombers `BOMBER_MOVE_CELLS_PER_SEC` (0.9). |
 
 ### Direction — roads & bridges removed (locked 2026-07-24)
 

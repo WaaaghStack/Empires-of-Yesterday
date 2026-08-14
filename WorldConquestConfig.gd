@@ -13,11 +13,13 @@ const CELL_SIZE := 1.0
 const PLAYER_FORCE := 200
 const ENEMY_FORCE := 200
 
-const STARTING_SUPPLY := 1200
+## Opening wallet: two buildings, then income has to fund the rest (pacing pass).
+const STARTING_SUPPLY := 800
 const SPAWNER_COST_SUPPLY := 400
 ## Land Bridge — opens a foreign coast for pressure flow (no outpost build on enemy soil).
 const CORRIDOR_LINK_COST_SUPPLY := 250
-const INCOME_PER_TILE_PER_SEC := 0.8
+## Per owned tile. 0.8 was a building every few seconds once the blob grew.
+const INCOME_PER_TILE_PER_SEC := 0.15
 
 ## Discrete sim step (~14/sec); internal only — UI shows sim time.
 const SIM_DT := 1.0 / 14.0
@@ -185,8 +187,8 @@ const BOMBER_SPAWN_AURELIUM_COST := 3.0
 const BOMBER_SPAWN_EMBERSTONE_COST := 1.0
 const BOMBER_MAX_HP := 100.0
 const BOMBER_ORPHAN_DPS := 1.0
-const BOMBER_MOVE_CELLS_PER_SEC := 2.0
-const BOMBER_INFRA_MOVE_MULT := 3.0
+const BOMBER_MOVE_CELLS_PER_SEC := 0.9
+const BOMBER_INFRA_MOVE_MULT := 2.0
 const BOMBER_BOMB_POWER := 1000.0
 const BOMBER_BOMB_INTERVAL_SEC := 10.0
 const BOMBER_VISUAL_UPDATES_PER_SEC := 4.0
@@ -202,8 +204,8 @@ const BOMBER_PLAN_REEVAL_SEC := 25.0
 const SOLDIER_UPKEEP_AURELIUM_PER_SEC := 0.15
 const SOLDIER_MAX_HP := 40.0
 const SOLDIER_ORPHAN_DPS := 4.0
-const SOLDIER_MOVE_CELLS_PER_SEC := 2.0
-const SOLDIER_INFRA_MOVE_MULT := 3.0
+const SOLDIER_MOVE_CELLS_PER_SEC := 0.55
+const SOLDIER_INFRA_MOVE_MULT := 2.0
 ## While ferrying on open water, move at this fraction of land speed.
 const SOLDIER_FERRY_MOVE_MULT := 0.25
 const SOLDIER_AURA_PRESSURE := 5.0
@@ -280,9 +282,10 @@ const CAMERA_DEFAULT_DISTANCE := 200.0
 ## Slower creep spread than compact RTS maps (HOME_START_POWER / 2000 per step).
 const WORLD_CONQUEST_PRESSURE_SCALE := 1.0 / 2000.0
 ## Per-round pressure from home base + operational spawners (1.0 = full output).
-const PRESSURE_SOURCE_OUTPUT_MULT := 0.7
-## Home + spawner pressure inject cadence in sim rounds (@ SIM_DT).
-const PRESSURE_INJECT_INTERVAL_ROUNDS := 7
+const PRESSURE_SOURCE_OUTPUT_MULT := 0.42
+## Home + spawner pressure inject cadence in sim rounds (@ SIM_DT ≈ 1/14 s).
+## 14 rounds ≈ 1 s between injects (was 7 / ~0.5 s).
+const PRESSURE_INJECT_INTERVAL_ROUNDS := 14
 
 ## Strategic minerals — Aurelium (yellow), Verdantite (green), Emberstone (orange).
 const RESOURCE_TYPE_COUNT := 3
@@ -295,7 +298,7 @@ const RESOURCE_COLORS: Array[Color] = [
 ]
 ## Flat baseline: each team earns this much Au, Ve, and Em per sim-second so units
 ## can spawn/ferry even when the starting landmass has no owned deposits.
-const TEAM_BASELINE_MINERAL_PER_SEC := 1.0
+const TEAM_BASELINE_MINERAL_PER_SEC := 0.45
 const RESOURCE_BLOBS_PER_TYPE := 22
 const RESOURCE_BLOB_MIN_SPACING := 10
 const RESOURCE_SPAWN_EXCLUSION := 24
@@ -318,29 +321,36 @@ const RESOURCE_SHOCKWAVE_RADIUS_END := 9.0
 const RESOURCE_LINK_CELLS_PER_SEC := 1.2
 const RESOURCE_HAUL_CELLS_PER_SEC := 2.5
 
-## Hostile opponent AI — throttled planner + spread execution (no per-frame full-map scans).
+## Hostile opponent AI — spends like a human, not a click-macro.
 const ENEMY_AI_ENABLED := true
-const ENEMY_AI_PLAN_INTERVAL_SEC := 1.25
+const ENEMY_AI_PLAN_INTERVAL_SEC := 12.0
 const ENEMY_AI_ACTIONS_PER_FRAME := 1
-const ENEMY_AI_MAX_ACTIONS_PER_PLAN := 3
-const ENEMY_AI_MAX_CONCURRENT_BUILDS := 2
+const ENEMY_AI_MAX_ACTIONS_PER_PLAN := 1
+const ENEMY_AI_MAX_CONCURRENT_BUILDS := 1
 const ENEMY_AI_MAX_CANDIDATES := 20
 const ENEMY_AI_FRONTIER_SAMPLE_STRIDE := 4
 const ENEMY_AI_DEFAULT_DIFFICULTY := 1
 const ENEMY_AI_VISION_BEGINNER := 18
 const ENEMY_AI_VISION_MEDIUM := 28
 const ENEMY_AI_VISION_EXPERT := 40
-## Multi-structure AI caps / reserves (outposts + barracks + hangar; still no bridges).
-const ENEMY_AI_MAX_BARRACKS := 3
-const ENEMY_AI_MAX_HANGARS := 2
-const ENEMY_AI_MIN_OUTPOSTS_BEFORE_MILITARY := 1
+## Hard caps so the AI cannot out-click a player over a long match.
+const ENEMY_AI_MAX_OUTPOSTS := 8
+const ENEMY_AI_MAX_BARRACKS := 2
+const ENEMY_AI_MAX_HANGARS := 1
+const ENEMY_AI_MIN_OUTPOSTS_BEFORE_MILITARY := 2
+## Owned tiles required per existing outpost before the next pump (first is ungated).
+const ENEMY_AI_TILES_PER_OUTPOST := 70
+## Sim-seconds after a successful place before the AI may place again.
+const ENEMY_AI_BUILD_COOLDOWN_SEC := 18.0
 const ENEMY_AI_SUPPLY_RESERVE := 400
-## Barracks/hangar planning: 0 so AI vs AI can place military when supply is ok
-## even if Au/Em wallets are still warming up (soldiers still need Au at spawn time).
-const ENEMY_AI_BARRACKS_MIN_AU := 0.0
-const ENEMY_AI_HANGAR_MIN_EM := 0.0
+## Extra supply kept per existing outpost (on top of the 400 cost).
+const ENEMY_AI_OUTPOST_RESERVE := 350
+## Barracks/hangar wait for a little mineral so they are not the first spend.
+const ENEMY_AI_BARRACKS_MIN_AU := 8.0
+const ENEMY_AI_HANGAR_MIN_EM := 6.0
+## Wider AI outpost spacing than the player's min 6 so they cannot fill every hole.
+const ENEMY_AI_OUTPOST_SPACING_CELLS := 10
 ## Soft spacing for barracks/hangar so they can sit near outposts on small beachheads.
-## Outposts still use MIN_SPAWNER_SPACING_CELLS vs all structures.
 const ENEMY_AI_MILITARY_SPACING_CELLS := 2
 ## R1: bridge AI removed — chance constants retired (unread).
 

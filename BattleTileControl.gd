@@ -34,9 +34,9 @@ const HEIGHT_UPHILL_PENALTY := 0.42
 ## Terrain elevation 0..HEIGHT_MAX (mountains = 100). Not a cap on pressure stored on a tile.
 const HEIGHT_MAX := 100.0
 ## Hydrostatic gradient: effective height H = pressure + elevation; flow ∝ positive dH.
-const FLOW_CONDUCTIVITY := 0.32
+const FLOW_CONDUCTIVITY := 0.20
 const MIN_FLOW_DELTA := 0.1
-const MAX_OUTFLOW_FRAC := 0.5
+const MAX_OUTFLOW_FRAC := 0.38
 static var _diffuse_sphere_warned: bool = false
 ## Ignore tiny pressure for territory claims (visual fade handled in BattleTileFluidField).
 const MIN_CLAIM_PRESSURE := 0.04

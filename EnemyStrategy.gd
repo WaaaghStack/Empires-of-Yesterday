@@ -8,8 +8,9 @@ extends RefCounted
 ## (AI vs AI / human vs AI). Still **no bridges** (R1).
 ## R1 placeability: candidates/scores require claimable land (beachhead / air-strike opened),
 ## reject opponent-owned; barracks/hangar heavily prefer self-owned claimable.
-## Planner caps + supply/mineral reserves are primary. R1 instant ACTIVE makes CONNECTING-count
-## gates useless/harmful — Screen + planner must not stall on concurrent-build connecting counts.
+## Planner caps + supply/mineral reserves + place cooldown are primary. R1 instant ACTIVE
+## makes CONNECTING-count gates useless — Screen must not stall on connecting counts.
+## Outposts are hard-capped and tile-gated so the AI cannot out-click a human.
 ##
 ## B1 pathfind policy (Screen must honor via helpers below):
 ## - Always try budgeted/capped route first (`prefer_budgeted_route` / allow_astar=false).
@@ -177,8 +178,24 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 	var own_spawners: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_SPAWNER)
 	var own_barracks: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_BARRACKS)
 	var own_hangars: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_HANGAR)
+	var self_tiles: int = int(snapshot.get("self_tiles", -1))
+	if self_tiles < 0:
+		if self_owner == BattleTileControlLib.OWNER_HOSTILE:
+			self_tiles = int(snapshot.get("hostile_tiles", 0))
+		else:
+			self_tiles = int(snapshot.get("friendly_tiles", 0))
+	var max_outposts: int = _max_outposts(difficulty)
 	var need_outposts: bool = own_spawners < CFG.ENEMY_AI_MIN_OUTPOSTS_BEFORE_MILITARY
 	var allow_military: bool = not need_outposts
+	var outpost_need: float = outpost_cost + float(CFG.ENEMY_AI_OUTPOST_RESERVE) * float(own_spawners)
+	var allow_outpost: bool = (
+		own_spawners < max_outposts
+		and self_supply >= outpost_need
+		and (
+			own_spawners <= 0
+			or self_tiles >= own_spawners * CFG.ENEMY_AI_TILES_PER_OUTPOST
+		)
+	)
 	var allow_barracks: bool = (
 		allow_military
 		and own_barracks < CFG.ENEMY_AI_MAX_BARRACKS
@@ -217,7 +234,7 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 	var spacing_rejects: int = 0
 	var military_spacing_rejects: int = 0
 	for cand: Vector2i in candidates:
-		if self_supply >= outpost_cost:
+		if allow_outpost:
 			var outpost_score: float = _score_outpost_cell(
 				map_data,
 				owners,
@@ -285,7 +302,7 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 			and candidates.size() > 0
 		):
 			last_empty_reason = "all_candidates_military_spacing"
-		elif self_supply < outpost_cost and not allow_barracks and not allow_hangar:
+		elif self_supply < outpost_need and not allow_barracks and not allow_hangar:
 			last_empty_reason = "supply_or_military_gated"
 		else:
 			last_empty_reason = (
@@ -672,16 +689,26 @@ static func _spacing_ok(map_data, cand: Vector2i, structures: Array) -> bool:
 
 
 ## Kind-aware structure spacing.
-## - Spawners: MIN_SPAWNER_SPACING_CELLS vs all structures (unchanged).
+## - Spawners: ENEMY_AI_OUTPOST_SPACING_CELLS (wider than the player's min 6).
 ## - Barracks/hangar: soft ENEMY_AI_MILITARY_SPACING_CELLS vs all (incl. outposts) so small
 ##   beachheads can host military next to spawners; still prevents stacking.
+static func _max_outposts(difficulty: int) -> int:
+	var cap: int = CFG.ENEMY_AI_MAX_OUTPOSTS
+	match difficulty:
+		Difficulty.BEGINNER:
+			return maxi(4, cap - 3)
+		Difficulty.EXPERT:
+			return cap + 2
+	return cap
+
+
 static func _min_spacing_cells_for_kind(place_kind: String) -> int:
 	if (
 		place_kind == OutpostBuildLib.KIND_BARRACKS
 		or place_kind == OutpostBuildLib.KIND_HANGAR
 	):
 		return maxi(2, int(CFG.ENEMY_AI_MILITARY_SPACING_CELLS))
-	return CFG.MIN_SPAWNER_SPACING_CELLS
+	return maxi(CFG.MIN_SPAWNER_SPACING_CELLS, int(CFG.ENEMY_AI_OUTPOST_SPACING_CELLS))
 
 
 static func _spacing_ok_for_kind(
