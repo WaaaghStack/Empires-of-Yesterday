@@ -25,27 +25,66 @@ const SIM_DT := 1.0 / 14.0
 const SIM_MAX_STEPS_PER_FRAME := 4
 ## When the prior _process frame exceeded this budget, sim catch-up is capped to 1 step (I6).
 const FRAME_BUDGET_MS := 16.0
+## End-game FPS: defer AI ticks when prior frame exceeded this (same frame as a heavy sim step).
+const FRAME_MS_DEFER_AI := 16.0
+## End-game FPS: tighten active-set soft-cap + keep sim at most 1 step.
+const FRAME_MS_TIGHTEN_SOFT_CAP := 20.0
+## End-game FPS: skip advance_dt this frame (resume next — never skip two in a row).
+const FRAME_MS_SKIP_SIM := 28.0
+## Soft-cap / agent-visual throttle kicks in above this prior-frame cost (before TIGHTEN).
+const FRAME_MS_SOFT_CAP_PREEMPT := 20.0
 ## Max ownership overlay cells applied to the globe per frame (remainder queued).
 const OVERLAY_DELTA_CELLS_PER_FRAME := 48
+## When overlay backlog exceeds this, drain faster so paint catch-up stays under ~0.5s.
+const OVERLAY_DELTA_BURST_CELLS_PER_FRAME := 512
+const OVERLAY_DELTA_BURST_PENDING_THRESHOLD := 256
+## Full territory seed / huge batches skip the drip queue and apply R8 in one shot.
+const OVERLAY_FULL_SEED_QUEUE_THRESHOLD := 512
 const OVERLAY_UPDATES_PER_SEC := 3.0
+## Depth tint alone (owners come from SCD1); keep ≤0.25 Hz to avoid remapping 64k cells too often.
+const OVERLAY_DEPTH_UPDATES_PER_SEC := 0.25
 ## Partitioned anti-drift sweep: compare Rust owner vs globe cache per frame.
 ## Full 360×180 pass ≈ 68 s at 16/frame @ 60 fps (halved when prior frame exceeded budget).
 const OVERLAY_RECONCILE_CELLS_PER_FRAME := 16
 ## Globe tint from tile ownership only — skips full pressure/R8 FFI every step (B10/I2/I3).
 ## Live path uses pull_presentation_delta owner deltas; never reintroduce per-step full pressure pulls.
 const OVERLAY_OWNERS_ONLY := true
+## Throttled pressure-depth tint on ownership shader (0.25 Hz; no per-step pressure FFI).
+const OVERLAY_DEPTH_TINT := true
+## Display normalize for depth R8 bake (Rust get_pressure_depth_r8).
+const PRESSURE_VIS_REF := 48.0
 const SOLDIER_VISUAL_UPDATES_PER_SEC := 4.0
 ## Max soldier BFS replans per sim tick (global budget across all units).
-const SOLDIER_REPLANS_PER_TICK := 20
+## Kept low (6): late-game ferry thrash — free tiles shrink, stuck agents replan
+## with water-allowed BFS; 20×/tick was a primary FPS collapse driver (not soft-cap).
+const SOLDIER_REPLANS_PER_TICK := 6
 ## Fallback replan interval when local frontier is stable (~3 s at 14 Hz).
 const SOLDIER_REPLAN_FALLBACK_ROUNDS := 42
-const SIM_ACTIVE_SOFT_CAP := 8000
+## Active-set soft-cap default (matches Rust ACTIVE_SET_SOFT_CAP).
+const SIM_ACTIVE_SOFT_CAP := 24000
+const SOFT_CAP_DEFAULT := SIM_ACTIVE_SOFT_CAP
+## Under frame pressure (> FRAME_MS_TIGHTEN_SOFT_CAP), prune to this soft-cap.
+const SOFT_CAP_STRESS := 8000
+## Critical overload (> FRAME_MS_SKIP_SIM): prune harder so gradient stays cheap.
+const SOFT_CAP_CRITICAL := 5000
+## Sticky soft-cap: once lowered, require this many consecutive healthy frames
+## (prior_ms ≤ FRAME_BUDGET_MS) before raising back toward DEFAULT. Prevents
+## 5k↔24k thrash after a skip/heavy frame briefly looks healthy.
+const SOFT_CAP_HEALTHY_FRAMES_TO_RAISE := 45
+## Rate-limit soft_cap RunLog lines (ms) even if state flips again.
+const SOFT_CAP_LOG_INTERVAL_MS := 3000
 ## Minimum time on the World Conquest loading screen (shader compile, Rust warm-up).
 const WORLD_CONQUEST_MIN_LOAD_SEC := 2.5
+## Capital deploy pick window once the globe is interactable (US-START-01).
+const DEPLOY_PICK_SEC := 5.0
+## Brief enemy capital pin after player commits deploy.
+const DEPLOY_ENEMY_REVEAL_SEC := 1.5
+## Orbit sensitivity multiplier while choosing a capital (pick phase only).
+const DEPLOY_ORBIT_MULT := 2.75
 
 const GLOBE_RADIUS := 100.0
 ## Radial displacement so mountains read as ridges (mesh + surface LUT).
-const HEIGHT_SCALE := 11.0
+const HEIGHT_SCALE := 16.0
 const FLUID_SURFACE_LIFT := 0.45
 ## Atmosphere shell scale vs GLOBE_RADIUS (cosmetic rim).
 const ATMOSPHERE_RADIUS_SCALE := 1.045
@@ -61,11 +100,16 @@ const GLOBE_RENDER_SCALE := 0.85
 const OVERLAY_GPU_UPLOAD_MAX_HZ := 30.0
 
 const MIN_SPAWNER_SPACING_CELLS := 6
-## Outpost must link by road from HQ or nearest active outpost, then finish construction.
+## Outpost build timer (legacy BUILDING state). R1 Play places structures as ACTIVE immediately.
 const OUTPOST_BUILD_SEC := 5.0
 const OUTPOST_ROAD_CELLS_PER_SEC := 2.0
 ## Each connecting route feeds its own road front at this rate (parallel when routes diverge).
 ## Shared logistics network — timer road growth (replaces builder bots).
+##
+## Design lock R1: roads and land bridges are cut from gameplay. Structures place instantly and
+## haul lines are drawn straight to the nearest hub, so nothing in GDScript reads the LOGISTICS_*
+## or ROAD_* knobs below anymore. They stay declared because the Rust territory extension still
+## loads them; delete them only together with the Rust-side logistics network.
 const LOGISTICS_RECONCILE_CELLS_PER_FRAME := 6480
 const LOGISTICS_FULL_RECAL_SEC := 25.0
 const LOGISTICS_PLACEMENT_HEAT_DECAY := 0.85
@@ -127,13 +171,18 @@ const BARRACKS_SPAWN_INTERVAL_SEC := 10.0
 const BARRACKS_MAX_ACTIVE_UNITS := 5
 const GLOBAL_SOLDIER_CAP := 100
 const SOLDIER_SPAWN_AURELIUM_COST := 3.0
-## Hangar — same economy as barracks; spawns bombers (Aurelium).
+## Verdantite — infantry spawn + upkeep sink (R1 restore; Au remains primary deficit DPS gate).
+const SOLDIER_SPAWN_VERDANTITE_COST := 1.0
+const SOLDIER_UPKEEP_VERDANTITE_PER_SEC := 0.05
+## Hangar — same economy as barracks; spawns bombers (Aurelium + Emberstone).
 const HANGAR_COST_SUPPLY := 400
 const HANGAR_BUILD_SEC := 5.0
 const HANGAR_SPAWN_INTERVAL_SEC := 10.0
 const HANGAR_MAX_ACTIVE_UNITS := 5
 const GLOBAL_BOMBER_CAP := 100
 const BOMBER_SPAWN_AURELIUM_COST := 3.0
+## Emberstone — bomber spawn sink (R1 restore).
+const BOMBER_SPAWN_EMBERSTONE_COST := 1.0
 const BOMBER_MAX_HP := 100.0
 const BOMBER_ORPHAN_DPS := 1.0
 const BOMBER_MOVE_CELLS_PER_SEC := 2.0
@@ -144,9 +193,10 @@ const BOMBER_VISUAL_UPDATES_PER_SEC := 4.0
 ## Flight altitude lift — ~10× peak mountain visual (HEIGHT_SCALE * 10).
 const BOMBER_SURFACE_LIFT := HEIGHT_SCALE * 10.0
 ## Strike pathfind starts local, widening on miss (BFS cell budgets).
+## Cap at 12k (not 40k): same late-game pathfind thrash budget as land/ferry caps.
 const BOMBER_SEARCH_EXPAND_INITIAL := 5000
 const BOMBER_SEARCH_EXPAND_STEP := 5000
-const BOMBER_SEARCH_EXPAND_MAX := 40000
+const BOMBER_SEARCH_EXPAND_MAX := 12000
 ## Force a fresh route evaluation after this many seconds on the same plan.
 const BOMBER_PLAN_REEVAL_SEC := 25.0
 const SOLDIER_UPKEEP_AURELIUM_PER_SEC := 0.15
@@ -154,7 +204,9 @@ const SOLDIER_MAX_HP := 40.0
 const SOLDIER_ORPHAN_DPS := 4.0
 const SOLDIER_MOVE_CELLS_PER_SEC := 2.0
 const SOLDIER_INFRA_MOVE_MULT := 3.0
-const SOLDIER_AURA_PRESSURE := 0.48
+## While ferrying on open water, move at this fraction of land speed.
+const SOLDIER_FERRY_MOVE_MULT := 0.25
+const SOLDIER_AURA_PRESSURE := 5.0
 const SOLDIER_SHOOT_ERODE_PER_SEC := 24.0
 const SOLDIER_UPKEEP_DEFICIT_DPS := 2.5
 ## Canonical bridge pressure flow mult (A11/A12/C15).
@@ -228,9 +280,9 @@ const CAMERA_DEFAULT_DISTANCE := 200.0
 ## Slower creep spread than compact RTS maps (HOME_START_POWER / 2000 per step).
 const WORLD_CONQUEST_PRESSURE_SCALE := 1.0 / 2000.0
 ## Per-round pressure from home base + operational spawners (1.0 = full output).
-const PRESSURE_SOURCE_OUTPUT_MULT := 0.5
+const PRESSURE_SOURCE_OUTPUT_MULT := 0.7
 ## Home + spawner pressure inject cadence in sim rounds (@ SIM_DT).
-const PRESSURE_INJECT_INTERVAL_ROUNDS := 10
+const PRESSURE_INJECT_INTERVAL_ROUNDS := 7
 
 ## Strategic minerals — Aurelium (yellow), Verdantite (green), Emberstone (orange).
 const RESOURCE_TYPE_COUNT := 3
@@ -241,16 +293,30 @@ const RESOURCE_COLORS: Array[Color] = [
 	Color(0.28, 0.88, 0.42, 1.0),
 	Color(0.98, 0.52, 0.18, 1.0),
 ]
+## Flat baseline: each team earns this much Au, Ve, and Em per sim-second so units
+## can spawn/ferry even when the starting landmass has no owned deposits.
+const TEAM_BASELINE_MINERAL_PER_SEC := 1.0
 const RESOURCE_BLOBS_PER_TYPE := 22
 const RESOURCE_BLOB_MIN_SPACING := 10
 const RESOURCE_SPAWN_EXCLUSION := 24
 ## Yield per second by blob size tier (1 small, 2 medium, 3 large).
 const RESOURCE_YIELD_BY_SIZE: Array[float] = [0.0, 0.6, 1.0, 1.8]
 const RESOURCE_BLOB_CELL_COUNT: Array[int] = [0, 4, 9, 18]
+## Visual shockwave budget (economy still full credit — Design lock F7).
+## Visual-only cap (economy still credits all yield). Lowered for mid/late draw spikes.
+const RESOURCE_MAX_VISUAL_SHOCKWAVES := 10
+## Compat alias — prefer RESOURCE_MAX_VISUAL_SHOCKWAVES.
+const RESOURCE_MAX_VISUAL_PULSES := RESOURCE_MAX_VISUAL_SHOCKWAVES
+const RESOURCE_SHOCKWAVE_PERIOD_SEC := 2.0
+const RESOURCE_SHOCKWAVE_DURATION_SEC := 0.65
+## Globe-readable miner size (world units; globe radius is ~100).
+const RESOURCE_MINER_SCALE := 3.6
+## Shockwave ring start/end radii in world units (must read from orbit cam).
+const RESOURCE_SHOCKWAVE_RADIUS_START := 2.2
+const RESOURCE_SHOCKWAVE_RADIUS_END := 9.0
+## Legacy haul-path rates (unused after miner visual cut; kept so old saves/tests don't KeyError).
 const RESOURCE_LINK_CELLS_PER_SEC := 1.2
 const RESOURCE_HAUL_CELLS_PER_SEC := 2.5
-## Cap simultaneous haul pulse draw instances (economy still credits all yields).
-const RESOURCE_MAX_VISUAL_PULSES := 36
 
 ## Hostile opponent AI — throttled planner + spread execution (no per-frame full-map scans).
 const ENEMY_AI_ENABLED := true
@@ -264,6 +330,16 @@ const ENEMY_AI_DEFAULT_DIFFICULTY := 1
 const ENEMY_AI_VISION_BEGINNER := 18
 const ENEMY_AI_VISION_MEDIUM := 28
 const ENEMY_AI_VISION_EXPERT := 40
-const ENEMY_AI_BRIDGE_CHANCE_BEGINNER := 0.08
-const ENEMY_AI_BRIDGE_CHANCE_MEDIUM := 0.28
-const ENEMY_AI_BRIDGE_CHANCE_EXPERT := 0.48
+## Multi-structure AI caps / reserves (outposts + barracks + hangar; still no bridges).
+const ENEMY_AI_MAX_BARRACKS := 3
+const ENEMY_AI_MAX_HANGARS := 2
+const ENEMY_AI_MIN_OUTPOSTS_BEFORE_MILITARY := 1
+const ENEMY_AI_SUPPLY_RESERVE := 400
+## Barracks/hangar planning: 0 so AI vs AI can place military when supply is ok
+## even if Au/Em wallets are still warming up (soldiers still need Au at spawn time).
+const ENEMY_AI_BARRACKS_MIN_AU := 0.0
+const ENEMY_AI_HANGAR_MIN_EM := 0.0
+## Soft spacing for barracks/hangar so they can sit near outposts on small beachheads.
+## Outposts still use MIN_SPAWNER_SPACING_CELLS vs all structures.
+const ENEMY_AI_MILITARY_SPACING_CELLS := 2
+## R1: bridge AI removed — chance constants retired (unread).

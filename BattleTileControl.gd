@@ -168,8 +168,9 @@ func setup(map_data) -> void:
 	_active_dirty_mark.resize(_tile_count)
 	_active_dirty_mark.fill(0)
 	_active_dirty_list.clear()
-	_grad_targets.resize(4)
-	_grad_amounts.resize(4)
+	# Sphere cells can have up to 6 neighbors; rect maps use 4 cardinals.
+	_grad_targets.resize(6)
+	_grad_amounts.resize(6)
 	if map_data.sphere_mode:
 		for cell_id in range(map_data.cell_count):
 			var claimable: bool = _is_claimable_index(cell_id)
@@ -404,6 +405,7 @@ func _propagate_simple_water(map_data) -> void:
 
 func _run_gradient_cancel_sync_pass(map_data) -> void:
 	_spread_pressure_gradient(map_data)
+	_promote_active_dirty_into_indices()
 	var t_cancel: int = 0
 	if perf != null:
 		t_cancel = perf.begin_phase("cancel")
@@ -416,6 +418,18 @@ func _run_gradient_cancel_sync_pass(map_data) -> void:
 	_sync_ownership_from_pressures()
 	if perf != null:
 		perf.end_phase("sync", t_sync)
+
+
+func _promote_active_dirty_into_indices() -> void:
+	if not use_active_set or _active_dirty_list.is_empty():
+		return
+	for idx: int in _active_dirty_list:
+		if idx < 0 or idx >= _tile_count or claimable_mask[idx] == 0:
+			continue
+		if _active_seen[idx] != 0:
+			continue
+		_active_indices.append(idx)
+		_active_seen[idx] = 1
 
 
 func _cancel_overlapping_pressure() -> void:
@@ -494,7 +508,7 @@ func _gradient_flow_active(map_data, w: int, h: int, src: PackedFloat32Array, ds
 			gx = idx % w
 			gy = idx / w
 		_gradient_flow_tile(
-			map_data, w, h, gx, gy, src, dst, _active_scratch
+			map_data, w, h, gx, gy, src, dst, _active_scratch, true
 		)
 	for ni in _active_scratch:
 		var ngx: int = ni
@@ -503,7 +517,12 @@ func _gradient_flow_active(map_data, w: int, h: int, src: PackedFloat32Array, ds
 			ngx = ni % w
 			ngy = ni / w
 		_gradient_flow_tile(map_data, w, h, ngx, ngy, src, dst)
-		_active_seen[ni] = 0
+		# Halo cells were outside the active set when collected; promote so cancel /
+		# ownership sync this round instead of waiting on rebuild.
+		_active_indices.append(ni)
+		_active_seen[ni] = 1
+		_mark_active_dirty(ni)
+		_frontier_changed = true
 
 
 func _gradient_flow_tile(
@@ -515,6 +534,7 @@ func _gradient_flow_tile(
 	src: PackedFloat32Array,
 	dst: PackedFloat32Array,
 	halo_out: PackedInt32Array = PackedInt32Array(),
+	collect_halo: bool = false,
 ) -> void:
 	var idx: int = map_data.cell_index(gx, gy)
 	if claimable_mask[idx] == 0:
@@ -540,7 +560,8 @@ func _gradient_flow_tile(
 		_grad_amounts[n_count] = amount
 		n_count += 1
 		want_total += amount
-		if not halo_out.is_empty() and _active_seen[ni] == 0:
+		# Old gate `not halo_out.is_empty()` never seeded an empty collector.
+		if collect_halo and _active_seen[ni] == 0:
 			halo_out.append(ni)
 			_active_seen[ni] = 1
 	if want_total <= 0.0:
@@ -737,72 +758,35 @@ func sync_placed_spawners_from_map(map_data) -> void:
 ## Extend built bridge/corridor claimability. Returns true if claimable_mask changed.
 ## force_full: rebuild all corridor masks (e.g. after outpost destroyed).
 func sync_bridge_corridors_from_map(map_data, force_full: bool = false) -> bool:
+	# R1: land bridges removed — clear any stale bridge/corridor claimable stamps.
+	# Ferry beachheads (`extend_beachhead_from_landing`) are the only way to open new landmasses.
 	if grid_mirror_frozen:
 		return false
 	if map_data == null:
 		return false
 	var touched: PackedInt32Array = PackedInt32Array()
-	if force_full:
-		_friendly_bridge_reachable.fill(0)
-		_hostile_bridge_reachable.fill(0)
-		_friendly_corridor_land.fill(0)
-		_hostile_corridor_land.fill(0)
-		for st in map_data.placed_structures:
-			if st is Dictionary:
-				st.erase("corridor_synced_built")
-		for corridor in map_data.bridge_corridors:
-			if corridor is Dictionary:
-				corridor.erase("corridor_synced_built")
-	for st in map_data.placed_structures:
-		if not st is Dictionary:
-			continue
-		var kind: String = str(st.get("kind", ""))
-		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(kind):
-			continue
-		if kind == WorldConquestOutpostBuildLib.KIND_SPAWNER or kind == WorldConquestOutpostBuildLib.KIND_BARRACKS or kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
-			var state: String = str(st.get("state", WorldConquestOutpostBuildLib.STATE_ACTIVE))
-			if (
-				state != WorldConquestOutpostBuildLib.STATE_CONNECTING
-				and state != WorldConquestOutpostBuildLib.STATE_BUILDING
-				and state != WorldConquestOutpostBuildLib.STATE_ACTIVE
-			):
-				continue
-		elif str(st.get("state", "")) != WorldConquestOutpostBuildLib.STATE_CONNECTING:
-			continue
-		_apply_corridor_path_sync(map_data, st, force_full, touched)
-	for corridor in map_data.bridge_corridors:
-		if corridor is Dictionary:
-			_apply_persisted_corridor_sync(map_data, corridor, force_full, touched)
-	var nav_reconciled: bool = _reconcile_corridor_land_nav_masks(map_data)
-	if touched.is_empty():
-		return nav_reconciled
-	var changed: bool = _apply_claimable_cells(map_data, touched)
-	return changed or nav_reconciled
-
-
-## Incremental corridor sync for specific structure ids (CONNECTING path growth).
-func sync_bridge_corridors_for_sids(map_data, sids: Array, force_full: bool = false) -> bool:
-	if grid_mirror_frozen:
-		return false
-	if map_data == null or sids.is_empty():
-		return false
-	var touched: PackedInt32Array = PackedInt32Array()
-	var sid_set: Dictionary = {}
-	for sid_v in sids:
-		sid_set[int(sid_v)] = true
-	for st in map_data.placed_structures:
-		if not st is Dictionary:
-			continue
-		var sid: int = int(st.get("id", -1))
-		if sid < 0 or not sid_set.has(sid):
-			continue
-		var kind: String = str(st.get("kind", ""))
-		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(kind):
-			continue
-		_apply_corridor_path_sync(map_data, st, force_full, touched)
+	for idx in range(_tile_count):
+		if (
+			_friendly_bridge_reachable[idx] != 0
+			or _hostile_bridge_reachable[idx] != 0
+			or _friendly_corridor_land[idx] != 0
+			or _hostile_corridor_land[idx] != 0
+		):
+			touched.append(idx)
+	_friendly_bridge_reachable.fill(0)
+	_hostile_bridge_reachable.fill(0)
+	_friendly_corridor_land.fill(0)
+	_hostile_corridor_land.fill(0)
+	if map_data.bridge_corridors is Array and not map_data.bridge_corridors.is_empty():
+		map_data.bridge_corridors.clear()
 	if touched.is_empty():
 		return false
 	return _apply_claimable_cells(map_data, touched)
+
+
+## Incremental corridor sync retired under R1 (no road/bridge path claimable stamps).
+func sync_bridge_corridors_for_sids(map_data, sids: Array, force_full: bool = false) -> bool:
+	return sync_bridge_corridors_from_map(map_data, true)
 
 
 func _cardinal_neighbor_indices(map_data, gx: int, gy: int) -> PackedInt32Array:
@@ -860,6 +844,7 @@ func tile_probe(map_data, gx: int, gy: int) -> Dictionary:
 		terrain = BattleMapDataLib.TERRAIN_NAMES[
 			clampi(int(map_data.get_cell_terrain(gx, gy)), 0, BattleMapDataLib.TERRAIN_NAMES.size() - 1)
 		]
+	var elev: float = tile_elevation(map_data, gx, gy)
 	return {
 		"valid": true,
 		"gx": gx,
@@ -868,6 +853,9 @@ func tile_probe(map_data, gx: int, gy: int) -> Dictionary:
 		"owner": owner_name,
 		"pf": pressure_friendly[idx],
 		"ph": pressure_hostile[idx],
+		"elev": elev,
+		"h_friendly": effective_height(pressure_friendly[idx], elev),
+		"h_hostile": effective_height(pressure_hostile[idx], elev),
 		"claimable": claimable_mask[idx] != 0,
 		"f_bridge": _friendly_bridge_reachable[idx] != 0,
 		"h_bridge": _hostile_bridge_reachable[idx] != 0,
@@ -1098,7 +1086,10 @@ func _built_bridge_cells_from_structure(st: Dictionary) -> int:
 
 
 ## Active outposts on separate landmasses (bridge-linked islands) must become claimable.
+## R1 / grid authority: when the CPU mirror is frozen, Rust world-edit owns claimable — no dual write.
 func _extend_reachability_from_spawners(map_data) -> void:
+	if grid_mirror_frozen:
+		return
 	if map_data == null or _placed_spawners.is_empty():
 		return
 	var changed: bool = false
@@ -1124,8 +1115,9 @@ func _flood_passable_into_mask(
 	mask: PackedByteArray,
 	touched: PackedInt32Array = PackedInt32Array(),
 ) -> bool:
+	# R1 / ferry: claimable reachability floods contiguous land only — never ocean.
 	if map_data.sphere_mode:
-		if not map_data.is_passable(start_gx, 0):
+		if not map_data.is_land_cell_id(start_gx):
 			return false
 		var start_idx: int = start_gx
 		if start_idx < 0 or start_idx >= mask.size():
@@ -1141,7 +1133,7 @@ func _flood_passable_into_mask(
 			var cur: int = queue[head]
 			head += 1
 			for nbr in map_data.get_neighbors(cur):
-				if not map_data.is_passable(nbr, 0):
+				if not map_data.is_land_cell_id(nbr):
 					continue
 				if mask[nbr] != 0:
 					continue
@@ -1150,7 +1142,7 @@ func _flood_passable_into_mask(
 				touched.append(nbr)
 				queue.append(nbr)
 		return any_new
-	if not map_data.is_passable(start_gx, start_gy):
+	if not map_data.is_land_cell(start_gx, start_gy):
 		return false
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
@@ -1172,7 +1164,7 @@ func _flood_passable_into_mask(
 			var ny: int = cur.y + d.y
 			if nx < 0 or ny < 0 or nx >= w or ny >= h:
 				continue
-			if not map_data.is_passable(nx, ny):
+			if not map_data.is_land_cell(nx, ny):
 				continue
 			var nidx: int = map_data.cell_index(nx, ny)
 			if mask[nidx] != 0:
@@ -1235,6 +1227,9 @@ func _apply_reachability_to_claimable(map_data) -> void:
 		var was: int = claimable_mask[idx]
 		var now: bool = _is_claimable_index(idx)
 		claimable_mask[idx] = 1 if now else 0
+		if now == (was != 0):
+			continue
+		_mark_claimable_dirty(idx)
 		if now and was == 0:
 			_elevation[idx] = tile_elevation(map_data, gx, gy)
 			_terrain_flow_mult[idx] = _flow_mult_for_bridge_or_land(map_data, gx, gy, idx)
@@ -1287,35 +1282,30 @@ func _inject_territory_spawn_pressure(map_data) -> void:
 				pressure_hostile[idx] += base * _hostile_spawn_rate
 
 
-## Match BattleTileFluidField._pressures_to_owners — sim territory should track visible fluid.
+## Simple majority: more pressure owns the cell; equal → neutral (matches Rust sync_ownership_tile).
 func _sync_ownership_from_pressures() -> void:
-	const CLAIM_DOMINANCE_RATIO := 1.15
 	var work_full: bool = not use_active_set or _active_indices.is_empty()
 	if work_full:
 		for idx in range(_tile_count):
-			_sync_ownership_tile(idx, CLAIM_DOMINANCE_RATIO)
+			_sync_ownership_tile(idx)
 		return
 	for idx in _active_indices:
-		_sync_ownership_tile(idx, CLAIM_DOMINANCE_RATIO)
+		_sync_ownership_tile(idx)
 
 
-func _sync_ownership_tile(idx: int, dominance_ratio: float) -> void:
+func _sync_ownership_tile(idx: int, _dominance_ratio: float = 1.0) -> void:
 	if claimable_mask[idx] == 0:
 		owners[idx] = OWNER_UNCLAIMABLE
 		return
 	var pf: float = pressure_friendly[idx]
 	var ph: float = pressure_hostile[idx]
-	var new_owner: int = owners[idx]
-	var tile_ratio: float = dominance_ratio * _claim_ratio_mult[idx]
-	if pf < MIN_CLAIM_PRESSURE and ph < MIN_CLAIM_PRESSURE:
-		if owners[idx] != OWNER_FRIENDLY and owners[idx] != OWNER_HOSTILE:
-			new_owner = OWNER_NEUTRAL
-	elif pf > ph * tile_ratio:
+	var new_owner: int
+	if pf > ph:
 		new_owner = OWNER_FRIENDLY
-	elif ph > pf * tile_ratio:
+	elif ph > pf:
 		new_owner = OWNER_HOSTILE
 	else:
-		new_owner = OWNER_CONTESTED
+		new_owner = OWNER_NEUTRAL
 	if new_owner != owners[idx]:
 		_adjust_owner_count(owners[idx], -1)
 		_adjust_owner_count(new_owner, 1)
@@ -1617,9 +1607,9 @@ func seed_initial_owners(map_data, store, cell_grid = null) -> PackedByteArray:
 	_fill_spawn_zone(map_data, map_data.player_spawn_zone, OWNER_FRIENDLY)
 	_fill_spawn_zone(map_data, map_data.enemy_spawn_zone, OWNER_HOSTILE)
 	for cell in _spawn_cells(map_data, true):
-		_claim_at(cell.x, cell.y, OWNER_FRIENDLY)
+		_claim_spawn_cell_and_land_neighbors(map_data, cell.x, cell.y, OWNER_FRIENDLY)
 	for cell in _spawn_cells(map_data, false):
-		_claim_at(cell.x, cell.y, OWNER_HOSTILE)
+		_claim_spawn_cell_and_land_neighbors(map_data, cell.x, cell.y, OWNER_HOSTILE)
 	# Give seeded zones an initial pressure head-start so the front begins expanding immediately
 	_seed_initial_pressure(map_data)
 	return compute_frame(map_data, store, cell_grid)
@@ -1762,6 +1752,17 @@ func _inject_strong_home_pulse(map_data, zone: Rect2, amount: float, is_friendly
 				pressure_hostile[idx] += strength
 
 
+func _claim_spawn_cell_and_land_neighbors(map_data, gx: int, gy: int, owner: int) -> void:
+	if map_data == null or gx < 0:
+		return
+	_claim_at(gx, gy, owner)
+	# Sphere HQ is a single cell — claim land neighbors so barracks can spawn units.
+	if map_data.sphere_mode:
+		for nbr: int in map_data.get_neighbors(gx):
+			if map_data.is_land_cell(nbr, 0):
+				_claim_at(nbr, 0, owner)
+
+
 func _fill_spawn_zone(map_data, zone: Rect2, owner: int) -> void:
 	if map_data == null or zone.size.x <= 1.0 or zone.size.y <= 1.0:
 		return
@@ -1769,7 +1770,7 @@ func _fill_spawn_zone(map_data, zone: Rect2, owner: int) -> void:
 		for cell in _spawn_cells(map_data, owner == OWNER_FRIENDLY):
 			var v := _cell_to_vec2i(cell)
 			if v.x >= 0:
-				_claim_at(v.x, v.y, owner)
+				_claim_spawn_cell_and_land_neighbors(map_data, v.x, v.y, owner)
 		return
 	var g0: Vector2i = map_data.world_to_grid(zone.position)
 	var g1: Vector2i = map_data.world_to_grid(zone.position + zone.size)
@@ -1919,7 +1920,7 @@ func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
 			var cid: int = v.x
 			if cid < 0 or cid >= map_data.cell_count:
 				continue
-			if not map_data.is_passable(cid, 0):
+			if not map_data.is_land_cell_id(cid):
 				continue
 			if mask[cid] != 0:
 				continue
@@ -1930,7 +1931,7 @@ func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
 			var cur: int = queue[head]
 			head += 1
 			for nbr in map_data.get_neighbors(cur):
-				if not map_data.is_passable(nbr, 0):
+				if not map_data.is_land_cell_id(nbr):
 					continue
 				if mask[nbr] != 0:
 					continue
@@ -1942,7 +1943,7 @@ func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
 		var v := _cell_to_vec2i(cell)
 		if v.x < 0 or v.y < 0 or v.x >= map_data.grid_width or v.y >= map_data.grid_height:
 			continue
-		if not map_data.is_passable(v.x, v.y):
+		if not map_data.is_land_cell(v.x, v.y):
 			continue
 		var idx: int = map_data.cell_index(v.x, v.y)
 		if mask[idx] != 0:
@@ -1959,7 +1960,7 @@ func _bfs_reachable(map_data, seeds: Array) -> PackedByteArray:
 			var ny: int = cur.y + d.y
 			if nx < 0 or ny < 0 or nx >= map_data.grid_width or ny >= map_data.grid_height:
 				continue
-			if not map_data.is_passable(nx, ny):
+			if not map_data.is_land_cell(nx, ny):
 				continue
 			var nidx: int = map_data.cell_index(nx, ny)
 			if mask[nidx] != 0:

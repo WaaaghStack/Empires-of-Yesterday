@@ -20,7 +20,6 @@ pub struct BomberConfig {
     pub per_hangar_cap: u32,
     pub max_hp: f32,
     pub move_cells_per_sec: f32,
-    pub infra_move_mult: f32,
     pub bomb_power: f32,
     pub bomb_interval_sec: f32,
     pub orphan_dps: f32,
@@ -44,7 +43,6 @@ impl Default for BomberConfig {
             per_hangar_cap: 5,
             max_hp: 100.0,
             move_cells_per_sec: 2.0,
-            infra_move_mult: 3.0,
             bomb_power: 1000.0,
             bomb_interval_sec: 10.0,
             orphan_dps: 1.0,
@@ -53,7 +51,7 @@ impl Default for BomberConfig {
             replan_fallback_rounds: 42,
             search_expand_initial: 5_000,
             search_expand_step: 5_000,
-            search_expand_max: 40_000,
+            search_expand_max: 12_000,
             plan_reeval_sec: 25.0,
         }
     }
@@ -249,16 +247,8 @@ impl BomberLayer {
 
         for i in 0..n {
             let team = self.bombers[i].team;
-            let gx = self.bombers[i].gx;
-            let gy = self.bombers[i].gy;
-            let mut move_rate = self.config.move_cells_per_sec;
-            let idx = kernel.cell_index(gx, gy);
-            if idx >= 0 {
-                let ui = idx as usize;
-                if ui < kernel.tile_count && self.is_network_cell(team, ui) {
-                    move_rate *= self.config.infra_move_mult;
-                }
-            }
+            // R1: no road/bridge speed bonus — bombers fly at a uniform rate.
+            let move_rate = self.config.move_cells_per_sec;
             self.bombers[i].move_accum += move_rate * dt;
             while self.bombers[i].move_accum >= 1.0 {
                 let sx = self.bombers[i].step_gx;
@@ -345,6 +335,12 @@ impl BomberLayer {
         if ui >= kernel.tile_count {
             return;
         }
+        // Air ignores ferry gate: open the struck land cell so majority ownership can flip.
+        kernel.open_claimable_for_air_strike(ui, team);
+        if ui < kernel.claimable_mask.len() && kernel.claimable_mask[ui] == 0 {
+            // Ocean / non-land — nowhere to paint.
+            return;
+        }
         if team == OWNER_FRIENDLY {
             kernel.pressure_hostile[ui] = (kernel.pressure_hostile[ui] - power).max(0.0);
             kernel.pressure_friendly[ui] += power * 0.35;
@@ -389,8 +385,18 @@ impl BomberLayer {
                 continue;
             }
 
-            if stuck || goal_taken {
-                urgent.push((i, goal_taken));
+            if goal_taken {
+                urgent.push((i, true));
+                continue;
+            }
+
+            // Stuck after a failed replan must honor retarget_cd backoff.
+            if stuck {
+                if fallback_due {
+                    urgent.push((i, false));
+                } else {
+                    self.bombers[i].retarget_cd -= 1;
+                }
                 continue;
             }
 
@@ -413,11 +419,15 @@ impl BomberLayer {
             self.bombers[i].retarget_cd -= 1;
         }
 
+        // Cap urgent replans at replans_per_tick — do not inflate to min(24) when many
+        // bombers repath together (endgame same-target stampede).
         let mut budget = self.config.replans_per_tick.max(1) as usize;
-        if !urgent.is_empty() {
-            budget = budget.max(urgent.len().min(24));
-        }
-        let urgent_cap = budget.min(urgent.len());
+        // Many stuck: reserve ~half the budget for normal rotation.
+        let urgent_cap = if urgent.len() > budget {
+            ((budget + 1) / 2).max(1).min(urgent.len())
+        } else {
+            budget.min(urgent.len())
+        };
         for &(i, prefer_alternate) in urgent.iter().take(urgent_cap) {
             self.replan_route(kernel, i, prefer_alternate);
             self.finish_replan(kernel, i);
@@ -440,7 +450,7 @@ impl BomberLayer {
     }
 
     fn finish_replan(&mut self, kernel: &TerritoryKernel, bomber_i: usize) {
-        let (gx, gy, goal_gx, goal_gy, id, team) = {
+        let (gx, gy, goal_gx, goal_gy, id) = {
             let bomber = &self.bombers[bomber_i];
             (
                 bomber.gx,
@@ -448,20 +458,15 @@ impl BomberLayer {
                 bomber.goal_gx,
                 bomber.goal_gy,
                 bomber.id,
-                bomber.team,
             )
         };
         let stamp = self.snapshot_nav_stamp(kernel, gx, gy, goal_gx, goal_gy);
         let masks_epoch = self.nav_masks_epoch;
         let stagger = (id as i32 % 7).max(1);
-        let holding = self.holding_at_goal(kernel, team, &self.bombers[bomber_i]);
         let bomber = &mut self.bombers[bomber_i];
-        if bomber.step_gx >= 0 || holding {
-            bomber.retarget_cd = self.config.replan_fallback_rounds + stagger;
-            bomber.plan_age_sec = 0.0;
-        } else {
-            bomber.retarget_cd = 0;
-        }
+        // Always back off after a replan — never retarget_cd=0 on stuck/no-path.
+        bomber.retarget_cd = self.config.replan_fallback_rounds + stagger;
+        bomber.plan_age_sec = 0.0;
         bomber.goal_nav_stamp = stamp;
         bomber.goal_nav_masks_epoch = masks_epoch;
     }
@@ -753,15 +758,6 @@ impl BomberLayer {
             hostile_bridge: &self.hostile_bridge,
         };
         is_air_strike_target_at(kernel, &masks, team, bomber.gx, bomber.gy)
-    }
-
-    fn is_network_cell(&self, team: u8, idx: usize) -> bool {
-        let (corridor, bridge) = if team == OWNER_FRIENDLY {
-            (&self.friendly_corridor, &self.friendly_bridge)
-        } else {
-            (&self.hostile_corridor, &self.hostile_bridge)
-        };
-        (idx < corridor.len() && corridor[idx] != 0) || (idx < bridge.len() && bridge[idx] != 0)
     }
 
     fn is_in_bounds(&self, kernel: &TerritoryKernel, gx: i32, gy: i32) -> bool {

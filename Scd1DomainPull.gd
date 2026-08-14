@@ -6,7 +6,7 @@ extends RefCounted
 const DOMAINS: Array[String] = [
 	"territory",
 	"structures",
-	"roads",
+	# R1: "roads" domain retired from live pull (Rust slot may remain for ABI).
 	"agents",
 	"bombers",
 	"wallet",

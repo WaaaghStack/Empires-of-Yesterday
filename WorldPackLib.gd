@@ -67,8 +67,10 @@ static func save_world_cells(
 	return ok_land and ok_elev
 
 
-static func try_load_albedo(map_id: String, frequency: int, run_seed: int = 0) -> Image:
-	var path: String = _world_albedo_path(map_id, frequency, run_seed)
+static func try_load_albedo(
+	map_id: String, frequency: int, run_seed: int = 0, visual_tag: String = ""
+) -> Image:
+	var path: String = _world_albedo_path(map_id, frequency, run_seed, visual_tag)
 	if not FileAccess.file_exists(path):
 		return null
 	var img := Image.load_from_file(path)
@@ -77,27 +79,33 @@ static func try_load_albedo(map_id: String, frequency: int, run_seed: int = 0) -
 	return img
 
 
-static func save_albedo(map_id: String, frequency: int, img: Image, run_seed: int = 0) -> bool:
+static func save_albedo(
+	map_id: String, frequency: int, img: Image, run_seed: int = 0, visual_tag: String = ""
+) -> bool:
 	if img == null or img.is_empty():
 		return false
 	ensure_dirs()
 	DirAccess.make_dir_recursive_absolute(_world_freq_dir(map_id, frequency))
-	return img.save_png(_world_albedo_path(map_id, frequency, run_seed)) == OK
+	return img.save_png(_world_albedo_path(map_id, frequency, run_seed, visual_tag)) == OK
 
 
-static func try_load_height(map_id: String, frequency: int, run_seed: int = 0) -> Image:
-	var path: String = _world_height_path(map_id, frequency, run_seed)
+static func try_load_height(
+	map_id: String, frequency: int, run_seed: int = 0, visual_tag: String = ""
+) -> Image:
+	var path: String = _world_height_path(map_id, frequency, run_seed, visual_tag)
 	if not FileAccess.file_exists(path):
 		return null
 	return _read_height_rfbin(path)
 
 
-static func save_height(map_id: String, frequency: int, img: Image, run_seed: int = 0) -> bool:
+static func save_height(
+	map_id: String, frequency: int, img: Image, run_seed: int = 0, visual_tag: String = ""
+) -> bool:
 	if img == null or img.is_empty():
 		return false
 	ensure_dirs()
 	DirAccess.make_dir_recursive_absolute(_world_freq_dir(map_id, frequency))
-	return _write_height_rfbin(_world_height_path(map_id, frequency, run_seed), img)
+	return _write_height_rfbin(_world_height_path(map_id, frequency, run_seed, visual_tag), img)
 
 
 static func _sphere_dir(frequency: int) -> String:
@@ -124,12 +132,22 @@ static func _world_cell_elev_path(map_id: String, frequency: int) -> String:
 	return _world_freq_dir(map_id, frequency).path_join("cell_elev.wbin")
 
 
-static func _world_albedo_path(map_id: String, frequency: int, run_seed: int = 0) -> String:
-	return _world_freq_dir(map_id, frequency).path_join("albedo_s%d.png" % run_seed)
+static func _world_albedo_path(
+	map_id: String, frequency: int, run_seed: int = 0, visual_tag: String = ""
+) -> String:
+	var name: String = "albedo_s%d.png" % run_seed
+	if visual_tag != "":
+		name = "albedo_s%d_%s.png" % [run_seed, visual_tag]
+	return _world_freq_dir(map_id, frequency).path_join(name)
 
 
-static func _world_height_path(map_id: String, frequency: int, run_seed: int = 0) -> String:
-	return _world_freq_dir(map_id, frequency).path_join("height_s%d.rfbin" % run_seed)
+static func _world_height_path(
+	map_id: String, frequency: int, run_seed: int = 0, visual_tag: String = ""
+) -> String:
+	var name: String = "height_s%d.rfbin" % run_seed
+	if visual_tag != "":
+		name = "height_s%d_%s.rfbin" % [run_seed, visual_tag]
+	return _world_freq_dir(map_id, frequency).path_join(name)
 
 
 static func _read_magic(f: FileAccess, expected: String) -> bool:

@@ -13,7 +13,7 @@ pub const NAV_RULE_INFANTRY_ADVANCE: NavRuleId = 0;
 pub const NAV_RULE_INFANTRY_FRONTLINE: NavRuleId = NAV_RULE_INFANTRY_ADVANCE;
 /// Retreat to nearest friendly supply when cut off in enemy territory.
 pub const NAV_RULE_INFANTRY_RETREAT: NavRuleId = 1;
-/// Bomber — fly to nearest unowned land tile and hold on target.
+/// Bomber — fly to nearest unowned land (incl. unreached islands) and hold on target.
 pub const NAV_RULE_BOMBER_STRIKE: NavRuleId = 2;
 
 /// How a military unit selects its search goal.
@@ -23,7 +23,7 @@ pub enum NavGoalMode {
     NearestFrontierStance,
     NearestFriendlySupply,
     NearestPressureTarget,
-    /// Any land not owned by this team — air units ignore claimable reachability.
+    /// Any non-team land — air ignores ferry claimable reachability.
     NearestAirStrikeTarget,
 }
 
@@ -44,6 +44,38 @@ const CTX_INFANTRY_BFS: RouteContext = RouteContext {
     corridor: None,
     flight_mode: false,
 };
+
+/// Hard expand budget for infantry ferry BFS.
+/// Do NOT use `tile_count` (~64k) — late-game free tiles shrink and stuck agents
+/// thrash full-map ferry searches, collapsing FPS (sim phase 89→269ms).
+pub const FERRY_MAX_EXPAND: usize = 8_000;
+
+/// Same infantry search costs, but water + unclaimable land are passable (ferry).
+const CTX_INFANTRY_FERRY: RouteContext = RouteContext {
+    allow_water: true,
+    infra_only: false,
+    use_astar: false,
+    land_step: 1,
+    water_step: 2,
+    max_expand: FERRY_MAX_EXPAND,
+    corridor: None,
+    flight_mode: false,
+};
+
+/// Public ferry search context (agents free-goal soft claims).
+/// Fixed expand cap — `tile_count` is ignored (kept for call-site compat).
+pub fn infantry_ferry_context(_tile_count: usize) -> RouteContext {
+    CTX_INFANTRY_FERRY.with_max_expand(FERRY_MAX_EXPAND.min(MAX_PATHFIND_EXPAND))
+}
+
+pub fn any_land_advance_goal(view: &BattleNavView<'_>, tile_count: usize) -> bool {
+    for idx in 0..tile_count {
+        if view.is_advance_goal(idx) {
+            return true;
+        }
+    }
+    false
+}
 
 const CTX_BOMBER_BFS: RouteContext = RouteContext {
     allow_water: true,
@@ -110,6 +142,12 @@ pub fn run_nav_rule(
         };
     }
     let view = BattleNavView::new(territory, masks, team);
+    // No claimable unowned land left anywhere → skip land BFS, ferry immediately.
+    if rule_id == NAV_RULE_INFANTRY_ADVANCE
+        && !any_land_advance_goal(&view, territory.tile_count)
+    {
+        return run_ferry_advance_rule(search, territory, masks, start_gx, start_gy, team);
+    }
     let ctx = rule.search;
     let outcome = match rule.goal_mode {
         NavGoalMode::NearestFrontierStance => search.find_nearest_goal(
@@ -138,7 +176,41 @@ pub fn run_nav_rule(
         ),
         NavGoalMode::FixedTile => None,
     };
-    match outcome {
+    if let Some((path, stats)) = outcome {
+        return NavRuleOutcome {
+            path: Some(path),
+            stats,
+        };
+    }
+    // Land BFS miss while land goals still exist: do NOT fall through to ferry.
+    // (Ferry-on-budget-miss was late-game thrash; ferry only when no land goals —
+    // handled at the top of this function / free-goal path in agents.)
+    NavRuleOutcome {
+        path: None,
+        stats: SearchStats::default(),
+    }
+}
+
+/// Infantry ferry: same pathfinder with water allowed; goal is nearest unowned land.
+pub fn run_ferry_advance_rule(
+    search: &mut SearchKernel,
+    territory: &TerritoryKernel,
+    masks: &AgentNavMasks<'_>,
+    start_gx: i32,
+    start_gy: i32,
+    team: u8,
+) -> NavRuleOutcome {
+    let start = territory.cell_index(start_gx, start_gy);
+    if start < 0 {
+        return NavRuleOutcome {
+            path: None,
+            stats: SearchStats::default(),
+        };
+    }
+    let view = BattleNavView::new(territory, masks, team);
+    let ctx = infantry_ferry_context(territory.tile_count);
+    match search.find_nearest_goal(&view, &[start], ctx, |idx| view.is_ferry_landing_goal(idx))
+    {
         Some((path, stats)) => NavRuleOutcome {
             path: Some(path),
             stats,
@@ -171,6 +243,7 @@ pub fn run_bomber_strike_rule(
     let view = BattleNavView::new(territory, masks, team);
     let expand = max_expand
         .max(1)
+        .min(MAX_PATHFIND_EXPAND)
         .min(territory.tile_count.max(1));
     let ctx = CTX_BOMBER_BFS.with_max_expand(expand);
     let exclude = exclude_goal_idx.unwrap_or(-1);
@@ -220,7 +293,7 @@ pub fn is_pressure_target_at(
     view.is_advance_goal(idx as usize)
 }
 
-/// True when a tile is an air strike target (any unowned land).
+/// True when a tile is an air strike target (any non-team land; air ignores ferry gate).
 pub fn is_air_strike_target_at(
     territory: &TerritoryKernel,
     masks: &AgentNavMasks<'_>,
@@ -294,6 +367,17 @@ mod tests {
 
     fn empty_masks<'a>() -> AgentNavMasks<'a> {
         AgentNavMasks::default()
+    }
+
+    #[test]
+    fn ferry_context_caps_expand_not_tile_count() {
+        let ctx = infantry_ferry_context(64_800);
+        assert_eq!(ctx.max_expand, FERRY_MAX_EXPAND);
+        assert!(ctx.max_expand <= MAX_PATHFIND_EXPAND);
+        assert!(
+            ctx.max_expand < 64_800,
+            "ferry must not expand to full tile_count (late FPS thrash)"
+        );
     }
 
     #[test]
@@ -446,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn bomber_targets_unclaimable_island_over_water() {
+    fn bomber_may_target_unclaimable_island_over_water() {
         let w = 9i32;
         let h = 3i32;
         let n = (w * h) as usize;
@@ -458,7 +542,7 @@ mod tests {
             claimable[idx] = 0;
             owners[idx] = OWNER_NEUTRAL;
         }
-        // isolated island — land but not claimable; only unowned land target
+        // isolated island — land but not claimable; air may still strike it
         let island_idx = (2 * w + 7) as usize;
         claimable[island_idx] = 0;
         owners[island_idx] = OWNER_NEUTRAL;
@@ -494,7 +578,10 @@ mod tests {
         let masks = empty_masks();
         let view = BattleNavView::new(&k, &masks, OWNER_FRIENDLY);
         assert!(!view.is_advance_goal(island_idx));
-        assert!(view.is_air_strike_goal(island_idx));
+        assert!(
+            view.is_air_strike_goal(island_idx),
+            "air may strike unreached islands without ferry beachhead"
+        );
 
         let mut search = SearchKernel::new(n);
         let out = run_bomber_strike_rule(
@@ -622,5 +709,97 @@ mod tests {
         );
         let path = wide.path.expect("wide search reaches far target");
         assert_eq!(*path.path.last().unwrap() as usize, far_idx);
+    }
+
+    #[test]
+    fn ferry_crosses_water_when_land_front_exhausted() {
+        // Row0: friendly land fully owned | water row1 | neutral island row2
+        let w = 5i32;
+        let h = 3i32;
+        let n = (w * h) as usize;
+        let mut claimable = vec![0u8; n];
+        let mut owners = vec![OWNER_NEUTRAL; n];
+        for gx in 0..w {
+            let home = (0 * w + gx) as usize;
+            claimable[home] = 1;
+            owners[home] = OWNER_FRIENDLY;
+            let water = (1 * w + gx) as usize;
+            claimable[water] = 0;
+            owners[water] = OWNER_NEUTRAL;
+            let island = (2 * w + gx) as usize;
+            claimable[island] = 0; // unclaimable until beachhead
+            owners[island] = crate::sim::OWNER_UNCLAIMABLE;
+        }
+
+        let mut k = TerritoryKernel::new(
+            w,
+            h,
+            claimable,
+            vec![0.0; n],
+            vec![1.0; n],
+            vec![1.0; n],
+            owners,
+            vec![0.0; n],
+            vec![0.0; n],
+            1.0,
+            1.0,
+            0,
+            3,
+            Vec::new(),
+            3,
+            0,
+            false,
+            false,
+            false,
+        );
+        k.land_mask = (0..n)
+            .map(|i| {
+                let gy = (i as i32) / w;
+                if gy == 1 {
+                    0
+                } else {
+                    1
+                }
+            })
+            .collect();
+
+        let masks = empty_masks();
+        let view = BattleNavView::new(&k, &masks, OWNER_FRIENDLY);
+        // No land advance goals on home row (all friendly).
+        for gx in 0..w {
+            assert!(!view.is_advance_goal((0 * w + gx) as usize));
+            assert!(!view.is_ferry_landing_goal((0 * w + gx) as usize));
+            assert!(view.is_ferry_landing_goal((2 * w + gx) as usize));
+        }
+
+        let mut search = SearchKernel::new(n);
+        let land_only = search.find_nearest_goal(
+            &view,
+            &[(0 * w) as i32],
+            CTX_INFANTRY_BFS,
+            |idx| view.is_stance_goal(idx),
+        );
+        assert!(land_only.is_none(), "land search must fail when continent is done");
+
+        let out = run_nav_rule(
+            &mut search,
+            &k,
+            &masks,
+            0,
+            0,
+            OWNER_FRIENDLY,
+            NAV_RULE_INFANTRY_ADVANCE,
+        );
+        let path = out.path.expect("ferry path to island");
+        assert!(
+            path.path.iter().any(|&c| {
+                let ui = c as usize;
+                ui < k.land_mask.len() && k.land_mask[ui] == 0
+            }),
+            "ferry path should cross water"
+        );
+        let goal = *path.path.last().unwrap() as usize;
+        assert!(view.is_ferry_landing_goal(goal));
+        assert_eq!(goal / (w as usize), 2);
     }
 }

@@ -11,26 +11,32 @@ const _COAST_RING_MAX := 8
 static func build_albedo_image_cached(map_data, map_id: String) -> Image:
 	var frequency: int = int(map_data.sphere_frequency) if map_data else 0
 	var run_seed: int = int(map_data.map_seed) if map_data else 0
+	var visual_tag: String = str(map_data.pack_visual_tag) if map_data else ""
 	if frequency > 0:
-		var cached: Image = WorldPackLibScript.try_load_albedo(map_id, frequency, run_seed)
+		var cached: Image = WorldPackLibScript.try_load_albedo(
+			map_id, frequency, run_seed, visual_tag
+		)
 		if cached != null:
 			return cached
 	var img: Image = build_albedo_image(map_data, map_id)
 	if img != null and frequency > 0:
-		WorldPackLibScript.save_albedo(map_id, frequency, img, run_seed)
+		WorldPackLibScript.save_albedo(map_id, frequency, img, run_seed, visual_tag)
 	return img
 
 
 static func build_height_image_cached(map_data, map_id: String) -> Image:
 	var frequency: int = int(map_data.sphere_frequency) if map_data else 0
 	var run_seed: int = int(map_data.map_seed) if map_data else 0
+	var visual_tag: String = str(map_data.pack_visual_tag) if map_data else ""
 	if frequency > 0:
-		var cached: Image = WorldPackLibScript.try_load_height(map_id, frequency, run_seed)
+		var cached: Image = WorldPackLibScript.try_load_height(
+			map_id, frequency, run_seed, visual_tag
+		)
 		if cached != null:
 			return cached
 	var img: Image = build_height_image(map_data)
 	if img != null and frequency > 0:
-		WorldPackLibScript.save_height(map_id, frequency, img, run_seed)
+		WorldPackLibScript.save_height(map_id, frequency, img, run_seed, visual_tag)
 	return img
 
 

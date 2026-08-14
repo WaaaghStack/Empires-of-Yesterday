@@ -4,6 +4,7 @@ render_mode unshaded, cull_back, depth_draw_opaque;
 
 uniform sampler2D owner_map : filter_nearest, repeat_enable;
 uniform sampler2D border_map : filter_nearest, repeat_enable;
+uniform sampler2D depth_map : filter_nearest, repeat_enable;
 uniform sampler2D land_mask : filter_nearest, repeat_enable;
 uniform sampler2D road_map : filter_nearest, repeat_enable;
 uniform float interior_alpha : hint_range(0.0, 1.0) = 0.58;
@@ -109,7 +110,12 @@ void fragment() {
 	if (is_border) {
 		ALBEDO = border_color(kind, col);
 	} else {
-		ALBEDO = col;
+		float depth = texture(depth_map, UV).r;
+		if (depth < 0.01) {
+			depth = 0.7;
+		}
+		float tint = mix(0.55, 1.15, depth);
+		ALBEDO = col * tint;
 	}
 	ALPHA = 1.0;
 }

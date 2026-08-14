@@ -85,8 +85,6 @@ struct TerritorySim {
     domain_book: DomainBook,
     /// Parallel to kernel.owners — last domain version when cell owner changed.
     owner_cell_version: Vec<u64>,
-    /// Parallel to logistics built mask length — version when road cell became built.
-    road_cell_version: Vec<u64>,
     /// Wallet domain version stamp.
     wallet_version: u64,
     /// Gap full-pull cooldown tracking (server-side helper for Godot; also used in tests).
@@ -347,7 +345,6 @@ impl TerritorySim {
             // SCD1: new world — bump sim generation and size cell version vectors.
             self.domain_book.bump_sim_generation();
             self.owner_cell_version = vec![0u64; tile_count];
-            self.road_cell_version = vec![0u64; tile_count];
             self.wallet_version = 0;
             if fr.len() > 0 {
                 let hr: PackedByteArray = config
@@ -436,6 +433,23 @@ impl TerritorySim {
             return;
         };
         kernel.set_home_inject_enabled(enabled);
+    }
+
+    /// Tighten / restore active-set soft-cap under Godot frame pressure (default 24000).
+    #[func]
+    fn set_active_set_soft_cap(&mut self, cap: i32) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        kernel.set_active_set_soft_cap(cap.max(0) as usize);
+    }
+
+    #[func]
+    fn get_active_set_soft_cap(&self) -> i32 {
+        self.kernel
+            .as_ref()
+            .map(|k| k.active_set_soft_cap as i32)
+            .unwrap_or(sim::ACTIVE_SET_SOFT_CAP as i32)
     }
 
     #[func]
@@ -735,10 +749,14 @@ impl TerritorySim {
                 }
                 let mut idxs: Vec<i32> = Vec::new();
                 let mut vals: Vec<u8> = Vec::new();
+                let mut display_idxs: Vec<i32> = Vec::new();
+                let mut display_r8: Vec<u8> = Vec::new();
                 if full {
                     for (i, &o) in kernel.owners.iter().enumerate() {
                         idxs.push(i as i32);
                         vals.push(o);
+                        display_idxs.push(i as i32);
+                        display_r8.push(kernel.owner_display_byte_at(i));
                     }
                 } else {
                     let n = kernel.owners.len().min(self.owner_cell_version.len());
@@ -746,46 +764,25 @@ impl TerritorySim {
                         if self.owner_cell_version[i] > last {
                             idxs.push(i as i32);
                             vals.push(kernel.owners[i]);
+                            display_idxs.push(i as i32);
+                            display_r8.push(kernel.owner_display_byte_at(i));
                         }
                     }
                 }
                 out.set("indices", &vec_to_packed_i32(&idxs));
                 out.set("owners", &vec_to_packed_byte(&vals));
+                out.set("display_indices", &vec_to_packed_i32(&display_idxs));
+                out.set("display_r8", &vec_to_packed_byte(&display_r8));
                 out.set("friendly_tiles", kernel.friendly_tiles);
                 out.set("hostile_tiles", kernel.hostile_tiles);
                 out.set("empty", idxs.is_empty());
             }
+            // R1: roads removed. The domain slot survives so old clients keep a stable
+            // last_version handshake, but it never carries rows and its epoch never advances.
             DomainId::Roads => {
-                let mask_f = self.logistics_layer.built_mask(1);
-                let mask_h = self.logistics_layer.built_mask(2);
-                let mut idxs: Vec<i32> = Vec::new();
-                let mut teams: Vec<u8> = Vec::new();
-                if full {
-                    for i in 0..mask_f.len().max(mask_h.len()) {
-                        let bf = if i < mask_f.len() { mask_f[i] } else { 0 };
-                        let bh = if i < mask_h.len() { mask_h[i] } else { 0 };
-                        if bf != 0 || bh != 0 {
-                            idxs.push(i as i32);
-                            teams.push(if bf != 0 { 1 } else { 2 });
-                        }
-                    }
-                } else {
-                    let n = self.road_cell_version.len();
-                    for i in 0..n {
-                        if self.road_cell_version[i] <= last {
-                            continue;
-                        }
-                        let bf = if i < mask_f.len() { mask_f[i] } else { 0 };
-                        let bh = if i < mask_h.len() { mask_h[i] } else { 0 };
-                        if bf != 0 || bh != 0 {
-                            idxs.push(i as i32);
-                            teams.push(if bf != 0 { 1 } else { 2 });
-                        }
-                    }
-                }
-                out.set("indices", &vec_to_packed_i32(&idxs));
-                out.set("teams", &vec_to_packed_byte(&teams));
-                out.set("empty", idxs.is_empty());
+                out.set("indices", &PackedInt32Array::new());
+                out.set("teams", &PackedByteArray::new());
+                out.set("empty", true);
             }
             // Agents/bombers are living-set domains: Godot replaces the full visual pool on apply.
             // When the domain high-water advances, return *all* living units — not only rows with
@@ -1342,8 +1339,8 @@ impl TerritorySim {
         // Logistics network has no idle-bot job assignment.
     }
 
-    /// Advance logistics road growth (sole path_built authority under live).
-    /// Never dual-steps the legacy builder bot layer (A6/A7/C8).
+    /// R1: no road growth left to advance. The step only flushes structures that are still
+    /// waiting on a (now nonexistent) road connection into their build phase.
     #[func]
     fn builder_step(&mut self, dt: f32) -> GdDictionary {
         if !self.builder_authority_enabled() {
@@ -1364,34 +1361,12 @@ impl TerritorySim {
             grid_h,
             &self.logistics_cfg,
         );
-        if let Some(kernel) = self.kernel.as_mut() {
-            kernel.logistics_friendly_output_mult = events.friendly_output_mult;
-            kernel.logistics_hostile_output_mult = events.hostile_output_mult;
-        }
-        // SCD1: stamp structure + road domain versions from logistics writes.
-        if !events.cell_arrivals.is_empty()
-            || !events.path_completions.is_empty()
-            || !events.new_built_cells.is_empty()
-        {
-            if !events.new_built_cells.is_empty() {
-                let rv = self.domain_book.touch(DomainId::Roads);
-                for &key in &events.new_built_cells {
-                    if key >= 0 && (key as usize) < self.road_cell_version.len() {
-                        self.road_cell_version[key as usize] = rv;
-                    }
-                }
-            }
-            if !events.cell_arrivals.is_empty() || !events.path_completions.is_empty() {
-                let sv = self.domain_book.touch(DomainId::Structures);
-                for ev in &events.cell_arrivals {
-                    if let Some(st) = self.structure_store.structures.get_mut(&ev.sid) {
-                        st.version = sv;
-                    }
-                }
-                for ev in &events.path_completions {
-                    if let Some(st) = self.structure_store.structures.get_mut(&ev.sid) {
-                        st.version = sv;
-                    }
+        // SCD1: structures only — the Roads domain epoch is never touched under R1.
+        if !events.path_completions.is_empty() {
+            let sv = self.domain_book.touch(DomainId::Structures);
+            for ev in &events.path_completions {
+                if let Some(st) = self.structure_store.structures.get_mut(&ev.sid) {
+                    st.version = sv;
                 }
             }
         }
@@ -1448,6 +1423,8 @@ impl TerritorySim {
         vec_to_packed_byte(&self.logistics_layer.route_mask(team))
     }
 
+    /// R1: logistics strain is gone with the roads — both multipliers are pinned at 1.0.
+    /// Kept so existing Godot readers of the strain dictionary keep working.
     #[func]
     fn get_logistics_strain(&self) -> GdDictionary {
         let mut out = GdDictionary::new();
@@ -1669,10 +1646,10 @@ impl TerritorySim {
             .get("move_cells_per_sec")
             .and_then(|v| v.try_to().ok())
             .unwrap_or(1.0);
-        let infra_move_mult: f32 = config
-            .get("infra_move_mult")
+        let ferry_move_mult: f32 = config
+            .get("ferry_move_mult")
             .and_then(|v| v.try_to().ok())
-            .unwrap_or(3.0);
+            .unwrap_or(0.25);
         let aura_pressure: f32 = config
             .get("aura_pressure")
             .and_then(|v| v.try_to().ok())
@@ -1702,7 +1679,7 @@ impl TerritorySim {
             per_barracks_cap,
             max_hp,
             move_cells_per_sec,
-            infra_move_mult,
+            ferry_move_mult,
             aura_pressure,
             shoot_erode_per_step: shoot_erode_per_sec * step_dt,
             orphan_dps,
@@ -1733,10 +1710,6 @@ impl TerritorySim {
             .get("move_cells_per_sec")
             .and_then(|v| v.try_to().ok())
             .unwrap_or(2.0);
-        let infra_move_mult: f32 = config
-            .get("infra_move_mult")
-            .and_then(|v| v.try_to().ok())
-            .unwrap_or(3.0);
         let bomb_power: f32 = config
             .get("bomb_power")
             .and_then(|v| v.try_to().ok())
@@ -1775,7 +1748,7 @@ impl TerritorySim {
             .get("search_expand_max")
             .and_then(|v| v.try_to::<i32>().ok())
             .map(|v| v.max(1) as usize)
-            .unwrap_or(40_000);
+            .unwrap_or(12_000);
         let plan_reeval_sec: f32 = config
             .get("plan_reeval_sec")
             .and_then(|v| v.try_to().ok())
@@ -1785,7 +1758,6 @@ impl TerritorySim {
             per_hangar_cap,
             max_hp,
             move_cells_per_sec,
-            infra_move_mult,
             bomb_power,
             bomb_interval_sec,
             orphan_dps,
@@ -2026,6 +1998,10 @@ impl TerritorySim {
                         .collect();
                     let before_count = before.len();
                     agents.tick(kernel);
+                    if agents.beachhead_expanded {
+                        let _ = self.domain_book.touch(DomainId::Territory);
+                        agents.beachhead_expanded = false;
+                    }
                     let mut any = agents.agents.len() != before_count;
                     if any {
                         let _ = self.domain_book.touch(DomainId::Agents);
@@ -2163,6 +2139,14 @@ impl TerritorySim {
     }
 
     #[func]
+    fn get_claimable_mask(&self) -> PackedByteArray {
+        match &self.kernel {
+            Some(k) => vec_to_packed_byte(&k.claimable_mask),
+            None => PackedByteArray::new(),
+        }
+    }
+
+    #[func]
     fn owner_at_index(&self, idx: i32) -> u8 {
         match &self.kernel {
             Some(k) => k.owner_at_index(idx.max(0) as usize),
@@ -2223,6 +2207,9 @@ impl TerritorySim {
         out.set("f_reach", probe.f_reach);
         out.set("h_reach", probe.h_reach);
         out.set("flow_mult", probe.flow_mult);
+        out.set("elev", probe.elev);
+        out.set("h_friendly", probe.h_friendly);
+        out.set("h_hostile", probe.h_hostile);
         out
     }
 
@@ -2241,6 +2228,15 @@ impl TerritorySim {
     fn get_owner_display_r8(&self) -> PackedByteArray {
         match &self.kernel {
             Some(k) => vec_to_packed_byte(&k.owner_display_r8()),
+            None => PackedByteArray::new(),
+        }
+    }
+
+    /// Display-only pressure depth R8 for ownership overlay tint (upload at overlay Hz).
+    #[func]
+    fn get_pressure_depth_r8(&self, vis_ref: f32) -> PackedByteArray {
+        match &self.kernel {
+            Some(k) => vec_to_packed_byte(&k.pressure_depth_r8(vis_ref)),
             None => PackedByteArray::new(),
         }
     }

@@ -1,13 +1,13 @@
 # Documentation index — Empires of Yesterday
 
-World Conquest is the only game mode: fluid territory conquest on a 360×180 Earth globe with multi-structure logistics and units.
+World Conquest is the only game mode: fluid territory conquest on a 360×180 Earth globe with structures, units, and miners on owned mineral deposits.
 
 ## Canonical docs
 
 | Doc | Contents |
 |-----|----------|
 | [DESIGN.md](../DESIGN.md) | Fantasy, controls, dictionary, structures/units, map gen, **WorldDataset + SCD1** architecture, **design locks**, Godot version story |
-| [PERFORMANCE.md](../PERFORMANCE.md) | Frame budgets, SCD1 live paint, MultiMesh roads, construction drain order, catch-up cap, env knobs, F3 HUD |
+| [PERFORMANCE.md](../PERFORMANCE.md) | Frame budgets, SCD1 live paint, construction drain order, catch-up cap, env knobs, F3 HUD |
 | [RUST.md](../RUST.md) | Build GDExtension, authority module list, TerritorySim SCD1 API, env vars |
 | [QA_LIFECYCLE.md](../QA_LIFECYCLE.md) | When/how to run headless QA and smoke tests |
 | [README.md](../README.md) | Quick start, play summary, Rust requirement for live |
@@ -17,9 +17,10 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 ## Architecture snapshot (live Play)
 
 1. **Map gen** — `WorldConquestMapGenerator.generate(map_id, seed)` (primary). `EarthMapGenerator` is a thin wrapper for default Earth.
-2. **Authority** — Rust WorldDataset (grid, structures, world session, logistics, resource wallet).
-3. **Presentation** — SCD1 per-domain versioned pulls (`Scd1DomainPull` / `pull_domain_since`); apply-only. PresentationTxn is legacy/QA only.
-4. **Units** — Soldiers (barracks, Aurelium upkeep) and bombers (hangars, no upkeep). Caps: 5 per structure, 100 global each.
+2. **Authority** — Rust WorldDataset (grid, structures, world session, resource wallet).
+3. **Presentation** — SCD1 per-domain versioned pulls (`Scd1DomainPull` / `pull_domain_since`); apply-only. PresentationTxn is legacy/QA only. Live domains: territory, structures, agents, bombers, wallet (**roads retired under R1**).
+4. **Units** — Soldiers (barracks, Au+Ve upkeep) and bombers (hangars, spawn Au+Em, no continuous upkeep). Caps: 5 per structure, 100 global each.
+5. **Oceans** — soldier ferry + beachhead claim (no land bridges).
 
 ## Godot version story (C12 / G2)
 
@@ -33,9 +34,9 @@ Treat **Godot 4.6+ with a matching `empire_territory` DLL** as the live developm
 
 ## Design locks (short index)
 
-See [DESIGN.md](../DESIGN.md) § Design locks for full text. IDs: **A13/F1** enemy AI outpost+bridge only; **A14** bomber no upkeep; **F2** player standalone outpost fallback; **F3** logistics strain subtle; **F4** logistics owns roads; **F5** win formula ignores units; **F6** unit caps; **F7** haul visual cap.
+See [DESIGN.md](../DESIGN.md) § Design locks for full text. IDs: **A13/F1** enemy AI outposts only; **A14** bomber no continuous upkeep; **F5** win ignores units; **F6** unit caps; **F7** shockwave visual cap (full economy credit); **R1** roads+bridges removed; **R2** ferry water 0.25× speed. Legacy F2–F4 superseded by R1.
 
-**Open direction:** roads likely removed → teleport / air-drop concept for ground reach — [DESIGN.md](../DESIGN.md) § Direction — roads likely removed.
+**Direction (locked):** roads & land bridges removed — instant structure build, miners on owned deposits, no strain, pressure on any owned land, soldier ferry for oceans — [DESIGN.md](../DESIGN.md) § Direction — roads & bridges removed.
 
 ## Related paths
 

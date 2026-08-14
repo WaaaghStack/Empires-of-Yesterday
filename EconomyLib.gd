@@ -192,11 +192,27 @@ static func validate_parity() -> Dictionary:
 				% [kind, _tables.structure_supply_cost[idx], expected_supply]
 			)
 	if absf(soldier_spawn_aurelium_cost() - CFG.SOLDIER_SPAWN_AURELIUM_COST) > 0.001:
-		issues.append("soldier spawn cost mismatch")
+		issues.append("soldier spawn Au cost mismatch")
+	var soldier_spawn: PackedFloat32Array = structure_spawn_cost_resources(Catalog.KIND_BARRACKS)
+	if soldier_spawn.size() >= 2 and absf(soldier_spawn[1] - CFG.SOLDIER_SPAWN_VERDANTITE_COST) > 0.001:
+		issues.append("soldier spawn Ve cost mismatch")
 	if absf(bomber_spawn_aurelium_cost() - CFG.BOMBER_SPAWN_AURELIUM_COST) > 0.001:
-		issues.append("bomber spawn cost mismatch")
+		issues.append("bomber spawn Au cost mismatch")
+	var bomber_spawn: PackedFloat32Array = structure_spawn_cost_resources(Catalog.KIND_HANGAR)
+	if bomber_spawn.size() >= 3 and absf(bomber_spawn[2] - CFG.BOMBER_SPAWN_EMBERSTONE_COST) > 0.001:
+		issues.append("bomber spawn Em cost mismatch")
 	if absf(soldier_upkeep_aurelium_per_sec() - CFG.SOLDIER_UPKEEP_AURELIUM_PER_SEC) > 0.001:
-		issues.append("soldier upkeep mismatch")
+		issues.append("soldier upkeep Au mismatch")
+	var soldier_upkeep_base: int = Catalog.unit_u8(Catalog.UNIT_SOLDIER) * Catalog.RESOURCE_SLOTS
+	if (
+		_tables.unit_upkeep_resources.size() > soldier_upkeep_base + 1
+		and absf(
+			_tables.unit_upkeep_resources[soldier_upkeep_base + 1]
+			- CFG.SOLDIER_UPKEEP_VERDANTITE_PER_SEC
+		)
+		> 0.001
+	):
+		issues.append("soldier upkeep Ve mismatch")
 	return {"ok": issues.is_empty(), "issues": issues}
 
 

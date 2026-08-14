@@ -9,7 +9,7 @@ use crate::pathfind::nav_rules::{
 };
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
-    MIN_CLAIM_PRESSURE,
+    OWNER_UNCLAIMABLE, MIN_CLAIM_PRESSURE,
 };
 
 const HOSTILE_TERRITORY_DPS: f32 = 3.0;
@@ -26,7 +26,8 @@ pub struct AgentConfig {
     pub per_barracks_cap: u32,
     pub max_hp: f32,
     pub move_cells_per_sec: f32,
-    pub infra_move_mult: f32,
+    /// Move rate multiplier while on open water (ferry).
+    pub ferry_move_mult: f32,
     pub aura_pressure: f32,
     pub shoot_erode_per_step: f32,
     pub orphan_dps: f32,
@@ -42,8 +43,8 @@ impl Default for AgentConfig {
             per_barracks_cap: 5,
             max_hp: 40.0,
             move_cells_per_sec: 1.0,
-            infra_move_mult: 3.0,
-            aura_pressure: 0.48,
+            ferry_move_mult: 0.25,
+            aura_pressure: 5.0,
             shoot_erode_per_step: 1.6 / 14.0,
             orphan_dps: 4.0,
             step_dt: 1.0 / 14.0,
@@ -90,6 +91,9 @@ pub struct AgentLayer {
     goal_claims: HashMap<CellKey, u32>,
     /// Per-team countdown: skip free-goal BFS while > 0 after a free miss (C4).
     free_miss_cd: [u8; 3],
+    /// Per-team `any_land_advance_goal` cache for the current budgeted replan pass.
+    /// `None` = unset this tick; filled lazily on first use.
+    land_advance_goal_cache: [Option<bool>; 3],
     next_id: u32,
     pub friendly_corridor: Vec<u8>,
     pub hostile_corridor: Vec<u8>,
@@ -104,6 +108,8 @@ pub struct AgentLayer {
     /// Test-only: how many times replan invoked contested/unrestricted BFS.
     #[cfg(test)]
     contested_bfs_calls: u32,
+    /// Cleared by caller; set when ferry landing expands claimable reachability.
+    pub beachhead_expanded: bool,
 }
 
 impl AgentLayer {
@@ -117,6 +123,7 @@ impl AgentLayer {
             occupant_at: HashMap::new(),
             goal_claims: HashMap::new(),
             free_miss_cd: [0; 3],
+            land_advance_goal_cache: [None; 3],
             next_id: 1,
             friendly_corridor: Vec::new(),
             hostile_corridor: Vec::new(),
@@ -129,6 +136,7 @@ impl AgentLayer {
             free_goal_bfs_calls: 0,
             #[cfg(test)]
             contested_bfs_calls: 0,
+            beachhead_expanded: false,
         }
     }
 
@@ -156,6 +164,7 @@ impl AgentLayer {
         }
         // Nav masks changed → free goals may reappear; clear free-miss skip.
         self.free_miss_cd = [0; 3];
+        self.land_advance_goal_cache = [None; 3];
     }
 
     pub fn living_count(&self) -> u32 {
@@ -244,8 +253,13 @@ impl AgentLayer {
             let idx = kernel.cell_index(gx, gy);
             if idx >= 0 {
                 let ui = idx as usize;
-                if ui < kernel.tile_count && self.is_network_cell(team, ui) {
-                    move_rate *= self.config.infra_move_mult;
+                // R1: no road/bridge speed bonus — land speed is uniform.
+                // Ferry: open water is slower than land.
+                let on_water = !kernel.land_mask.is_empty()
+                    && ui < kernel.land_mask.len()
+                    && kernel.land_mask[ui] == 0;
+                if on_water {
+                    move_rate *= self.config.ferry_move_mult.max(0.01);
                 }
             }
             self.agents[i].move_accum += move_rate * dt;
@@ -272,6 +286,7 @@ impl AgentLayer {
                     self.agents[i].gx = sx;
                     self.agents[i].gy = sy;
                     self.move_occupant(old_gx, old_gy, sx, sy, id);
+                    self.maybe_ferry_beachhead(kernel, team, sx, sy);
                     self.advance_deploy_path_after_move(kernel, i);
                     self.sync_step_from_deploy_path(kernel, i);
                 } else if self.holding_at_goal(kernel, team, &self.agents[i]) {
@@ -338,6 +353,8 @@ impl AgentLayer {
         for cd in self.free_miss_cd.iter_mut() {
             *cd = cd.saturating_sub(1);
         }
+        // Fresh land-goal cache for this tick (scanned once per team).
+        self.land_advance_goal_cache = [None; 3];
 
         let mut urgent: Vec<usize> = Vec::new();
         let mut normal: Vec<usize> = Vec::new();
@@ -356,8 +373,19 @@ impl AgentLayer {
                 id,
             );
 
-            if stuck || goal_taken {
+            if goal_taken {
                 urgent.push(i);
+                continue;
+            }
+
+            // Stuck after a failed replan must honor retarget_cd backoff — otherwise
+            // every stuck unit is urgent every tick and ferry thrash returns.
+            if stuck {
+                if fallback_due {
+                    urgent.push(i);
+                } else {
+                    self.agents[i].retarget_cd -= 1;
+                }
                 continue;
             }
 
@@ -378,11 +406,16 @@ impl AgentLayer {
             self.agents[i].retarget_cd -= 1;
         }
 
+        // Cap urgent replans at replans_per_tick — do not inflate to min(24) when many
+        // units lose path at once (endgame pile-up / same-goal stampede).
         let mut budget = self.config.replans_per_tick.max(1) as usize;
-        if !urgent.is_empty() {
-            budget = budget.max(urgent.len().min(24));
-        }
-        let urgent_cap = budget.min(urgent.len());
+        // Many stuck: reserve ~half the budget for normal rotation so we don't thrash
+        // the same stuck set every tick (late-game ferry miss pile-up).
+        let urgent_cap = if urgent.len() > budget {
+            ((budget + 1) / 2).max(1).min(urgent.len())
+        } else {
+            budget.min(urgent.len())
+        };
         for &i in urgent.iter().take(urgent_cap) {
             self.replan_route(kernel, i);
             self.finish_replan(kernel, i);
@@ -405,7 +438,7 @@ impl AgentLayer {
     }
 
     fn finish_replan(&mut self, kernel: &TerritoryKernel, agent_i: usize) {
-        let (gx, gy, goal_gx, goal_gy, id, team) = {
+        let (gx, gy, goal_gx, goal_gy, id) = {
             let agent = &self.agents[agent_i];
             (
                 agent.gx,
@@ -413,21 +446,45 @@ impl AgentLayer {
                 agent.goal_gx,
                 agent.goal_gy,
                 agent.id,
-                agent.team,
             )
         };
         let stamp = self.snapshot_nav_stamp(kernel, gx, gy, goal_gx, goal_gy);
         let masks_epoch = self.nav_masks_epoch;
         let stagger = (id as i32 % 7).max(1);
-        let holding = self.holding_at_goal(kernel, team, &self.agents[agent_i]);
         let agent = &mut self.agents[agent_i];
-        if agent.step_gx >= 0 || holding {
-            agent.retarget_cd = self.config.replan_fallback_rounds + stagger;
-        } else {
-            agent.retarget_cd = 0;
-        }
+        // Always back off after a replan — never retarget_cd=0 on stuck/no-path
+        // (that caused urgent ferry thrash every tick as free tiles shrink).
+        agent.retarget_cd = self.config.replan_fallback_rounds + stagger;
         agent.goal_nav_stamp = stamp;
         agent.goal_nav_masks_epoch = masks_epoch;
+    }
+
+    /// Cached per team per budgeted replan tick — avoids O(tiles) scan per replan.
+    fn team_has_land_advance_goal(&mut self, kernel: &TerritoryKernel, team: u8) -> bool {
+        let ti = team as usize;
+        if ti >= self.land_advance_goal_cache.len() {
+            let masks = AgentNavMasks {
+                friendly_corridor: &self.friendly_corridor,
+                hostile_corridor: &self.hostile_corridor,
+                friendly_bridge: &self.friendly_bridge,
+                hostile_bridge: &self.hostile_bridge,
+            };
+            let view = BattleNavView::new(kernel, &masks, team);
+            return crate::pathfind::nav_rules::any_land_advance_goal(&view, kernel.tile_count);
+        }
+        if let Some(cached) = self.land_advance_goal_cache[ti] {
+            return cached;
+        }
+        let masks = AgentNavMasks {
+            friendly_corridor: &self.friendly_corridor,
+            hostile_corridor: &self.hostile_corridor,
+            friendly_bridge: &self.friendly_bridge,
+            hostile_bridge: &self.hostile_bridge,
+        };
+        let view = BattleNavView::new(kernel, &masks, team);
+        let has = crate::pathfind::nav_rules::any_land_advance_goal(&view, kernel.tile_count);
+        self.land_advance_goal_cache[ti] = Some(has);
+        has
     }
 
     fn nav_stale_for_agent(&self, kernel: &TerritoryKernel, agent: &Agent) -> bool {
@@ -557,6 +614,7 @@ impl AgentLayer {
         // Prefer free goals only when team free-miss cooldown is clear (C1/C4).
         let team_i = team as usize;
         let try_free = team_i < self.free_miss_cd.len() && self.free_miss_cd[team_i] == 0;
+        let has_land_goals = self.team_has_land_advance_goal(kernel, team);
         let mut outcome = if try_free {
             #[cfg(test)]
             {
@@ -577,6 +635,7 @@ impl AgentLayer {
                 team,
                 except_id,
                 true,
+                has_land_goals,
             )
         } else {
             None
@@ -607,6 +666,7 @@ impl AgentLayer {
                 team,
                 except_id,
                 false,
+                has_land_goals,
             );
         }
 
@@ -667,6 +727,7 @@ impl AgentLayer {
         team: u8,
         except_id: u32,
         free_goals_only: bool,
+        has_land_goals: bool,
     ) -> Option<RoutePath> {
         let masks = AgentNavMasks {
             friendly_corridor,
@@ -689,27 +750,36 @@ impl AgentLayer {
         let rule = rule_by_id(NAV_RULE_INFANTRY_ADVANCE)?;
         let view = BattleNavView::new(kernel, &masks, team);
         let w = kernel.grid_w.max(1);
-        let is_free_stance = |idx: usize| {
-            if !view.is_stance_goal(idx) {
-                return false;
-            }
+        let is_free_cell = |idx: usize| {
             let cx = (idx as i32) % w;
             let cy = (idx as i32) / w;
             let key = (cx, cy);
-            // Occupied by another unit → not free.
             match occupant_at.get(&key) {
                 Some(&oid) if oid != except_id => return false,
                 _ => {}
             }
-            // Soft claim by another unit → not free (C2 stampede cap).
             match goal_claims.get(&key) {
-                Some(&cid) if cid != except_id => return false,
+                Some(&cid) if cid != except_id => false,
                 _ => true,
             }
         };
-        nav_search
-            .find_nearest_goal(&view, &[start_idx], rule.search, is_free_stance)
-            .map(|(path, _)| path)
+        // No claimable unowned land → ferry only (avoid burning expand on owned continent).
+        if !has_land_goals {
+            let ferry_ctx = crate::pathfind::nav_rules::infantry_ferry_context(kernel.tile_count);
+            let is_free_ferry = |idx: usize| view.is_ferry_landing_goal(idx) && is_free_cell(idx);
+            return nav_search
+                .find_nearest_goal(&view, &[start_idx], ferry_ctx, is_free_ferry)
+                .map(|(path, _)| path);
+        }
+        let is_free_stance = |idx: usize| view.is_stance_goal(idx) && is_free_cell(idx);
+        if let Some((path, _)) =
+            nav_search.find_nearest_goal(&view, &[start_idx], rule.search, is_free_stance)
+        {
+            return Some(path);
+        }
+        // Land goals exist but free land miss → do NOT ferry (contested land-only follows).
+        // Ferry only when no land advance goals remain for the team.
+        None
     }
 
     fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, agent: &Agent) -> bool {
@@ -850,6 +920,7 @@ impl AgentLayer {
         if !dead.is_empty() {
             // Free tiles opened → allow free-goal search again.
             self.free_miss_cd = [0; 3];
+            self.land_advance_goal_cache = [None; 3];
         }
         self.agents.retain(|a| {
             if dead.contains(&a.id) {
@@ -903,8 +974,12 @@ impl AgentLayer {
         let mut network_pick: Option<(i32, i32)> = None;
         let mut team_pick: Option<(i32, i32)> = None;
         kernel.for_each_neighbor_idx(bidx as usize, |nui| {
-            let gx = nui as i32 % w;
-            let gy = nui as i32 / w;
+            // Sphere / graph topology: cell id is the index; rect maps use row-major.
+            let (gx, gy) = if kernel.graph_topology {
+                (nui as i32, 0)
+            } else {
+                (nui as i32 % w, nui as i32 / w)
+            };
             if !self.is_passable(kernel, team, gx, gy) {
                 return;
             }
@@ -918,7 +993,19 @@ impl AgentLayer {
                 team_pick = Some((gx, gy));
             }
         });
-        network_pick.or(team_pick)
+        if let Some(pick) = network_pick.or(team_pick) {
+            return Some(pick);
+        }
+        // Sphere HQ seeds a single owned cell — allow spawn on the barracks tile itself.
+        let bui = bidx as usize;
+        if bui < kernel.owners.len()
+            && kernel.owners[bui] == team
+            && self.is_passable(kernel, team, bx, by)
+            && !self.ground_occupied_by_other(bx, by, u32::MAX)
+        {
+            return Some((bx, by));
+        }
+        None
     }
 
     fn is_passable_at(
@@ -953,7 +1040,45 @@ impl AgentLayer {
         if ui < bridge.len() && bridge[ui] != 0 {
             return true;
         }
+        // Ferry transit: open water and unclaimable land (pathfinder gates when water is used).
+        if !kernel.land_mask.is_empty() {
+            return ui < kernel.land_mask.len();
+        }
         false
+    }
+
+    /// After ferrying onto a new landmass, flood claimable like a bridge beachhead.
+    /// Floods contiguous *land* only — never across water.
+    fn maybe_ferry_beachhead(
+        &mut self,
+        kernel: &mut TerritoryKernel,
+        team: u8,
+        gx: i32,
+        gy: i32,
+    ) {
+        let idx = kernel.cell_index(gx, gy);
+        if idx < 0 {
+            return;
+        }
+        let ui = idx as usize;
+        if ui >= kernel.tile_count {
+            return;
+        }
+        let is_land = if !kernel.land_mask.is_empty() {
+            ui < kernel.land_mask.len() && kernel.land_mask[ui] != 0
+        } else {
+            false
+        };
+        if !is_land {
+            return;
+        }
+        if kernel.claimable_mask[ui] != 0 && kernel.owners[ui] != OWNER_UNCLAIMABLE {
+            return;
+        }
+        let result = kernel.extend_beachhead_from_landing(gx, gy, team);
+        if result.changed {
+            self.beachhead_expanded = true;
+        }
     }
 
     fn is_passable(&self, kernel: &TerritoryKernel, team: u8, gx: i32, gy: i32) -> bool {
@@ -1003,7 +1128,9 @@ impl AgentLayer {
             if kernel.claimable_mask[nui] == 0 {
                 continue;
             }
-            if kernel.owners[nui] != enemy && kernel.owners[nui] != OWNER_CONTESTED {
+            let owner = kernel.owners[nui];
+            // Majority lock: tip enemy / neutral / legacy contested tiles.
+            if owner != enemy && owner != OWNER_NEUTRAL && owner != OWNER_CONTESTED {
                 continue;
             }
             let nx = nui as i32 % w;
@@ -1028,6 +1155,7 @@ impl AgentLayer {
                 kernel.pressure_friendly[nui] = (kernel.pressure_friendly[nui] - erode).max(0.0);
                 kernel.pressure_hostile[nui] += erode * 0.35;
             }
+            kernel.mark_pressure_dirty(nui);
         }
     }
 }
@@ -1293,6 +1421,32 @@ mod tests {
         assert!(
             layer.free_miss_cd[OWNER_FRIENDLY as usize] > 0,
             "free miss must arm free_miss_cd for subsequent replans"
+        );
+    }
+
+    /// Stuck / no-path replan must back off — never leave retarget_cd at 0.
+    #[test]
+    fn stuck_replan_sets_retarget_backoff() {
+        let mut k = line_graph_kernel();
+        k.claimable_mask = vec![0u8; 4];
+        k.owners = vec![OWNER_FRIENDLY; 4];
+        let mut layer = AgentLayer::new(AgentConfig::default());
+        layer.friendly_corridor = vec![0; 4];
+        layer.hostile_corridor = vec![0; 4];
+        layer.friendly_bridge = vec![0; 4];
+        layer.hostile_bridge = vec![0; 4];
+        push_test_agent(&mut layer, 1, OWNER_FRIENDLY, 0, 0);
+        assert_eq!(layer.agents[0].step_gx, -1);
+        layer.replan_route(&k, 0);
+        layer.finish_replan(&k, 0);
+        assert!(
+            layer.agents[0].retarget_cd > 0,
+            "failed replan must set retarget_cd backoff, got {}",
+            layer.agents[0].retarget_cd
+        );
+        assert!(
+            layer.agents[0].retarget_cd >= layer.config.replan_fallback_rounds,
+            "backoff should be at least replan_fallback_rounds"
         );
     }
 }

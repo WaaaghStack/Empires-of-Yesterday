@@ -98,12 +98,18 @@ impl<'a> BattleNavView<'a> {
         self.kernel.owners[idx] != self.team
     }
 
-    /// Air strike target: any land not owned by this team (no claimable check).
-    pub fn is_air_strike_goal(&self, idx: usize) -> bool {
+    /// Ferry landing: any land not owned by this team (incl. unclaimable islands).
+    pub fn is_ferry_landing_goal(&self, idx: usize) -> bool {
         if !self.is_land_cell(idx) {
             return false;
         }
         self.kernel.owners[idx] != self.team
+    }
+
+    /// Air strike target: any land not owned by this team (ignores ferry claimable gate).
+    /// Bombs open claimability on impact so majority ownership can flip.
+    pub fn is_air_strike_goal(&self, idx: usize) -> bool {
+        self.is_ferry_landing_goal(idx)
     }
 
     /// True when standing here would not take territory damage this tick.
@@ -197,7 +203,14 @@ impl NavGraph for BattleNavView<'_> {
         if ctx.flight_mode {
             return idx < self.kernel.tile_count;
         }
-        self.is_passable_cell(idx)
+        if self.is_passable_cell(idx) {
+            return true;
+        }
+        // Ferry: open water + unclaimable land (same pathfinder, water allowed).
+        if ctx.allow_water && idx < self.kernel.tile_count {
+            return true;
+        }
+        false
     }
 
     fn step_cost(&self, _from: usize, to: usize, ctx: RouteContext) -> i32 {

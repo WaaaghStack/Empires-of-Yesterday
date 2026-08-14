@@ -57,18 +57,15 @@ var _builders: Node3D
 var _effects: Node3D
 var _roads: Node3D
 var _deposits: Node3D
-var _resource_links: Node3D
+var _miners: Node3D
 var _resource_pulses: Node3D
 var _road_material: ShaderMaterial
 var _bridge_material: ShaderMaterial
-var _resource_link_material: StandardMaterial3D
-var _resource_link_materials: Array[StandardMaterial3D] = []
-var _resource_link_materials_linking: Array[StandardMaterial3D] = []
-var _resource_link_seg_count: Dictionary = {}
-var _resource_link_nodes: Dictionary = {}
-var _resource_link_path_sig: Dictionary = {}
-var _pulse_pool: Array[MeshInstance3D] = []
-var _pulse_sphere_mesh: SphereMesh
+## dep_id -> miner root Node3D
+var _miner_nodes: Dictionary = {}
+var _shockwave_pool: Array[MeshInstance3D] = []
+var _shockwave_active: Array = []
+var _shockwave_ring_mesh: TorusMesh
 var _pulse_materials: Array[StandardMaterial3D] = []
 var _marker_pool: Array[MeshInstance3D] = []
 var _marker_pool_used: int = 0
@@ -127,6 +124,9 @@ var _owner_bytes_cache: PackedByteArray = PackedByteArray()
 var _border_bytes_cache: PackedByteArray = PackedByteArray()
 var _border_tex_gpu: ImageTexture
 var _border_img_gpu: Image
+var _depth_tex_gpu: ImageTexture
+var _depth_img_gpu: Image
+var _depth_bytes_cache: PackedByteArray = PackedByteArray()
 ## Road cell-paint R8 (hierarchy): planned/spur/arterial/bridge — delta-updated only.
 var _road_tex_gpu: ImageTexture
 var _road_img_gpu: Image
@@ -134,10 +134,8 @@ var _road_bytes_cache: PackedByteArray = PackedByteArray()
 var _road_cache_by_cell: PackedByteArray = PackedByteArray()
 var _road_gpu_upload_pending: bool = false
 var _surface_lut: PackedVector3Array = PackedVector3Array()
-var _link_seg_pool: Array[MeshInstance3D] = []
 var _shared_road_box: BoxMesh
 var _shared_link_box: BoxMesh
-var _resource_link_phase: Dictionary = {}
 var _land_mask: PackedByteArray = PackedByteArray()
 ## Sphere: CSR reverse map cell_id → equirect pixel indices (built once at setup).
 var _cell_eq_offsets: PackedInt32Array = PackedInt32Array()
@@ -217,9 +215,12 @@ func _build_scene() -> void:
 	_shared_link_box.size = Vector3.ONE
 	_marker_box_mesh = BoxMesh.new()
 	_marker_box_mesh.size = Vector3.ONE
-	_pulse_sphere_mesh = SphereMesh.new()
-	_pulse_sphere_mesh.radius = 0.38
-	_pulse_sphere_mesh.height = 0.76
+	_shockwave_ring_mesh = TorusMesh.new()
+	# Unit ring — scaled in update_resource_shockwaves to world radii.
+	_shockwave_ring_mesh.inner_radius = 0.82
+	_shockwave_ring_mesh.outer_radius = 1.0
+	_shockwave_ring_mesh.rings = 16
+	_shockwave_ring_mesh.ring_segments = 32
 	# Road materials before MultiMesh setup (material_override on MMI).
 	_road_material = ShaderMaterial.new()
 	_road_material.shader = _ROAD_RIBBON_SHADER
@@ -288,43 +289,15 @@ func _build_scene() -> void:
 	_deposits = Node3D.new()
 	_deposits.name = "Deposits"
 	add_child(_deposits)
-	_resource_links = Node3D.new()
-	_resource_links.name = "ResourceLinks"
-	add_child(_resource_links)
+	_miners = Node3D.new()
+	_miners.name = "ResourceMiners"
+	add_child(_miners)
 	_resource_pulses = Node3D.new()
-	_resource_pulses.name = "ResourcePulses"
+	_resource_pulses.name = "ResourceShockwaves"
 	add_child(_resource_pulses)
-	_resource_link_material = StandardMaterial3D.new()
-	_resource_link_material.albedo_color = Color(0.72, 0.68, 0.38, 0.85)
-	_resource_link_material.emission_enabled = true
-	_resource_link_material.emission = Color(0.55, 0.5, 0.2)
-	_resource_link_material.emission_energy_multiplier = 0.6
-	_resource_link_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_resource_link_material.no_depth_test = false
-	_resource_link_material.render_priority = RESOURCE_RENDER_PRIORITY
-	_resource_link_materials.clear()
-	_resource_link_materials_linking.clear()
-	for i in WorldConquestConfigLib.RESOURCE_TYPE_COUNT:
-		var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[i]
-		var lmat := StandardMaterial3D.new()
-		lmat.albedo_color = Color(col.r, col.g, col.b, 0.88)
-		lmat.emission_enabled = true
-		lmat.emission = col * 0.35
-		lmat.emission_energy_multiplier = 0.6
-		lmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		lmat.no_depth_test = false
-		lmat.render_priority = RESOURCE_RENDER_PRIORITY
-		_resource_link_materials.append(lmat)
-		var lmat_dim := StandardMaterial3D.new()
-		lmat_dim.albedo_color = Color(col.r, col.g, col.b, 0.36)
-		lmat_dim.emission_enabled = true
-		lmat_dim.emission = col * 0.2
-		lmat_dim.emission_energy_multiplier = 0.45
-		lmat_dim.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		lmat_dim.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		lmat_dim.no_depth_test = false
-		lmat_dim.render_priority = RESOURCE_RENDER_PRIORITY
-		_resource_link_materials_linking.append(lmat_dim)
+	_miner_nodes.clear()
+	_shockwave_pool.clear()
+	_shockwave_active.clear()
 	_road_cache_land.clear()
 	_road_cache_bridge.clear()
 	_road_cached_seg_total.clear()
@@ -336,18 +309,17 @@ func _build_scene() -> void:
 		_road_cache_by_cell.fill(0)
 	_path_cache.clear()
 	_reset_road_multimesh_instances()
-	_resource_link_seg_count.clear()
-	_resource_link_nodes.clear()
-	_pulse_pool.clear()
 	_pulse_materials.clear()
 	for i in WorldConquestConfigLib.RESOURCE_TYPE_COUNT:
 		var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[i]
 		var mat := StandardMaterial3D.new()
-		mat.albedo_color = col
+		mat.albedo_color = Color(col.r, col.g, col.b, 0.8)
 		mat.emission_enabled = true
 		mat.emission = col
-		mat.emission_energy_multiplier = 2.4
+		mat.emission_energy_multiplier = 1.6
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.render_priority = RESOURCE_RENDER_PRIORITY
 		_pulse_materials.append(mat)
 	if camera == null:
 		camera = Camera3D.new()
@@ -744,8 +716,14 @@ func _setup_gpu_ownership_material(w: int, h: int) -> void:
 	_border_img_gpu.fill(Color(0, 0, 0))
 	_border_tex_gpu = ImageTexture.create_from_image(_border_img_gpu)
 	_border_bytes_cache.resize(w * h)
+	_depth_img_gpu = Image.create(w, h, false, Image.FORMAT_R8)
+	_depth_img_gpu.fill(Color(0.7, 0, 0))
+	_depth_tex_gpu = ImageTexture.create_from_image(_depth_img_gpu)
+	_depth_bytes_cache.resize(w * h)
+	_depth_bytes_cache.fill(178) # ~0.7 default depth
 	_ownership_shader_mat.set_shader_parameter("owner_map", _owner_tex_gpu)
 	_ownership_shader_mat.set_shader_parameter("border_map", _border_tex_gpu)
+	_ownership_shader_mat.set_shader_parameter("depth_map", _depth_tex_gpu)
 	_ownership_shader_mat.set_shader_parameter("land_mask", _land_tex_gpu)
 	_ownership_shader_mat.set_shader_parameter("road_map", _road_tex_gpu)
 	_ownership_shader_mat.render_priority = 1
@@ -787,6 +765,17 @@ func get_owner_cache_byte_for_cell(cell_id: int) -> int:
 	if cell_id < 0 or cell_id >= _owner_cache_by_cell.size():
 		return 0
 	return int(_owner_cache_by_cell[cell_id])
+
+
+func owner_overlay_cache_populated() -> bool:
+	if battle_data == null or not _gpu_ownership_ready:
+		return false
+	var n: int = (
+		battle_data.cell_count
+		if battle_data.sphere_mode
+		else battle_data.grid_width * battle_data.grid_height
+	)
+	return _owner_bytes_cache.size() >= n and _border_bytes_cache.size() >= n
 
 
 static func _owner_kind_from_byte(byte_v: int) -> int:
@@ -946,6 +935,9 @@ func _commit_owner_gpu_textures(allow_same_frame_as_patch: bool = false) -> void
 	if _road_img_gpu != null and _road_tex_gpu != null and _road_bytes_cache.size() == w * h:
 		_road_img_gpu.set_data(w, h, false, Image.FORMAT_R8, _road_bytes_cache)
 		_road_tex_gpu.update(_road_img_gpu)
+	if _depth_img_gpu != null and _depth_tex_gpu != null and _depth_bytes_cache.size() == w * h:
+		_depth_img_gpu.set_data(w, h, false, Image.FORMAT_R8, _depth_bytes_cache)
+		_depth_tex_gpu.update(_depth_img_gpu)
 	_road_gpu_upload_pending = false
 	_owner_gpu_upload_pending = false
 	_last_owner_gpu_upload_usec = Time.get_ticks_usec()
@@ -1013,6 +1005,32 @@ func apply_ownership_display_bytes(bytes: PackedByteArray) -> void:
 	_upload_owner_gpu_textures(true)
 
 
+## Pressure-depth R8 tint for ownership overlay (3 Hz; display-only).
+func apply_ownership_depth_bytes(bytes: PackedByteArray) -> void:
+	if not _gpu_ownership_ready or battle_data == null or _depth_img_gpu == null:
+		return
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var n: int = w * h
+	if battle_data.sphere_mode and bytes.size() == battle_data.cell_count:
+		if _depth_bytes_cache.size() != n:
+			_depth_bytes_cache.resize(n)
+		var eq: PackedInt32Array = battle_data.equirect_to_cell
+		for pidx in range(n):
+			var cell: int = eq[pidx] if pidx < eq.size() else -1
+			if cell < 0 or cell >= bytes.size():
+				_depth_bytes_cache[pidx] = 178
+			elif pidx < _land_mask.size() and _land_mask[pidx] == 0:
+				_depth_bytes_cache[pidx] = 0
+			else:
+				_depth_bytes_cache[pidx] = bytes[cell]
+	elif bytes.size() != n:
+		return
+	else:
+		_depth_bytes_cache = bytes
+	_upload_owner_gpu_textures()
+
+
 ## Incremental overlay patch with pre-mapped R8 bytes from Rust (WorldDataset display buffer).
 func apply_ownership_display_delta(
 	indices: PackedInt32Array, r8_values: PackedByteArray
@@ -1051,37 +1069,9 @@ func apply_ownership_display_delta(
 
 
 ## Incremental road cell paint (hierarchy R8). Caps come from Screen drain — never full 64k.
-func apply_road_paint_delta(indices: PackedInt32Array, class_bytes: PackedByteArray) -> void:
-	if not _gpu_ownership_ready or battle_data == null or _road_img_gpu == null:
-		return
-	var w: int = battle_data.grid_width
-	var h: int = battle_data.grid_height
-	var n: int = mini(indices.size(), class_bytes.size())
-	if n <= 0:
-		return
-	if _road_bytes_cache.size() != w * h:
-		_road_bytes_cache.resize(w * h)
-		_road_bytes_cache.fill(0)
-	if battle_data.sphere_mode and _road_cache_by_cell.size() != battle_data.cell_count:
-		_road_cache_by_cell.resize(battle_data.cell_count)
-		_road_cache_by_cell.fill(0)
-	for i in range(n):
-		var cell_id: int = indices[i]
-		var byte_v: int = _road_class_display_byte(int(class_bytes[i]))
-		if battle_data.sphere_mode:
-			if cell_id < 0 or cell_id >= battle_data.cell_count:
-				continue
-			_write_road_byte_to_equirect_for_cell(cell_id, byte_v)
-		else:
-			if cell_id < 0 or cell_id >= w * h:
-				continue
-			# Don't downgrade arterial/bridge to spur/planned in the texture.
-			var prev: int = int(_road_bytes_cache[cell_id])
-			if byte_v < prev and prev >= 192:
-				continue
-			_road_bytes_cache[cell_id] = maxi(prev, byte_v)
-	_road_gpu_upload_pending = true
-	_upload_owner_gpu_textures()
+func apply_road_paint_delta(_indices: PackedInt32Array, _class_bytes: PackedByteArray) -> void:
+	# R1: equirect road paint retired with roads.
+	return
 
 
 static func _road_class_display_byte(road_class: int) -> int:
@@ -1253,87 +1243,105 @@ func refresh_resource_deposits(deposits: Array) -> void:
 
 
 func sync_resource_sites(site_states: Dictionary) -> void:
-	if _resource_links == null or battle_data == null:
+	## Compat alias — miner sync (haul ribbons removed).
+	sync_resource_miners(site_states)
+
+
+func sync_resource_miners(site_states: Dictionary) -> void:
+	if _miners == null or battle_data == null:
 		return
 	var live_ids: Dictionary = {}
-	var w: int = _gameplay_grid_w()
 	for site_key in site_states.keys():
 		var state: Dictionary = site_states[site_key]
-		var phase: String = str(state.get("phase", ""))
-		if phase != WorldConquestResourcesLib.PHASE_LINKING and phase != WorldConquestResourcesLib.PHASE_HAULING:
-			continue
-		var link_path: PackedInt32Array = state.get("link_path", PackedInt32Array())
-		if link_path.is_empty():
+		if str(state.get("phase", "")) != WorldConquestResourcesLib.PHASE_MINING:
 			continue
 		var dep_id: int = _dep_id_from_site_key(str(site_key))
 		if dep_id < 0:
 			continue
 		live_ids[dep_id] = true
-		var path_sig: int = _path_preview_signature(link_path)
-		if int(_resource_link_path_sig.get(dep_id, 0)) != path_sig:
-			_clear_resource_link(dep_id)
-			_resource_link_path_sig[dep_id] = path_sig
-		var built: int = link_path.size()
-		if phase == WorldConquestResourcesLib.PHASE_LINKING:
-			built = int(floor(float(state.get("link_built", 1.0))))
-			built = clampi(built, 1, link_path.size())
-		var type_i: int = int(state.get("type", 0))
-		var linking: bool = phase == WorldConquestResourcesLib.PHASE_LINKING
-		var prev_phase: String = str(_resource_link_phase.get(dep_id, ""))
-		if prev_phase != phase:
-			_resource_link_phase[dep_id] = phase
-			if prev_phase == WorldConquestResourcesLib.PHASE_LINKING and phase == WorldConquestResourcesLib.PHASE_HAULING:
-				_set_resource_link_opaque(dep_id, type_i)
-		var need_segs: int = maxi(built - 1, 0)
-		var have_segs: int = int(_resource_link_seg_count.get(dep_id, 0))
-		if need_segs <= have_segs:
-			continue
-		for i in range(have_segs, need_segs):
-			var a: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(
-				link_path[i], w, battle_data
-			)
-			var b: Vector2i = WorldConquestOutpostBuildLib.grid_from_packed_key(
-				link_path[i + 1], w, battle_data
-			)
-			_add_resource_link_segment(a, b, type_i, dep_id, linking)
-		_resource_link_seg_count[dep_id] = need_segs
-	for dep_id in _resource_link_seg_count.keys():
+		var gx: int = int(state.get("gx", 0))
+		var gy: int = int(state.get("gy", 0))
+		var type_i: int = clampi(int(state.get("type", 0)), 0, WorldConquestConfigLib.RESOURCE_TYPE_COUNT - 1)
+		var size_tier: int = int(state.get("size", 1))
+		var team: int = int(state.get("team", 0))
+		_ensure_miner(dep_id, Vector2i(gx, gy), type_i, size_tier, team)
+	for dep_id in _miner_nodes.keys():
 		if not live_ids.has(dep_id):
-			_clear_resource_link(dep_id)
+			_clear_miner(dep_id)
 
 
 func update_resource_pulses(pulses: Array) -> void:
+	## Compat alias — treat as new shockwave emits (no delta advance).
+	update_resource_shockwaves(pulses, 0.0)
+
+
+func update_resource_shockwaves(new_events: Array, delta: float = 0.0) -> void:
 	if _resource_pulses == null or battle_data == null:
 		return
-	_ensure_pulse_pool()
-	if pulses.is_empty():
-		for node: MeshInstance3D in _pulse_pool:
-			node.visible = false
-		return
-	var show_n: int = mini(pulses.size(), _pulse_pool.size())
-	for i in _pulse_pool.size():
-		var node: MeshInstance3D = _pulse_pool[i]
+	_ensure_shockwave_pool()
+	for ev in new_events:
+		if typeof(ev) != TYPE_DICTIONARY:
+			continue
+		if _shockwave_active.size() >= WorldConquestConfigLib.RESOURCE_MAX_VISUAL_SHOCKWAVES:
+			break
+		_shockwave_active.append(
+			{
+				"gx": int(ev.get("gx", -1)),
+				"gy": int(ev.get("gy", 0)),
+				"type": clampi(int(ev.get("type", 0)), 0, WorldConquestConfigLib.RESOURCE_TYPE_COUNT - 1),
+				"size": int(ev.get("size", 1)),
+				"t": 0.0,
+			}
+		)
+	var duration: float = maxf(WorldConquestConfigLib.RESOURCE_SHOCKWAVE_DURATION_SEC, 0.05)
+	if delta > 0.0:
+		var alive: Array = []
+		for wave in _shockwave_active:
+			var t: float = float(wave.get("t", 0.0)) + delta / duration
+			if t >= 1.0:
+				continue
+			wave["t"] = t
+			alive.append(wave)
+		_shockwave_active = alive
+	var r0: float = WorldConquestConfigLib.RESOURCE_SHOCKWAVE_RADIUS_START
+	var r1: float = WorldConquestConfigLib.RESOURCE_SHOCKWAVE_RADIUS_END
+	var show_n: int = mini(_shockwave_active.size(), _shockwave_pool.size())
+	for i in _shockwave_pool.size():
+		var node: MeshInstance3D = _shockwave_pool[i]
 		if i >= show_n:
 			node.visible = false
 			continue
-		var pulse: Dictionary = pulses[i]
-		var gx: int = int(pulse.get("gx", -1))
-		var gy: int = int(pulse.get("gy", -1))
+		var wave: Dictionary = _shockwave_active[i]
+		var gx: int = int(wave.get("gx", -1))
 		if gx < 0:
 			node.visible = false
 			continue
-		var type_i: int = clampi(int(pulse.get("type", 0)), 0, _pulse_materials.size() - 1)
-		node.visible = true
-		node.material_override = _pulse_materials[type_i]
-		if battle_data.sphere_mode and pulse.has("nx"):
-			var nx: int = int(pulse.get("nx", gx))
-			var ny: int = int(pulse.get("ny", 0))
-			var frac: float = float(pulse.get("frac", 0.0))
-			node.position = grid_lerp_surface_pos(
-				Vector2i(gx, gy), Vector2i(nx, ny), frac, 1.1
-			)
-		else:
-			node.position = _grid_surface_pos(Vector2i(gx, gy), 1.1)
+		var gy: int = int(wave.get("gy", 0))
+		var type_i: int = int(wave.get("type", 0))
+		var size_tier: int = int(wave.get("size", 1))
+		var u: float = clampf(float(wave.get("t", 0.0)), 0.0, 1.0)
+		var size_boost: float = 1.0 + 0.15 * float(clampi(size_tier, 1, 3))
+		var ease_u: float = u * u * (3.0 - 2.0 * u)
+		var radius: float = lerpf(r0, r1, ease_u) * size_boost
+		var alpha: float = 0.95 * (1.0 - u) * (1.0 - u)
+		var pos: Vector3 = _grid_surface_pos(Vector2i(gx, gy), 1.35)
+		node.transform = _radial_transform(pos)
+		# Torus lies in XZ with Y through the hole — Y=radial keeps ring on the tangent plane.
+		node.scale = Vector3(radius, radius, radius)
+		var mat: StandardMaterial3D = node.material_override as StandardMaterial3D
+		if mat == null:
+			mat = StandardMaterial3D.new()
+			node.material_override = mat
+		var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[type_i]
+		mat.albedo_color = Color(col.r, col.g, col.b, alpha)
+		mat.emission_enabled = true
+		mat.emission = col
+		mat.emission_energy_multiplier = lerpf(4.5, 0.4, u)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.no_depth_test = true
+		mat.render_priority = RESOURCE_RENDER_PRIORITY + 2
+		node.visible = _is_front_hemisphere(pos)
 
 
 func set_marker_pulse(t: float) -> void:
@@ -1874,92 +1882,17 @@ func _spawn_bomb_impact_fx(pos: Vector3, col: Color) -> void:
 	tween.tween_callback(flash.queue_free)
 
 
-## B4: `changed_sids` non-empty → only those sids get path-cache growth/append.
-## Full MultiMesh rewrite from caches happens only on shrink/remove/capacity-grow,
-## never by re-walking every structure when an incremental sid list is provided.
-## Empty `changed_sids` = full structure pass (load/reset). Prefer always pass dirty sids live.
-func sync_roads(structures: Array, changed_sids: Array = [], network_roads: bool = false) -> void:
-	if _roads == null or battle_data == null:
-		return
-	var incremental: bool = not changed_sids.is_empty()
-	var changed_set: Dictionary = {}
-	if incremental:
-		for sid_v in changed_sids:
-			changed_set[int(sid_v)] = true
-	var live_ids: Dictionary = {}
-	var need_full_rebuild: bool = false
-	for st: Dictionary in structures:
-		if not WorldConquestOutpostBuildLib.is_corridor_path_kind(str(st.get("kind", ""))):
-			continue
-		# Logistics network MultiMesh owns progressive roads for spawners/barracks/hangars.
-		# Drawing structure path_built too doubles cost every cell during CONNECTING.
-		var kind: String = str(st.get("kind", ""))
-		if network_roads and kind != WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK:
-			continue
-		var sid: int = int(st.get("id", -1))
-		if sid < 0:
-			continue
-		live_ids[sid] = true
-		if not incremental or changed_set.has(sid):
-			# Growth is O(delta) append; shrink returns need_rebuild (B4).
-			if _sync_outpost_road(st, sid, false):
-				need_full_rebuild = true
-	for corridor: Dictionary in battle_data.bridge_corridors:
-		var sid: int = int(corridor.get("id", -1))
-		if sid < 0:
-			continue
-		live_ids[sid] = true
-		if not incremental or changed_set.has(sid):
-			var pseudo: Dictionary = corridor.duplicate()
-			pseudo["state"] = WorldConquestOutpostBuildLib.STATE_ACTIVE
-			if _sync_outpost_road(pseudo, sid, false):
-				need_full_rebuild = true
-	# Orphan cleanup (O(cached sids), not O(path cells)). Remove/reset triggers MultiMesh
-	# reseed from remaining caches — not a per-sid path rewalk of live growth sids (B4).
-	for sid in _road_cached_seg_total.keys():
-		if not live_ids.has(sid):
-			if _clear_road(sid, false):
-				need_full_rebuild = true
-	if need_full_rebuild:
-		_rebuild_road_multimesh_from_caches()
+## B4 (legacy): road MultiMesh growth — R1 retires live road paint; keep early-return stub.
+func sync_roads(_structures: Array, _changed_sids: Array = [], _network_roads: bool = false) -> void:
+	# R1: MultiMesh road / corridor ribbons removed from live presentation.
+	if battle_data != null and battle_data.bridge_corridors is Array:
+		battle_data.bridge_corridors.clear()
 
 
 #region Road MultiMesh (B3/I4/H2 — helpers in EarthGlobeRoads.gd)
 
 func _setup_road_multimeshes() -> void:
-	if _roads == null or _shared_road_box == null:
-		return
-	if _road_land_mm != null and is_instance_valid(_road_land_mm):
-		_road_land_mm.queue_free()
-	if _road_bridge_mm != null and is_instance_valid(_road_bridge_mm):
-		_road_bridge_mm.queue_free()
-	_road_land_mm = MultiMeshInstance3D.new()
-	_road_land_mm.name = "RoadLandMM"
-	var land_mm := MultiMesh.new()
-	land_mm.transform_format = MultiMesh.TRANSFORM_3D
-	land_mm.use_colors = true
-	land_mm.mesh = _shared_road_box
-	# Preallocate large capacity once — raising instance_count mid-run wipes buffers (I4).
-	land_mm.instance_count = _ROAD_MM_MIN_CAPACITY
-	land_mm.visible_instance_count = 0
-	_road_land_mm.multimesh = land_mm
-	_road_land_mm.material_override = _road_material
-	_road_land_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_road_land_mm.sorting_offset = 2.0
-	_roads.add_child(_road_land_mm)
-	_road_bridge_mm = MultiMeshInstance3D.new()
-	_road_bridge_mm.name = "RoadBridgeMM"
-	var bridge_mm := MultiMesh.new()
-	bridge_mm.transform_format = MultiMesh.TRANSFORM_3D
-	bridge_mm.use_colors = true
-	bridge_mm.mesh = _shared_road_box
-	bridge_mm.instance_count = _ROAD_MM_MIN_CAPACITY
-	bridge_mm.visible_instance_count = 0
-	_road_bridge_mm.multimesh = bridge_mm
-	_road_bridge_mm.material_override = _bridge_material
-	_road_bridge_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_road_bridge_mm.sorting_offset = 2.0
-	_roads.add_child(_road_bridge_mm)
+	# R1: skip allocating road MultiMeshes — sync_roads is a no-op.
 	_road_mm_land_used = 0
 	_road_mm_bridge_used = 0
 
@@ -2021,93 +1954,14 @@ func clear_network_roads() -> void:
 	_rebuild_road_multimesh_from_caches()
 
 
-## Record path predecessors so live growth draws path[i-1]→path[i], not an arbitrary built neighbor.
-func register_network_road_path(path: PackedInt32Array) -> void:
-	if path.size() < 2:
-		return
-	for i in range(1, path.size()):
-		var cur: int = int(path[i])
-		var prev: int = int(path[i - 1])
-		if cur < 0 or prev < 0:
-			continue
-		_network_road_prev[cur] = prev
+func apply_network_road_cells(_cells: PackedInt32Array) -> void:
+	# R1: road MultiMesh paint retired.
+	return
 
 
-func apply_network_road_cells(cells: PackedInt32Array) -> void:
-	if battle_data == null or cells.is_empty():
-		return
-	var land_new: Array[Transform3D] = []
-	var bridge_new: Array[Transform3D] = []
-	if battle_data.sphere_mode:
-		for i in range(cells.size()):
-			var cell_id: int = cells[i]
-			if cell_id < 0 or _network_built_cells.has(cell_id):
-				continue
-			_network_built_cells[cell_id] = true
-			var b: Vector2i = Vector2i(cell_id, 0)
-			var link_nbr: int = int(_network_road_prev.get(cell_id, -1))
-			if link_nbr < 0 or not _network_built_cells.has(link_nbr):
-				link_nbr = -1
-				for nbr: int in battle_data.get_neighbors(cell_id):
-					if _network_built_cells.has(nbr):
-						link_nbr = nbr
-						break
-			if link_nbr < 0:
-				continue
-			var a: Vector2i = Vector2i(link_nbr, 0)
-			var edge_xforms: Array[Transform3D] = _road_segment_transforms(a, b)
-			var as_bridge: bool = _segment_is_bridge(a, b)
-			for xform: Transform3D in edge_xforms:
-				if as_bridge:
-					_network_road_bridge.append(xform)
-					bridge_new.append(xform)
-				else:
-					_network_road_land.append(xform)
-					land_new.append(xform)
-	else:
-		var w: int = battle_data.grid_width
-		var h: int = battle_data.grid_height
-		const DIRS: Array[Vector2i] = [
-			Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
-		]
-		for i in range(cells.size()):
-			var key: int = cells[i]
-			if key < 0 or _network_built_cells.has(key):
-				continue
-			_network_built_cells[key] = true
-			var gx: int = key % w
-			var gy: int = key / w
-			var b: Vector2i = Vector2i(gx, gy)
-			var link_key: int = int(_network_road_prev.get(key, -1))
-			var a := Vector2i(-1, -1)
-			if link_key >= 0 and _network_built_cells.has(link_key):
-				a = Vector2i(link_key % w, link_key / w)
-			else:
-				for d: Vector2i in DIRS:
-					var nx: int = gx + d.x
-					var ny: int = gy + d.y
-					if ny < 0 or ny >= h:
-						continue
-					if nx < 0:
-						nx = w - 1
-					elif nx >= w:
-						nx = 0
-					var nk: int = ny * w + nx
-					if not _network_built_cells.has(nk):
-						continue
-					a = Vector2i(nx, ny)
-					break
-			if a.x < 0:
-				continue
-			var xform: Transform3D = _road_segment_transform(a, b)
-			if _segment_is_bridge(a, b):
-				_network_road_bridge.append(xform)
-				bridge_new.append(xform)
-			else:
-				_network_road_land.append(xform)
-				land_new.append(xform)
-	if not land_new.is_empty() or not bridge_new.is_empty():
-		_append_road_multimesh_transforms(land_new, bridge_new)
+func register_network_road_path(_path: PackedInt32Array) -> void:
+	# R1: road MultiMesh paint retired.
+	return
 
 
 func _write_multimesh_transforms(mm_node: MultiMeshInstance3D, xforms: Array, is_land: bool) -> void:
@@ -2454,86 +2308,150 @@ func _dep_id_from_site_key(site_key: String) -> int:
 	return int(site_key.substr(4))
 
 
-func _clear_resource_link(dep_id: int) -> void:
-	for seg in _resource_link_nodes.get(dep_id, []):
-		if is_instance_valid(seg):
-			seg.visible = false
-			_link_seg_pool.append(seg as MeshInstance3D)
-	_resource_link_nodes.erase(dep_id)
-	_resource_link_seg_count.erase(dep_id)
-	_resource_link_phase.erase(dep_id)
-	_resource_link_path_sig.erase(dep_id)
+func _radial_transform(pos: Vector3) -> Transform3D:
+	var up: Vector3 = pos.normalized()
+	if up.length_squared() < 1e-8:
+		up = Vector3.UP
+	var east: Vector3 = up.cross(Vector3.UP)
+	if east.length_squared() < 1e-8:
+		east = up.cross(Vector3.RIGHT)
+	east = east.normalized()
+	var north: Vector3 = east.cross(up).normalized()
+	return Transform3D(Basis(east, up, -north), pos)
 
 
-func _set_resource_link_opaque(dep_id: int, type_i: int) -> void:
-	var mat_i: int = clampi(type_i, 0, _resource_link_materials.size() - 1)
-	var mat: Material = (
-		_resource_link_materials[mat_i]
-		if not _resource_link_materials.is_empty()
-		else _resource_link_material
-	)
-	for seg in _resource_link_nodes.get(dep_id, []):
-		if is_instance_valid(seg):
-			(seg as MeshInstance3D).material_override = mat
-
-
-func _ensure_pulse_pool() -> void:
-	var want: int = WorldConquestConfigLib.RESOURCE_MAX_VISUAL_PULSES
-	while _pulse_pool.size() < want:
-		var pulse := MeshInstance3D.new()
-		pulse.mesh = _pulse_sphere_mesh
-		pulse.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		pulse.visible = false
-		_resource_pulses.add_child(pulse)
-		_pulse_pool.append(pulse)
-
-
-func _add_resource_link_segment(
-	a: Vector2i, b: Vector2i, type_i: int, dep_id: int, linking: bool = false
-) -> void:
-	if battle_data == null or a.x < 0 or b.x < 0:
+func _ensure_miner(dep_id: int, grid: Vector2i, type_i: int, size_tier: int, team: int) -> void:
+	if _miners == null or battle_data == null or grid.x < 0:
 		return
-	var pos_a: Vector3 = _grid_surface_pos(a, 0.65)
-	var pos_b: Vector3 = _grid_surface_pos(b, 0.65)
-	var steps: int = _surface_arc_steps(pos_a, pos_b)
-	var mat_i: int = clampi(type_i, 0, _resource_link_materials.size() - 1)
-	var mat: Material = _resource_link_material
-	if linking and not _resource_link_materials_linking.is_empty():
-		mat = _resource_link_materials_linking[mat_i]
-	elif not _resource_link_materials.is_empty():
-		mat = _resource_link_materials[mat_i]
-	for step_i in range(steps):
-		var t0: float = float(step_i) / float(steps)
-		var t1: float = float(step_i + 1) / float(steps)
-		var p0: Vector3 = _slerp_surface_pos(pos_a, pos_b, t0)
-		var p1: Vector3 = _slerp_surface_pos(pos_a, pos_b, t1)
-		var delta: Vector3 = p1 - p0
-		var length: float = delta.length()
-		if length < 0.05:
+	var root: Node3D = _miner_nodes.get(dep_id) as Node3D
+	const MINER_MESH_VER := 2
+	if root != null and is_instance_valid(root) and int(root.get_meta("miner_ver", 0)) != MINER_MESH_VER:
+		_clear_miner(dep_id)
+		root = null
+	if root == null or not is_instance_valid(root):
+		root = _make_miner_visual(type_i, team)
+		root.set_meta("miner_ver", MINER_MESH_VER)
+		_miners.add_child(root)
+		_miner_nodes[dep_id] = root
+	var pad_scale: float = 0.55 + float(size_tier) * 0.22
+	var miner_scale: float = WorldConquestConfigLib.RESOURCE_MINER_SCALE * (0.85 + 0.2 * pad_scale)
+	var pos: Vector3 = _grid_surface_pos(grid, 1.6)
+	root.transform = _radial_transform(pos)
+	root.scale = Vector3.ONE * miner_scale
+	root.visible = _is_front_hemisphere(pos)
+	_tint_miner(root, type_i, team)
+
+
+func _make_miner_visual(type_i: int, team: int) -> Node3D:
+	var root := Node3D.new()
+	root.name = "Miner"
+	var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[
+		clampi(type_i, 0, WorldConquestConfigLib.RESOURCE_TYPE_COUNT - 1)
+	]
+	var body_mat := StandardMaterial3D.new()
+	body_mat.albedo_color = col
+	body_mat.emission_enabled = true
+	body_mat.emission = col
+	body_mat.emission_energy_multiplier = 2.8
+	body_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	body_mat.no_depth_test = true
+	body_mat.render_priority = RESOURCE_RENDER_PRIORITY + 1
+	# Tall derrick stem — thick enough to read from orbit.
+	var stem := MeshInstance3D.new()
+	var stem_mesh := CylinderMesh.new()
+	stem_mesh.top_radius = 0.18
+	stem_mesh.bottom_radius = 0.28
+	stem_mesh.height = 1.55
+	stem.mesh = stem_mesh
+	stem.material_override = body_mat
+	stem.position = Vector3(0.0, 0.85, 0.0)
+	stem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(stem)
+	# Crossbar.
+	var bar := MeshInstance3D.new()
+	var bar_mesh := BoxMesh.new()
+	bar_mesh.size = Vector3(1.15, 0.18, 0.18)
+	bar.mesh = bar_mesh
+	bar.material_override = body_mat
+	bar.position = Vector3(0.0, 1.45, 0.0)
+	bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(bar)
+	# Base disc so it reads as a building on the deposit pad.
+	var base := MeshInstance3D.new()
+	var base_mesh := CylinderMesh.new()
+	base_mesh.top_radius = 0.55
+	base_mesh.bottom_radius = 0.62
+	base_mesh.height = 0.22
+	base.mesh = base_mesh
+	base.material_override = body_mat
+	base.position = Vector3(0.0, 0.12, 0.0)
+	base.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(base)
+	# Team tip beacon.
+	var tip := MeshInstance3D.new()
+	tip.name = "TeamTip"
+	var tip_mesh := SphereMesh.new()
+	tip_mesh.radius = 0.22
+	tip_mesh.height = 0.44
+	tip.mesh = tip_mesh
+	var tip_mat := StandardMaterial3D.new()
+	tip_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	tip_mat.emission_enabled = true
+	tip_mat.emission_energy_multiplier = 3.5
+	tip_mat.no_depth_test = true
+	tip_mat.render_priority = RESOURCE_RENDER_PRIORITY + 1
+	tip.material_override = tip_mat
+	tip.position = Vector3(0.0, 1.75, 0.0)
+	tip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(tip)
+	_tint_miner(root, type_i, team)
+	return root
+
+
+func _tint_miner(root: Node3D, type_i: int, team: int) -> void:
+	var col: Color = WorldConquestConfigLib.RESOURCE_COLORS[
+		clampi(type_i, 0, WorldConquestConfigLib.RESOURCE_TYPE_COUNT - 1)
+	]
+	for child in root.get_children():
+		if child.name == "TeamTip":
 			continue
-		var y_axis: Vector3 = delta / length
-		var x_axis: Vector3 = y_axis.cross(Vector3.UP)
-		if x_axis.length_squared() < 0.0001:
-			x_axis = y_axis.cross(Vector3.RIGHT)
-		x_axis = x_axis.normalized()
-		var z_axis: Vector3 = x_axis.cross(y_axis).normalized()
-		var seg: MeshInstance3D
-		if _link_seg_pool.is_empty():
-			seg = MeshInstance3D.new()
-			seg.mesh = _shared_link_box
-			seg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			_resource_links.add_child(seg)
-		else:
-			seg = _link_seg_pool.pop_back()
-			seg.visible = true
-		seg.material_override = mat
-		seg.transform = Transform3D(
-			Basis(x_axis * 0.18, y_axis * length, z_axis * 0.18),
-			(p0 + p1) * 0.5,
-		)
-		if not _resource_link_nodes.has(dep_id):
-			_resource_link_nodes[dep_id] = []
-		(_resource_link_nodes[dep_id] as Array).append(seg)
+		if child is MeshInstance3D:
+			var mat := (child as MeshInstance3D).material_override as StandardMaterial3D
+			if mat != null:
+				mat.albedo_color = col
+				mat.emission = col
+				mat.emission_energy_multiplier = 2.8
+	var tip: MeshInstance3D = root.get_node_or_null("TeamTip") as MeshInstance3D
+	if tip != null:
+		var tip_mat := tip.material_override as StandardMaterial3D
+		if tip_mat != null:
+			var tip_col: Color = (
+				Color(0.25, 0.65, 1.0)
+				if team == BattleTileControlLib.OWNER_FRIENDLY
+				else Color(1.0, 0.28, 0.22)
+			)
+			tip_mat.albedo_color = tip_col
+			tip_mat.emission = tip_col
+			tip_mat.emission_energy_multiplier = 3.5
+
+
+func _clear_miner(dep_id: int) -> void:
+	var root: Node3D = _miner_nodes.get(dep_id) as Node3D
+	if root != null and is_instance_valid(root):
+		root.queue_free()
+	_miner_nodes.erase(dep_id)
+
+
+func _ensure_shockwave_pool() -> void:
+	var want: int = WorldConquestConfigLib.RESOURCE_MAX_VISUAL_SHOCKWAVES
+	while _shockwave_pool.size() < want:
+		var ring := MeshInstance3D.new()
+		ring.mesh = _shockwave_ring_mesh
+		ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		ring.visible = false
+		ring.material_override = StandardMaterial3D.new()
+		_resource_pulses.add_child(ring)
+		_shockwave_pool.append(ring)
 
 
 func _place_pooled_marker(
@@ -2904,3 +2822,8 @@ func _refresh_hemisphere_visibility() -> void:
 		for child in _deposits.get_children():
 			if child is Node3D:
 				(child as Node3D).visible = _is_front_hemisphere((child as Node3D).position)
+	if _miners != null:
+		for child in _miners.get_children():
+			if child is Node3D:
+				var miner: Node3D = child as Node3D
+				miner.visible = _is_front_hemisphere(miner.global_position)

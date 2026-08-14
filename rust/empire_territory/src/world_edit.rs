@@ -109,7 +109,8 @@ impl TerritoryKernel {
                 self.grid_w,
                 self.grid_h,
                 self.wrap_longitude,
-                &self.passable_mask,
+                // Land only — never flood claimable across ocean (ferry transit uses land_mask separately).
+                &self.land_mask,
                 gx,
                 gy,
                 &mut self.friendly_reachable,
@@ -124,7 +125,7 @@ impl TerritoryKernel {
                 self.grid_w,
                 self.grid_h,
                 self.wrap_longitude,
-                &self.passable_mask,
+                &self.land_mask,
                 gx,
                 gy,
                 &mut self.hostile_reachable,
@@ -160,7 +161,7 @@ impl TerritoryKernel {
                     self.grid_w,
                     self.grid_h,
                     self.wrap_longitude,
-                    &self.passable_mask,
+                    &self.land_mask,
                     gx,
                     gy,
                     &mut self.friendly_reachable,
@@ -175,7 +176,7 @@ impl TerritoryKernel {
                     self.grid_w,
                     self.grid_h,
                     self.wrap_longitude,
-                    &self.passable_mask,
+                    &self.land_mask,
                     gx,
                     gy,
                     &mut self.hostile_reachable,
@@ -193,186 +194,44 @@ impl TerritoryKernel {
         out
     }
 
+    /// R1: land bridges are removed. Corridor cells never stamp bridge / corridor-land masks,
+    /// so this only drops any stale bridge reachability left over from a pre-R1 save and then
+    /// reports the resulting claimable delta. Ferry beachheads open whole landmasses for
+    /// infantry; air strikes open a single cell via `open_claimable_for_air_strike`.
     pub fn sync_bridge_corridors(
         &mut self,
         specs: &[CorridorPathSpec],
-        force_full: bool,
+        _force_full: bool,
     ) -> WorldEditResult {
         let mut out = WorldEditResult::default();
-        if !self.world_edit_ready || specs.is_empty() && !force_full {
+        // Every corridor reports "fully synced" so Godot stops re-submitting the same path.
+        for spec in specs {
+            let synced = spec.path_keys.len().max(1) as i32;
+            out.synced_updates.push((spec.sid, synced));
+        }
+        if !self.world_edit_ready {
             return out;
         }
-        let mut touched = Vec::new();
-        if force_full {
-            self.friendly_bridge_reachable.fill(0);
-            self.hostile_bridge_reachable.fill(0);
-            self.friendly_corridor_land.fill(0);
-            self.hostile_corridor_land.fill(0);
+        let stale: Vec<i32> = (0..self.tile_count)
+            .filter(|&idx| {
+                self.friendly_bridge_reachable[idx] != 0
+                    || self.hostile_bridge_reachable[idx] != 0
+                    || self.friendly_corridor_land[idx] != 0
+                    || self.hostile_corridor_land[idx] != 0
+            })
+            .map(|idx| idx as i32)
+            .collect();
+        if stale.is_empty() {
+            return out;
         }
-        for spec in specs {
-            let new_synced = self.sync_corridor_path_cells(
-                spec.team,
-                &spec.path_keys,
-                spec.built_cells,
-                if force_full { 1 } else { spec.synced_cells },
-                &mut touched,
-            );
-            out.synced_updates.push((spec.sid, new_synced));
-        }
-        let nav_reconciled = self.reconcile_corridor_land_nav(specs);
-        if !touched.is_empty() {
-            let delta = self.apply_claimable_cells(&touched);
-            out.changed = !delta.indices.is_empty();
-            out.claimable_delta = delta;
-        }
-        if nav_reconciled {
-            out.changed = true;
-        }
+        self.friendly_bridge_reachable.fill(0);
+        self.hostile_bridge_reachable.fill(0);
+        self.friendly_corridor_land.fill(0);
+        self.hostile_corridor_land.fill(0);
+        let delta = self.apply_claimable_cells(&stale);
+        out.changed = !delta.indices.is_empty();
+        out.claimable_delta = delta;
         out
-    }
-
-    fn sync_corridor_path_cells(
-        &mut self,
-        team: u8,
-        packed: &[i32],
-        built_cells: i32,
-        synced_cells: i32,
-        touched: &mut Vec<i32>,
-    ) -> i32 {
-        if packed.is_empty() {
-            return synced_cells;
-        }
-        let built_cells = built_cells.clamp(1, packed.len() as i32);
-        let synced_cells = synced_cells.clamp(1, built_cells);
-        let land_reach = if team == OWNER_FRIENDLY {
-            self.friendly_reachable.clone()
-        } else {
-            self.hostile_reachable.clone()
-        };
-        let src_idx = packed[0] as usize;
-        if src_idx >= self.tile_count || land_reach[src_idx] == 0 {
-            return synced_cells;
-        }
-        if synced_cells <= 1 {
-            let src_gx = (src_idx as i32) % self.grid_w;
-            let src_gy = (src_idx as i32) / self.grid_w;
-            if land_at(&self.land_mask, self.grid_w, self.grid_h, src_gx, src_gy)
-                && self.corridor_land_mut(team)[src_idx] == 0
-            {
-                self.corridor_land_mut(team)[src_idx] = 1;
-            }
-        }
-        if synced_cells >= built_cells {
-            return built_cells;
-        }
-        let mut chain_ok = true;
-        for i in 1..synced_cells as usize {
-            let prev_key = packed[i] as usize;
-            if prev_key >= self.tile_count {
-                chain_ok = false;
-                break;
-            }
-            let bridge = self.bridge_mask(team);
-            let corridor = self.corridor_land(team);
-            if bridge[prev_key] == 0 && corridor[prev_key] == 0 && land_reach[prev_key] == 0 {
-                chain_ok = false;
-                break;
-            }
-        }
-        for i in synced_cells as usize..built_cells as usize {
-            let cell_key = packed[i] as usize;
-            if cell_key >= self.tile_count {
-                chain_ok = false;
-                continue;
-            }
-            if !chain_ok {
-                continue;
-            }
-            let gx = (cell_key as i32) % self.grid_w;
-            let gy = (cell_key as i32) / self.grid_w;
-            if !land_at(&self.land_mask, self.grid_w, self.grid_h, gx, gy) {
-                if self.bridge_mask_mut(team)[cell_key] == 0 {
-                    self.bridge_mask_mut(team)[cell_key] = 1;
-                    touched.push(packed[i]);
-                }
-            } else if self.corridor_land_mut(team)[cell_key] == 0 {
-                self.corridor_land_mut(team)[cell_key] = 1;
-                if land_reach[cell_key] == 0 {
-                    touched.push(packed[i]);
-                }
-            }
-        }
-        built_cells
-    }
-
-    fn bridge_mask(&self, team: u8) -> &[u8] {
-        if team == OWNER_FRIENDLY {
-            &self.friendly_bridge_reachable
-        } else {
-            &self.hostile_bridge_reachable
-        }
-    }
-
-    fn bridge_mask_mut(&mut self, team: u8) -> &mut [u8] {
-        if team == OWNER_FRIENDLY {
-            &mut self.friendly_bridge_reachable
-        } else {
-            &mut self.hostile_bridge_reachable
-        }
-    }
-
-    fn corridor_land(&self, team: u8) -> &[u8] {
-        if team == OWNER_FRIENDLY {
-            &self.friendly_corridor_land
-        } else {
-            &self.hostile_corridor_land
-        }
-    }
-
-    fn corridor_land_mut(&mut self, team: u8) -> &mut [u8] {
-        if team == OWNER_FRIENDLY {
-            &mut self.friendly_corridor_land
-        } else {
-            &mut self.hostile_corridor_land
-        }
-    }
-
-    fn reconcile_corridor_land_nav(&mut self, specs: &[CorridorPathSpec]) -> bool {
-        let mut any = false;
-        for spec in specs {
-            if self.reconcile_packed_corridor_land(spec.team, &spec.path_keys, spec.built_cells) {
-                any = true;
-            }
-        }
-        any
-    }
-
-    fn reconcile_packed_corridor_land(
-        &mut self,
-        team: u8,
-        packed: &[i32],
-        built_cells: i32,
-    ) -> bool {
-        if packed.is_empty() || built_cells <= 0 {
-            return false;
-        }
-        let n = (built_cells as usize).min(packed.len());
-        let mut any = false;
-        for i in 0..n {
-            let cell_key = packed[i] as usize;
-            if cell_key >= self.tile_count {
-                continue;
-            }
-            let gx = (cell_key as i32) % self.grid_w;
-            let gy = (cell_key as i32) / self.grid_w;
-            if land_at(&self.land_mask, self.grid_w, self.grid_h, gx, gy)
-                && self.corridor_land_mut(team)[cell_key] == 0
-            {
-                self.corridor_land_mut(team)[cell_key] = 1;
-                any = true;
-            }
-        }
-        any
     }
 
     fn apply_claimable_cells(&mut self, cell_indices: &[i32]) -> ClaimableDelta {
@@ -455,6 +314,30 @@ impl TerritoryKernel {
             self.pressure_hostile[idx] = 0.0;
             self.mark_active_dirty(idx);
         }
+    }
+
+    /// Air strike: open one land cell for ownership (no island flood).
+    /// Stamps team reachability so later reachability rebuilds do not wipe the paint.
+    pub fn open_claimable_for_air_strike(&mut self, idx: usize, team: u8) {
+        if idx >= self.tile_count {
+            return;
+        }
+        let gx = (idx as i32) % self.grid_w;
+        let gy = (idx as i32) / self.grid_w;
+        if !self.is_land(gx, gy) {
+            return;
+        }
+        if self.claimable_mask[idx] != 0 {
+            return;
+        }
+        if team == OWNER_FRIENDLY {
+            if idx < self.friendly_reachable.len() {
+                self.friendly_reachable[idx] = 1;
+            }
+        } else if idx < self.hostile_reachable.len() {
+            self.hostile_reachable[idx] = 1;
+        }
+        self.apply_claimable_at(idx, gx, gy, true);
     }
 
     fn is_claimable_index(&self, idx: usize) -> bool {

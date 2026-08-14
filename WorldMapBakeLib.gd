@@ -194,6 +194,10 @@ static func _near_coast(bits: PackedByteArray, w: int, h: int, gx: int, gy: int)
 	return false
 
 
+static func sanitize_land_mask(bits: PackedByteArray, w: int, h: int) -> void:
+	_sanitize_land_mask(bits, w, h)
+
+
 static func _sanitize_land_mask(bits: PackedByteArray, w: int, h: int) -> void:
 	for gy in range(h):
 		for gx in range(w):

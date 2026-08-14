@@ -330,6 +330,19 @@ func apply_viewer_resolve_cap() -> void:
 	_stall_rounds_limit = STALL_ROUNDS_VIEWER
 
 
+## Dynamic active-set soft-cap under Godot frame pressure (Rust live only).
+func set_active_set_soft_cap(cap: int) -> void:
+	if rust_field == null or not rust_field.ready:
+		return
+	rust_field.set_active_set_soft_cap(cap)
+
+
+func get_active_set_soft_cap() -> int:
+	if rust_field == null or not rust_field.ready:
+		return WorldConquestConfigLib.SIM_ACTIVE_SOFT_CAP
+	return rust_field.get_active_set_soft_cap()
+
+
 func advance_dt(delta: float, max_steps: int = 12) -> Dictionary:
 	if finished or battle_data == null or tile_control == null:
 		return {"steps": 0, "finished": finished, "sim_time": sim_time}
@@ -418,6 +431,28 @@ func claimable_at_index(idx: int) -> bool:
 	if tile_control != null and idx >= 0 and idx < tile_control.claimable_mask.size():
 		return tile_control.claimable_mask[idx] != 0
 	return false
+
+
+## PackedByteArray for AI planner snapshots — prefer Rust under grid authority.
+func claimable_mask_for_ai() -> PackedByteArray:
+	if grid_authority_active() and rust_field != null:
+		var rust_mask: PackedByteArray = rust_field.get_claimable_mask()
+		if not rust_mask.is_empty():
+			return rust_mask
+	if tile_control != null:
+		return tile_control.claimable_mask
+	return PackedByteArray()
+
+
+## Owners PackedByteArray for AI planner snapshots — prefer Rust under grid authority.
+func owners_for_ai() -> PackedByteArray:
+	if grid_authority_active() and rust_field != null:
+		var rust_owners: PackedByteArray = rust_field.get_owners()
+		if not rust_owners.is_empty():
+			return rust_owners
+	if tile_control != null:
+		return tile_control.owners
+	return PackedByteArray()
 
 
 func claimable_tile_count_live() -> int:
@@ -588,6 +623,7 @@ func _configure_world_agents() -> void:
 		"max_hp": cfg.SOLDIER_MAX_HP,
 		"move_cells_per_sec": cfg.SOLDIER_MOVE_CELLS_PER_SEC,
 		"infra_move_mult": cfg.SOLDIER_INFRA_MOVE_MULT,
+		"ferry_move_mult": cfg.SOLDIER_FERRY_MOVE_MULT,
 		"aura_pressure": cfg.SOLDIER_AURA_PRESSURE,
 		"shoot_erode_per_sec": cfg.SOLDIER_SHOOT_ERODE_PER_SEC,
 		"orphan_dps": cfg.SOLDIER_ORPHAN_DPS,
@@ -605,7 +641,14 @@ func _configure_world_agents() -> void:
 func _configure_content_tables() -> void:
 	if rust_field == null:
 		return
-	EconomyLib.ensure_loaded(RunState.economy_pack_id)
+	# Headless -s smokes do not load autoloads; avoid naming RunState as an identifier.
+	var pack_id: String = "default"
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null and tree.root != null:
+		var rs = tree.root.get_node_or_null("/root/RunState")
+		if rs != null and "economy_pack_id" in rs:
+			pack_id = str(rs.economy_pack_id)
+	EconomyLib.ensure_loaded(pack_id)
 	if rust_field.has_method("configure_content_tables"):
 		rust_field.configure_content_tables(EconomyLib.export_rust_bundle())
 
@@ -672,7 +715,13 @@ func get_bomber_snapshot() -> Dictionary:
 func configure_builders(player_home: Vector2i, enemy_home: Vector2i) -> void:
 	if rust_field == null:
 		return
-	EconomyLib.ensure_loaded(RunState.economy_pack_id)
+	var pack_id: String = "default"
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree != null and tree.root != null:
+		var rs = tree.root.get_node_or_null("/root/RunState")
+		if rs != null and "economy_pack_id" in rs:
+			pack_id = str(rs.economy_pack_id)
+	EconomyLib.ensure_loaded(pack_id)
 	var cfg := WorldConquestConfigLib
 	rust_field.configure_builders(
 		{

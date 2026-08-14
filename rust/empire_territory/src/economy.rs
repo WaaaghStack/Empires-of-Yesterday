@@ -28,10 +28,11 @@ pub struct ContentTables {
 impl Default for ContentTables {
     fn default() -> Self {
         let mut spawn_resources = [[0.0f32; RESOURCE_SLOTS]; MAX_KINDS];
-        spawn_resources[KIND_BARRACKS as usize][0] = 3.0;
-        spawn_resources[KIND_HANGAR as usize][0] = 3.0;
+        // Match WorldConquestConfig / EconomyCatalog: Au+Ve soldiers, Au+Em bombers.
+        spawn_resources[KIND_BARRACKS as usize] = [3.0, 1.0, 0.0];
+        spawn_resources[KIND_HANGAR as usize] = [3.0, 0.0, 1.0];
         Self {
-            structure_build_sec: [5.0, 60.0, 0.0, 60.0],
+            structure_build_sec: [5.0, 5.0, 0.0, 5.0],
             structure_max_health: [10.0; MAX_KINDS],
             structure_logistics_drain: [0.04, 0.06, 0.03, 0.06],
             structure_spawn_interval: [0.0, 10.0, 0.0, 10.0],
@@ -39,7 +40,7 @@ impl Default for ContentTables {
             structure_spawn_unit: [-1, UNIT_SOLDIER as i32, -1, UNIT_BOMBER as i32],
             structure_spawn_resources: spawn_resources,
             unit_global_cap: [100, 100],
-            unit_upkeep_resources: [[0.15, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            unit_upkeep_resources: [[0.15, 0.05, 0.0], [0.0, 0.0, 0.0]],
         }
     }
 }

@@ -262,6 +262,20 @@ func set_home_inject_enabled(enabled: bool) -> void:
 		_sim.call("set_home_inject_enabled", enabled)
 
 
+## Dynamic active-set soft-cap (default 24k; Godot may tighten under frame pressure).
+func set_active_set_soft_cap(cap: int) -> void:
+	if not ready or _sim == null:
+		return
+	if _sim.has_method("set_active_set_soft_cap"):
+		_sim.call("set_active_set_soft_cap", maxi(cap, 1))
+
+
+func get_active_set_soft_cap() -> int:
+	if not ready or _sim == null or not _sim.has_method("get_active_set_soft_cap"):
+		return WorldConquestConfigLib.SIM_ACTIVE_SOFT_CAP
+	return int(_sim.call("get_active_set_soft_cap"))
+
+
 func consume_owner_overlay_delta() -> Dictionary:
 	var out := {
 		"indices": last_display_delta_indices,
@@ -405,11 +419,28 @@ func get_owners() -> PackedByteArray:
 		return _sim.call("get_owners")
 	return PackedByteArray()
 
+
+func get_claimable_mask() -> PackedByteArray:
+	if not ready or _sim == null:
+		return PackedByteArray()
+	if _sim.has_method("get_claimable_mask"):
+		return _sim.call("get_claimable_mask")
+	return PackedByteArray()
+
+
 func get_owner_display_r8() -> PackedByteArray:
 	if not ready or _sim == null:
 		return PackedByteArray()
 	if _sim.has_method("get_owner_display_r8"):
 		return _sim.call("get_owner_display_r8")
+	return PackedByteArray()
+
+
+func get_pressure_depth_r8(vis_ref: float = 48.0) -> PackedByteArray:
+	if not ready or _sim == null:
+		return PackedByteArray()
+	if _sim.has_method("get_pressure_depth_r8"):
+		return _sim.call("get_pressure_depth_r8", vis_ref)
 	return PackedByteArray()
 
 
@@ -1056,7 +1087,9 @@ func apply_world_edit_result(tile_control: BattleTileControlLib, result: Diction
 	var delta: Dictionary = result.get("claimable_delta", {})
 	var indices: PackedInt32Array = delta.get("indices", PackedInt32Array())
 	var n: int = indices.size()
-	if n > 0 and not grid_authority_enabled() and tile_control != null:
+	# Always mirror claimable/owner deltas into GDScript for AI snapshots + HUD consumers.
+	# Under grid authority Rust remains the query authority; this keeps claimable_mask fresh.
+	if n > 0 and tile_control != null:
 		var claimable: PackedByteArray = delta.get("claimable", PackedByteArray())
 		var owners: PackedByteArray = delta.get("owners", PackedByteArray())
 		var elevation: PackedFloat32Array = delta.get("elevation", PackedFloat32Array())

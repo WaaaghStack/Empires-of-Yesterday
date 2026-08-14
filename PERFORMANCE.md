@@ -8,11 +8,13 @@ Live Play is **WorldDataset in Rust** (sim engine) + **SCD1 domain versioned pul
 
 | Concern | Live behavior | Where |
 |---------|---------------|--------|
-| **SCD1 domain pulls** | Per-domain `pull_domain_since` rows with `version > last`; full seed only at start / allow-listed gap; structure tombstones via `removed_ids` | `domain_version.rs`, `Scd1DomainPull.gd`, `WorldConquestScreen._flush_live_presentation_delta` |
-| **Roads MultiMesh** | **Append-only** instance growth on path/network extend; full rewrite only on remove/reset | `EarthGlobeMap._append_road_multimesh_transforms` |
+| **SCD1 domain pulls** | Per-domain `pull_domain_since` rows with `version > last`; full seed only at start / allow-listed gap; structure tombstones via `removed_ids`. Live domains: territory, structures, agents, bombers, wallet (**roads retired — R1**) | `domain_version.rs`, `Scd1DomainPull.gd`, `WorldConquestScreen._flush_live_presentation_delta` |
+| **Roads MultiMesh** | **R1 retired** — `sync_roads` / `_setup_road_multimeshes` are no-ops (no ribbon paint) | `EarthGlobeMap.sync_roads` |
 | **Sim catch-up cap** | When prior frame > `FRAME_BUDGET_MS` (16 ms), cap catch-up to **1** sim step | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` |
-| **Construction drain order** | Ordered queue drain: corridors → beachhead → roads → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu (never same frame as roads/markers/overlay; gpu blocked N+1 after overlay) | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` |
-| **Unit replan FPS** | Path-block waits (no BFS); free-goal miss skip + soft goal claims; O(1) occupancy maps | `agents.rs`, `bombers.rs` |
+| **End-game FPS ladder** | Soft-cap tighten at >20 ms (8k) / critical at >28 ms (5k); **sticky hysteresis** — once lowered, requires `SOFT_CAP_HEALTHY_FRAMES_TO_RAISE` (45) consecutive frames with prior ≤ `FRAME_BUDGET_MS` before raising to 24k; while soft-cap < DEFAULT, force `sim_max_steps ≤ 1` (no catch-up to 4); skip 1 sim frame at >28 ms (resume next); defer AI at >16 ms; skip markers/gpu/overlay/presentation on skip-sim frames | `WorldConquestConfig` `FRAME_MS_*` / `SOFT_CAP_*`, `WorldConquestScreen._process` / `_soft_cap_target_for_prior_ms` |
+| **Construction drain order** | Ordered queue drain: beachhead → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu. Corridor/road slots idle under R1 | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` |
+| **Unit replan FPS** | Path-block waits (no BFS); free-goal miss skip + soft goal claims; O(1) occupancy maps; ferry expand capped (`FERRY_MAX_EXPAND`); stuck replan backoff (`retarget_cd` never 0) | `agents.rs`, `bombers.rs`, `nav_rules.rs` |
+| **Late FPS / ferry thrash** | Primary late-game collapse was pathfind ferry thrash as free tiles shrink (sim phase ~89→269 ms; ferry used `tile_count` ~64k; stuck set `retarget_cd=0`; `SOLDIER_REPLANS_PER_TICK=20`). Soft-cap tighten is secondary. Fixes: ferry expand 8k, replan budget 6, bomber expand max 12k, stuck backoff | `nav_rules.rs`, `WorldConquestConfig`, `agents.rs` |
 
 Do not reintroduce PresentationTxn as the live paint path, per-step full pressure/R8 pulls, full structure snapshots every frame, or uncapped multi-step catch-up on live.
 
@@ -38,7 +40,7 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | World Conquest 60 Hz frame (sim + overlay FFI) | p99 < 16 ms, min FPS ≥ 58 (`BATTLE_FPS_BENCH=1`) |
 | Mid-game presentation (12 structures, live screen) | p99 ≤ 20 ms always-on QA (`_validate_midgame_presentation_fps`) |
 | CPU resolve, 96×72 fixture | `resolve_ms < 3000` (legacy QA gate) |
-| Overlay refresh (pressure mode) | `OVERLAY_UPDATES_PER_SEC` = 3 Hz |
+| Overlay refresh (ownership + depth R8) | `OVERLAY_UPDATES_PER_SEC` = 3 Hz — depth-tinted R8 upload; depth tint `OVERLAY_DEPTH_UPDATES_PER_SEC` = 0.25 Hz (every 4 s) |
 | Soldier dot refresh | `SOLDIER_VISUAL_UPDATES_PER_SEC` = 4 Hz |
 | Sim stepping | `SIM_DT` = 1/14 s, ≤ `SIM_MAX_STEPS_PER_FRAME` (4) per frame |
 
@@ -51,39 +53,42 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 | Ping-pong pressure buffers, fixed 4-neighbor scratch | `BattleTileControl.gd` | No allocations in the flow inner loop |
 | Cancel pass on active tiles only | `BattleTileControl.gd` | Cheaper overlap pass as fronts grow |
 | Incremental ownership / conquest counts | `BattleTileControl.gd`, `BattleTerritorySim.gd` | No full-grid recount per round |
-| **Frame-budgeted construction queue** | `OutpostConstructionQueue.gd`, `WorldConquestScreen._drain_outpost_construction_queue` | `_advance_outpost_construction` only enqueues; drain processes ≤1 road/corridor/marker sid per frame via `sync_bridge_corridors_for_sids` (no full-map sync) |
+| **Frame-budgeted construction queue** | `OutpostConstructionQueue.gd`, `WorldConquestScreen._drain_outpost_construction_queue` | Instant ACTIVE places enqueue markers/overlay only; corridor/road drains idle under R1 |
 | Bridge → backend claimable sync throttled | `WorldConquestConfig.BRIDGE_BACKEND_SYNC_INTERVAL_SEC` (0.2 s) | Legacy interval; construction drain replaces time-based flush for CONNECTING growth |
 | **Fast owner visual on backend sync** | `WorldConquestScreen._apply_owner_visual_from_backends` | Uses Rust `get_owner_display_r8` bytes path instead of 65k GDScript overlay loop |
 | **Incremental owner sync (Rust)** | `sync_owners_delta`, `BattleTerritoryRustBackend._apply_owners_delta_to_tile_control` | Only changed owner cells cross FFI each sim batch |
-| **Option A pressure pull** | `get_pressure_*` at overlay tick only | ~518 KB pressure FFI avoided per sim step |
+| **Option A pressure pull** | `get_pressure_*` at overlay tick only (when `OVERLAY_OWNERS_ONLY` is false) | ~518 KB pressure FFI avoided per sim step |
+| **Ownership-only pull contract** | `OVERLAY_OWNERS_ONLY` = true — owner R8 via `get_owner_display_r8` + deltas; depth tint via `get_pressure_depth_r8` at ≤0.25 Hz (`OVERLAY_DEPTH_TINT`); sim never waits on full pressure layers | `WorldConquestConfig`, `BattleTerritoryRustBackend` |
+| **Active-set soft cap (tier-2)** | When over soft-cap (default `ACTIVE_SET_SOFT_CAP` / `SOFT_CAP_DEFAULT` = 24k), dry interiors pruned first; wet deep interiors pruned second — frontier/contested/tips protected. Godot may tighten to `SOFT_CAP_STRESS` (8k) or `SOFT_CAP_CRITICAL` (5k) via `set_active_set_soft_cap` when prior frame > `FRAME_MS_TIGHTEN_SOFT_CAP` / `FRAME_MS_SKIP_SIM`. Soft-cap is **sticky** (no raise until `SOFT_CAP_HEALTHY_FRAMES_TO_RAISE` healthy frames) so post-skip healthy `prior_ms` cannot snap back to 24k + 4-step catch-up. Rust enforces the runtime cap before every gradient pass. | `sim.rs` `enforce_active_set_soft_cap`, `TerritorySim.set_active_set_soft_cap`, `WorldConquestScreen._soft_cap_target_for_prior_ms` |
 | **Incremental owner overlay (Rust live)** | `consume_owner_overlay_delta` + `apply_ownership_overlay_delta` | One batched delta upload per frame; `set_data` not per-pixel |
-| **Unified visual drain queue** | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` | Ordered drain: corridors → beachhead → roads → markers → overlay (≤`OVERLAY_DELTA_CELLS_PER_FRAME`) → gpu (never same frame as roads/markers/overlay; gpu blocked N+1 after overlay) |
+| **Unified visual drain queue** | `OutpostConstructionQueue`, `WorldConquestScreen._drain_outpost_construction_queue` | Ordered drain: beachhead → markers → overlay → gpu (corridor/road slots retired under R1) |
 | **Overlay delta enqueue** | `WorldConquestScreen._enqueue_ownership_overlay_delta` | Consumes Rust delta into queue; apply happens in drain, not inline in `_process` |
 | **Deferred owner GPU upload** | `OutpostConstructionQueue.request_gpu_upload`, `EarthGlobeMap.flush_pending_owner_gpu_upload` | GPU commit only via queue drain slot; respects `OVERLAY_GPU_UPLOAD_MAX_HZ` |
 | **Budget-aware sim catch-up** | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` | Caps `advance_dt` to 1 step when prior frame exceeded `FRAME_BUDGET_MS` (16 ms) |
-| **Incremental roads/markers** | `EarthGlobeMap.sync_roads(changed_sids)`, `refresh_connecting_markers` | Path cell growth syncs only dirty structure ids; pulse refresh touches connecting/building markers only |
-| **Road ribbons (3-lane)** | `EarthGlobeMap._ribbon_lane_transforms` | MultiMesh black\|white\|black lanes ~3 cell widths; equirect cell-paint disabled (`ROAD_CELL_PAINT=false`) |
+| **End-game overload gates** | `WorldConquestScreen._process` | Sticky soft-cap + while lowered force ≤1 sim step; >16 ms: defer AI + skip construction drain on fat-sim frames; >20 ms: soft-cap ≤8k + skip overlay reconcile/depth + halve agent/bomber pulls; >28 ms: soft-cap 5k + skip sim 1 frame then resume (also skips AI/presentation/markers) |
+| **Incremental markers** | `EarthGlobeMap.refresh_connecting_markers` | Pulse refresh touches building markers only (roads MultiMesh retired under R1) |
+| **Road ribbons (3-lane)** | *(retired R1)* | `EarthGlobeMap.sync_roads` is a no-op |
 | **Precomputed border mask** | `EarthGlobeMap._border_bytes_cache`, `ownership_display.gdshader` | 2 texture fetches per fragment instead of 9 |
 | **Spawner FFI cache** | `BattleTerritoryRustBackend._maybe_update_spawners` | Skips `update_spawners` when placed spawners unchanged |
 | **GPU fluid shader** | `shaders/globe/fluid_display.gdshader`, `EarthGlobeMap.apply_fluid_from_pressures_gpu` | No CPU `bake_fluid_rgba` on live path; camera-facing tex upload |
 | **Incremental active set** | `TerritoryKernel.patch_active_indices`, `BattleTileControl._patch_active_indices` | Patches frontier tiles instead of full 64k scan when dirty set is small |
-| **Claimable delta sync** | `update_claimable_delta`, `BattleTileControl.take_claimable_dirty_indices` | Bridge extend sends changed cells only |
+| **Claimable delta sync** | `update_claimable_delta`, `BattleTileControl.take_claimable_dirty_indices` | Beachhead / claimable extend sends changed cells only |
 | **Batched soldier aura** | `AgentLayer.apply_batched_aura` | One capped pressure add per tile per team per step |
 | **Stamped soldier BFS** | `AgentLayer.plan_march_route` | Generation-stamped visit marks — no full-grid `fill` per replan |
 | **Budgeted soldier replans** | `AgentLayer.run_budgeted_replans` | Cap BFS replans per tick; urgent stuck slots reserved |
 | **Frontier-stale replans** | `TerritoryKernel.nav_dirty_stamp` | Replan only when ownership/claimable/nav masks change near agent |
-| **Portal route graph** | `RoutePlanner` + `PortalGraph` | Rebuild on outpost/bridge change; scoped BFS per click |
+| **Portal route graph** | `RoutePlanner` + `PortalGraph` | Legacy placement planner; R1 Play placement is instant (no route gate) |
 | **Async route worker** | `RoutePlanner` background thread | Placement/hover pathfind off main thread |
 | **Rust gradient in-place** | `sim.rs gradient_flow_pass_into` | No per-pass full-grid buffer clones |
 | **Agent snapshot buffer reuse** | `TerritorySim.agent_snap_*` in `lib.rs` | Reuses Vec buffers across 4 Hz visual ticks |
 | **SubViewport when visible** | `WorldConquestScreen` `UPDATE_WHEN_VISIBLE` | Skips 3D render when play area hidden |
-| **Surface position LUT** | `EarthGlobeMap._surface_lut` | Soldiers/markers/roads skip per-frame trig |
-| **Road/link segment pools** | `EarthGlobeMap._road_seg_pool`, `_link_seg_pool` | Reuses `MeshInstance3D` nodes |
-| **Incremental road MultiMesh** | `EarthGlobeMap._append_road_multimesh_transforms` | Path/network growth appends instances only; full rewrite only on remove/reset |
+| **Surface position LUT** | `EarthGlobeMap._surface_lut` | Soldiers/markers skip per-frame trig |
+| **Road/link segment pools** | *(retired R1)* | Road MultiMesh idle |
+| **Incremental road MultiMesh** | *(retired R1)* | `sync_roads` no-op |
 | **SCD1 domain pulls (live)** | `Scd1DomainPull.gd` + `pull_domain_since` | Rust main tables + per-domain epochs; Godot applies rows/tombstones only |
 | **PresentationTxn (legacy/QA)** | `presentation_txn.rs` + `pull_presentation_txn` | Not live Play paint — QA/goldens only |
 | **Event-driven route portals** | `WorldConquestScreen._ensure_route_portals_for_team` | Rebuild when versions or active team change — not on every place/pathfind |
-| **Dirty-flag maintenance** | `WorldConquestScreen._has_active_construction`, `_bridges_repaired` | Skips outpost/bridge loops when idle |
+| **Dirty-flag maintenance** | `WorldConquestScreen._has_active_construction`, `_bridges_repaired` | Skips idle construction loops; one-shot leftover corridor clear under R1 |
 | **Frame phase profiler** | `FrameBudgetProfiler.gd` | Always samples `_process` ms for F3 HUD; spike logging when `BATTLE_FRAME_BUDGET_LOG=1`; fps_drop tags `likely_cpu`/`likely_gpu` + phase dump |
 | Globe meshes coarser than sim grid | `GLOBE_MESH_W/H` 144×72, `FLUID_MESH_W/H` 180×90 | GPU budget independent of sim resolution |
 | GPU compute backend (optional) | `BattleTerritoryGpuField.gd`, `shaders/territory/*.glsl` | Flow on GPU; throttled owner readback; skips `pack_display` when owners-only |
@@ -92,7 +97,24 @@ Engine: `Engine.max_fps = 60`, vsync on (`project.godot`).
 
 - `OUTPOST_PATHFIND_MAX_EXPAND` (12 000) caps route floods; hover preview uses greedy-only (`OUTPOST_HOVER_ALLOW_ASTAR=false`), replans at most every `OUTPOST_HOVER_REPLAN_SEC` (0.32 s), and draws ≤ `OUTPOST_PREVIEW_MAX_SEGMENTS` (48) 3D segments.
 - Land-component IDs are precomputed once per map (`prepare_land_components`) so placement prechecks never flood-fill.
-- Resource haul visuals capped at `RESOURCE_MAX_VISUAL_PULSES` (36); economy still credits all yield.
+- Resource miner shockwave visuals capped at `RESOURCE_MAX_VISUAL_SHOCKWAVES` (10); economy still credits all yield.
+- Marker refresh + owner GPU upload defer when prior frame exceeded `FRAME_BUDGET_MS` / `FRAME_MS_DEFER_AI` (`WorldConquestScreen._drain_outpost_construction_queue`).
+- Overlay apply also re-queues when prior frame > `FRAME_MS_TIGHTEN_SOFT_CAP`; fat-sim frames skip the entire construction drain.
+
+## End-game FPS knobs (`WorldConquestConfig`)
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `SOFT_CAP_DEFAULT` | 24000 | Normal active-set soft-cap |
+| `SOFT_CAP_STRESS` | 8000 | Soft-cap when prior frame > `FRAME_MS_TIGHTEN_SOFT_CAP` / preempt |
+| `SOFT_CAP_CRITICAL` | 5000 | Soft-cap when prior frame > `FRAME_MS_SKIP_SIM` |
+| `SOFT_CAP_HEALTHY_FRAMES_TO_RAISE` | 45 | Consecutive budget-healthy frames before raising sticky soft-cap |
+| `SOFT_CAP_LOG_INTERVAL_MS` | 3000 | Min gap between soft_cap RunLog lines if thrash returns |
+| `SOLDIER_REPLANS_PER_TICK` | 6 | Soldier BFS replan budget/tick (was 20; late ferry thrash) |
+| `BOMBER_SEARCH_EXPAND_MAX` | 12000 | Bomber strike BFS hard cap (was 40000) |
+| `FRAME_MS_DEFER_AI` | 16 | Defer enemy/player AI off the same frame as a sim step; tighten marker/gpu gate |
+| `FRAME_MS_TIGHTEN_SOFT_CAP` / `FRAME_MS_SOFT_CAP_PREEMPT` | 20 | Apply `SOFT_CAP_STRESS`; skip overlay reconcile/depth tint; halve agent pulls |
+| `FRAME_MS_SKIP_SIM` | 28 | Skip `advance_dt` for one frame (+ AI/presentation), then force resume |
 
 ## Environment variables
 
@@ -128,7 +150,7 @@ Hot paths emit `RunLog.info` / `warn` lines with an `action=` prefix plus fps/cp
 | `action=overlay:delta` | Incremental owner overlay patch (`cells=N`) |
 | `action=resources` | Resource tick with pulses or link dirty |
 | `action=gpu_upload` | Pending owner texture flush committed |
-| `action=roads` | Road mesh sync |
+| `action=roads` | *(legacy)* Road mesh sync — idle under R1 |
 | `action=markers` | Structure marker refresh |
 | `action=fps_drop` | Sustained FPS &lt; 42; `note=likely_cpu` if CPU p99/last &gt; 12 ms else `likely_gpu`; includes `phases=` when available |
 
@@ -143,6 +165,6 @@ Session logs batch-flush every **0.25 s** (immediate on window close), max **10 
 ## Known costs to watch
 
 - `build_replay_tape(-1)` on the world map runs a full battle and can take many minutes — always pass a round cap in tests (QA bake compare uses 64).
-- `operational_sources` now includes bridge landings; if bridge counts grow large, watch multi-source BFS cost in `nearest_path_to_target`.
+- R1: placement no longer runs multi-source BFS / bridge landings; leftover route helpers are dead weight for Play.
 - Owner readback from GPU backend is throttled via `readback_owners_if_due` (every 4 rounds on large maps); HUD counters mirror sim-side counts.
 - Soldier march uses greedy steps toward a cached goal. BFS replans are **budgeted** (`SOLDIER_REPLANS_PER_TICK`), **frontier-triggered** (`nav_dirty_stamp`), with a long fallback interval (`SOLDIER_REPLAN_FALLBACK_ROUNDS`).

@@ -62,6 +62,9 @@ func enqueue_overlay_delta(indices: PackedInt32Array, values: PackedByteArray) -
 	var n: int = mini(indices.size(), values.size())
 	if n <= 0:
 		return
+	# B7: refuse to mix owner-enum with display-R8 in one queue.
+	if not _overlay_indices.is_empty() and _overlay_is_r8:
+		return
 	if _overlay_indices.is_empty():
 		_overlay_is_r8 = false
 	for i in range(n):
@@ -75,11 +78,20 @@ func enqueue_overlay_display_delta(
 	var n: int = mini(indices.size(), values.size())
 	if n <= 0:
 		return
+	# B7: refuse to mix owner-enum with display-R8 in one queue.
+	if not _overlay_indices.is_empty() and not _overlay_is_r8:
+		return
 	if _overlay_indices.is_empty():
 		_overlay_is_r8 = true
 	for i in range(n):
 		_overlay_indices.append(indices[i])
 		_overlay_values.append(values[i])
+
+
+func clear_overlay_queue() -> void:
+	_overlay_indices = PackedInt32Array()
+	_overlay_values = PackedByteArray()
+	_overlay_is_r8 = false
 
 
 func request_gpu_upload() -> void:
@@ -166,6 +178,8 @@ func drain_plan(current_frame: int) -> Dictionary:
 
 	var overlay_n: int = 0
 	var cap: int = CFG.OVERLAY_DELTA_CELLS_PER_FRAME
+	if _overlay_indices.size() >= CFG.OVERLAY_DELTA_BURST_PENDING_THRESHOLD:
+		cap = CFG.OVERLAY_DELTA_BURST_CELLS_PER_FRAME
 	if not _overlay_indices.is_empty():
 		overlay_n = mini(_overlay_indices.size(), cap)
 		plan.overlay_indices = _overlay_indices.slice(0, overlay_n)
@@ -187,9 +201,12 @@ func drain_plan(current_frame: int) -> Dictionary:
 		or not plan.marker_sids.is_empty()
 		or overlay_n > 0
 	)
-	if not visual_drained and _gpu_upload_pending:
+	# Allow GPU same frame when draining a burst backlog so paint isn't starved for seconds.
+	var allow_gpu_with_overlay: bool = overlay_n >= CFG.OVERLAY_DELTA_CELLS_PER_FRAME
+	if _gpu_upload_pending and (not visual_drained or allow_gpu_with_overlay):
 		var overlay_cooldown_ok: bool = (
-			_last_overlay_drain_frame < 0
+			allow_gpu_with_overlay
+			or _last_overlay_drain_frame < 0
 			or current_frame > _last_overlay_drain_frame + 1
 		)
 		if overlay_cooldown_ok:

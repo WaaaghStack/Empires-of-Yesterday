@@ -9,8 +9,10 @@ pub const ADAPTIVE_FRONTIER_EPS: i32 = 16;
 pub const ACTIVE_PRESSURE_EPS: f32 = 0.05;
 pub const ACTIVE_REBUILD_INTERVAL: i32 = 3;
 /// Soft cap on active-set size under dual-front sprawl (B7).
-/// When exceeded after patch/rebuild, low-pressure interior tiles are pruned.
-pub const ACTIVE_SET_SOFT_CAP: usize = 12_000;
+/// When exceeded after patch/rebuild, dry interiors are pruned first (tier-1);
+/// if still over cap, wet deep interiors are pruned (tier-2) while contested /
+/// frontier / spreading tips stay protected so growth stays blob-like, not spines.
+pub const ACTIVE_SET_SOFT_CAP: usize = 24_000;
 /// Max dirty cells processed by an incremental active-set patch per call (B7).
 pub const PATCH_ACTIVE_INDICES_BUDGET: usize = 4096;
 
@@ -23,7 +25,7 @@ pub const OWNER_UNCLAIMABLE: u8 = 4;
 pub(crate) const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
 #[inline]
-fn effective_height(pressure: f32, elevation: f32) -> f32 {
+pub(crate) fn effective_height(pressure: f32, elevation: f32) -> f32 {
     pressure + elevation
 }
 
@@ -67,6 +69,8 @@ pub struct TerritoryKernel {
     pub graph_topology: bool,
     pub home_inject_enabled: bool,
     pub spawner_inject_interval_rounds: i32,
+    /// R1: logistics strain is gone with the roads — pinned at 1.0 and no longer applied to
+    /// spawn rates. Kept so the Godot strain dictionary keeps a stable shape.
     pub logistics_friendly_output_mult: f32,
     pub logistics_hostile_output_mult: f32,
     territory_round_index: u32,
@@ -92,6 +96,8 @@ pub struct TerritoryKernel {
     gradient_pass_seen: Vec<u8>,
     active_dirty_mark: Vec<u8>,
     active_dirty_list: Vec<usize>,
+    /// Runtime soft-cap for active-set prune (default ACTIVE_SET_SOFT_CAP; Godot may tighten under load).
+    pub active_set_soft_cap: usize,
     owner_dirty_idx: Vec<i32>,
     owner_dirty_val: Vec<u8>,
     /// Pre-mapped R8 ownership overlay (0/128/192/255 + seam); authoritative display buffer.
@@ -171,6 +177,7 @@ impl TerritoryKernel {
             gradient_pass_seen: vec![0; tile_count],
             active_dirty_mark: vec![0; tile_count],
             active_dirty_list: Vec::new(),
+            active_set_soft_cap: ACTIVE_SET_SOFT_CAP,
             owner_dirty_idx: Vec::new(),
             owner_dirty_val: Vec::new(),
             owner_display: Vec::new(),
@@ -346,25 +353,26 @@ impl TerritoryKernel {
         self.territory_round_index = self.territory_round_index.saturating_add(1);
 
         if self.home_inject_enabled && self.should_inject_pressure_sources_this_round() {
-            self.inject_home(
-                self.player_home_idx,
-                self.friendly_spawn_rate * self.logistics_friendly_output_mult,
-                true,
-            );
-            self.inject_home(
-                self.enemy_home_idx,
-                self.hostile_spawn_rate * self.logistics_hostile_output_mult,
-                false,
-            );
+            self.inject_home(self.player_home_idx, self.friendly_spawn_rate, true);
+            self.inject_home(self.enemy_home_idx, self.hostile_spawn_rate, false);
         }
         if self.should_inject_pressure_sources_this_round() {
             self.inject_placed_spawners();
+        }
+
+        // Enforce runtime soft-cap BEFORE gradient so Godot-tightened caps bind every step.
+        if self.use_active_set {
+            self.enforce_active_set_soft_cap();
         }
 
         self.run_gradient_cancel_sync_pass();
         let frontier_delta = (self.friendly_tiles - self.prev_friendly_tiles).unsigned_abs()
             + (self.hostile_tiles - self.prev_hostile_tiles).unsigned_abs();
         if self.use_adaptive_double_pass && frontier_delta > ADAPTIVE_FRONTIER_EPS as u32 {
+            // Re-enforce after first pass (halo growth) before the adaptive second pass.
+            if self.use_active_set {
+                self.enforce_active_set_soft_cap();
+            }
             self.run_gradient_cancel_sync_pass();
         }
 
@@ -471,9 +479,9 @@ impl TerritoryKernel {
                 continue;
             }
             let amount = if sp.team == OWNER_FRIENDLY {
-                self.friendly_spawn_rate * self.logistics_friendly_output_mult
+                self.friendly_spawn_rate
             } else {
-                self.hostile_spawn_rate * self.logistics_hostile_output_mult
+                self.hostile_spawn_rate
             };
             let is_friendly = sp.team == OWNER_FRIENDLY;
             let si = self.cell_index(sp.gx, sp.gy);
@@ -501,8 +509,28 @@ impl TerritoryKernel {
 
     fn run_gradient_cancel_sync_pass(&mut self) {
         self.spread_pressure_gradient();
+        // Pressure-dirty cells (bombs/shoots/halo) must be in active_indices before
+        // cancel + ownership sync this round — dirty list alone is flushed only after sync.
+        self.promote_active_dirty_into_indices();
         self.cancel_overlapping_pressure();
         self.sync_ownership_from_pressures();
+    }
+
+    /// Ensure pending active_dirty cells participate in cancel/ownership this pass.
+    fn promote_active_dirty_into_indices(&mut self) {
+        if !self.use_active_set || self.active_dirty_list.is_empty() {
+            return;
+        }
+        for &idx in &self.active_dirty_list.clone() {
+            if idx >= self.tile_count || self.claimable_mask[idx] == 0 {
+                continue;
+            }
+            if self.active_seen[idx] != 0 {
+                continue;
+            }
+            self.active_indices.push(idx);
+            self.active_seen[idx] = 1;
+        }
     }
 
     pub fn set_home_inject_enabled(&mut self, enabled: bool) {
@@ -529,88 +557,105 @@ impl TerritoryKernel {
             self.ph_next.copy_from_slice(&self.pressure_hostile);
         }
 
-        let (src, dst) = if friendly {
-            (&self.pressure_friendly, &mut self.pf_next)
-        } else {
-            (&self.pressure_hostile, &mut self.ph_next)
-        };
+        let mut promote_halo: Vec<usize> = Vec::new();
+        {
+            let (src, dst) = if friendly {
+                (&self.pressure_friendly[..], &mut self.pf_next[..])
+            } else {
+                (&self.pressure_hostile[..], &mut self.ph_next[..])
+            };
 
-        if self.use_active_set && !self.active_indices.is_empty() {
-            self.gradient_pass_seen.fill(0);
-            for &idx in &self.active_indices {
-                if idx < tile_count {
-                    self.gradient_pass_seen[idx] = 1;
+            if self.use_active_set && !self.active_indices.is_empty() {
+                self.gradient_pass_seen.fill(0);
+                for &idx in &self.active_indices {
+                    if idx < tile_count {
+                        self.gradient_pass_seen[idx] = 1;
+                    }
+                }
+                let active_copy: Vec<usize> = self.active_indices.clone();
+                self.gradient_halo_scratch.clear();
+                for &idx in &active_copy {
+                    Self::gradient_flow_tile_static(
+                        w,
+                        h,
+                        idx,
+                        src,
+                        dst,
+                        &self.claimable_mask,
+                        &self.elevation,
+                        &self.terrain_flow_mult,
+                        wrap_longitude,
+                        graph_topology,
+                        &neighbors,
+                        &neighbor_count,
+                        tile_count,
+                        Some(&mut self.gradient_halo_scratch),
+                        &mut self.gradient_pass_seen,
+                    );
+                }
+                let halo: Vec<usize> = self.gradient_halo_scratch.clone();
+                for &ni in &halo {
+                    Self::gradient_flow_tile_static(
+                        w,
+                        h,
+                        ni,
+                        src,
+                        dst,
+                        &self.claimable_mask,
+                        &self.elevation,
+                        &self.terrain_flow_mult,
+                        wrap_longitude,
+                        graph_topology,
+                        &neighbors,
+                        &neighbor_count,
+                        tile_count,
+                        None,
+                        &mut self.gradient_pass_seen,
+                    );
+                }
+                promote_halo = halo;
+            } else {
+                self.gradient_pass_seen.fill(0);
+                for gy in 0..h {
+                    for gx in 0..w {
+                        let idx = (gy * w + gx) as usize;
+                        if self.claimable_mask[idx] == 0 {
+                            continue;
+                        }
+                        Self::gradient_flow_tile_static(
+                            w,
+                            h,
+                            idx,
+                            src,
+                            dst,
+                            &self.claimable_mask,
+                            &self.elevation,
+                            &self.terrain_flow_mult,
+                            wrap_longitude,
+                            graph_topology,
+                            &neighbors,
+                            &neighbor_count,
+                            tile_count,
+                            None,
+                            &mut self.gradient_pass_seen,
+                        );
+                    }
                 }
             }
-            let active_copy: Vec<usize> = self.active_indices.clone();
-            self.gradient_halo_scratch.clear();
-            for &idx in &active_copy {
-                Self::gradient_flow_tile_static(
-                    w,
-                    h,
-                    idx,
-                    src,
-                    dst,
-                    &self.claimable_mask,
-                    &self.elevation,
-                    &self.terrain_flow_mult,
-                    wrap_longitude,
-                    graph_topology,
-                    &neighbors,
-                    &neighbor_count,
-                    tile_count,
-                    &mut self.gradient_halo_scratch,
-                    &mut self.gradient_pass_seen,
-                );
-            }
-            let halo: Vec<usize> = self.gradient_halo_scratch.clone();
-            for ni in halo {
-                Self::gradient_flow_tile_static(
-                    w,
-                    h,
-                    ni,
-                    src,
-                    dst,
-                    &self.claimable_mask,
-                    &self.elevation,
-                    &self.terrain_flow_mult,
-                    wrap_longitude,
-                    graph_topology,
-                    &neighbors,
-                    &neighbor_count,
-                    tile_count,
-                    &mut Vec::new(),
-                    &mut self.gradient_pass_seen,
-                );
-            }
-            return;
         }
 
-        self.gradient_pass_seen.fill(0);
-        for gy in 0..h {
-            for gx in 0..w {
-                let idx = (gy * w + gx) as usize;
-                if self.claimable_mask[idx] == 0 {
+        // Promote one-hop wet neighbors into the active set so cancel + ownership
+        // sync this round, instead of waiting on the next rebuild.
+        if !promote_halo.is_empty() {
+            for &ni in &promote_halo {
+                if ni >= self.tile_count || self.active_seen[ni] != 0 {
                     continue;
                 }
-                Self::gradient_flow_tile_static(
-                    w,
-                    h,
-                    idx,
-                    src,
-                    dst,
-                    &self.claimable_mask,
-                    &self.elevation,
-                    &self.terrain_flow_mult,
-                    wrap_longitude,
-                    graph_topology,
-                    &neighbors,
-                    &neighbor_count,
-                    tile_count,
-                    &mut Vec::new(),
-                    &mut self.gradient_pass_seen,
-                );
+                self.active_indices.push(ni);
+                self.active_seen[ni] = 1;
+                self.mark_active_dirty(ni);
             }
+            self.frontier_changed = true;
         }
     }
 
@@ -672,7 +717,7 @@ impl TerritoryKernel {
         graph_neighbors: &[[i32; 6]],
         neighbor_count: &[u8],
         tile_count: usize,
-        halo_out: &mut Vec<usize>,
+        mut halo_out: Option<&mut Vec<usize>>,
         active_seen: &mut [u8],
     ) {
         if claimable[idx] == 0 {
@@ -716,9 +761,13 @@ impl TerritoryKernel {
             amounts[n_count] = amount;
             n_count += 1;
             want_total += amount;
-            if !halo_out.is_empty() && active_seen[ni] == 0 {
-                halo_out.push(ni);
-                active_seen[ni] = 1;
+            // Previous gate used `!halo_out.is_empty()`, which never seeded an empty
+            // collector — the one-hop halo pass was dead and fronts grew as spines.
+            if let Some(ref mut halo) = halo_out {
+                if active_seen[ni] == 0 {
+                    halo.push(ni);
+                    active_seen[ni] = 1;
+                }
             }
         }
 
@@ -778,6 +827,8 @@ impl TerritoryKernel {
         }
     }
 
+    /// Simple majority: whoever has more pressure owns the cell; equal → neutral.
+    /// (No contested band, no dominance ratio, no sticky prior-owner.)
     fn sync_ownership_tile(&mut self, idx: usize) {
         if self.claimable_mask[idx] == 0 {
             self.set_owner_at(idx, OWNER_UNCLAIMABLE);
@@ -785,20 +836,12 @@ impl TerritoryKernel {
         }
         let pf = self.pressure_friendly[idx];
         let ph = self.pressure_hostile[idx];
-        let tile_ratio = CLAIM_DOMINANCE_RATIO * self.claim_ratio_mult[idx];
-        let new_owner = if pf < MIN_CLAIM_PRESSURE && ph < MIN_CLAIM_PRESSURE {
-            let cur = self.owners[idx];
-            if cur != OWNER_FRIENDLY && cur != OWNER_HOSTILE {
-                OWNER_NEUTRAL
-            } else {
-                cur
-            }
-        } else if pf > ph * tile_ratio {
+        let new_owner = if pf > ph {
             OWNER_FRIENDLY
-        } else if ph > pf * tile_ratio {
+        } else if ph > pf {
             OWNER_HOSTILE
         } else {
-            OWNER_CONTESTED
+            OWNER_NEUTRAL
         };
         self.set_owner_at(idx, new_owner);
     }
@@ -1001,31 +1044,154 @@ impl TerritoryKernel {
     }
 
     /// Keep active-set size bounded so dual-front wars don't O(n) thrash every round (B7).
+    /// Tier-1 drops dry interiors; tier-2 drops wet deep interiors when all tiles are wet.
+    /// Cap comes from `active_set_soft_cap` (default ACTIVE_SET_SOFT_CAP; Godot may tighten).
     fn enforce_active_set_soft_cap(&mut self) {
-        if self.active_indices.len() <= ACTIVE_SET_SOFT_CAP {
+        self.enforce_active_set_soft_cap_to(self.active_set_soft_cap);
+    }
+
+    /// Godot overload path: tighten soft-cap under frame pressure (clamped to [1, ACTIVE_SET_SOFT_CAP]).
+    pub fn set_active_set_soft_cap(&mut self, cap: usize) {
+        let clamped = cap.clamp(1, ACTIVE_SET_SOFT_CAP);
+        if self.active_set_soft_cap == clamped {
             return;
         }
-        // Score by max pressure; drop calm interior cells first, keep contested/high-pressure.
-        let mut scored: Vec<(f32, usize)> = self
-            .active_indices
-            .iter()
-            .copied()
-            .map(|idx| {
-                let p = self.pressure_friendly[idx].max(self.pressure_hostile[idx]);
-                let contested_boost = if self.owners[idx] == OWNER_CONTESTED {
-                    10.0
-                } else {
-                    0.0
-                };
-                (p + contested_boost, idx)
-            })
-            .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let drop_n = scored.len().saturating_sub(ACTIVE_SET_SOFT_CAP);
-        for i in 0..drop_n {
-            let idx = scored[i].1;
-            self.remove_active_index(idx);
+        self.active_set_soft_cap = clamped;
+        self.enforce_active_set_soft_cap();
+    }
+
+    pub(crate) fn enforce_active_set_soft_cap_to(&mut self, cap: usize) {
+        self.enforce_active_set_soft_cap_impl(cap);
+    }
+
+    fn enforce_active_set_soft_cap_impl(&mut self, cap: usize) {
+        if self.active_indices.len() <= cap {
+            return;
         }
+        let mut excess = self.active_indices.len().saturating_sub(cap);
+
+        // Tier-1: calm/dry tiles — lowest keep_score first.
+        if excess > 0 {
+            let mut scored: Vec<(f32, usize)> = self
+                .active_indices
+                .iter()
+                .copied()
+                .filter(|&idx| {
+                    let p = self.pressure_friendly[idx].max(self.pressure_hostile[idx]);
+                    p <= ACTIVE_PRESSURE_EPS
+                })
+                .map(|idx| (self.active_keep_score(idx), idx))
+                .collect();
+            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let drop_n = excess.min(scored.len());
+            for i in 0..drop_n {
+                self.remove_active_index(scored[i].1);
+            }
+            excess = self.active_indices.len().saturating_sub(cap);
+        }
+
+        // Tier-2: wet deep interiors — frontier / contested / tips stay protected.
+        if excess > 0 {
+            let mut scored: Vec<(bool, f32, usize)> = self
+                .active_indices
+                .iter()
+                .copied()
+                .filter(|&idx| {
+                    let p = self.pressure_friendly[idx].max(self.pressure_hostile[idx]);
+                    p > ACTIVE_PRESSURE_EPS && !self.is_soft_cap_tier2_protected(idx)
+                })
+                .map(|idx| {
+                    (
+                        self.is_soft_cap_deep_interior(idx),
+                        self.active_keep_score(idx),
+                        idx,
+                    )
+                })
+                .collect();
+            if scored.is_empty() {
+                return;
+            }
+            // Drop deep same-owner interiors before marginal wet cells; lowest score first.
+            scored.sort_by(|a, b| {
+                b.0
+                    .cmp(&a.0)
+                    .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            let drop_n = excess.min(scored.len());
+            for i in 0..drop_n {
+                self.remove_active_index(scored[i].2);
+            }
+        }
+    }
+
+    /// Tier-2 protected: contested, owner frontier, or spreading tip beside dry neighbor.
+    fn is_soft_cap_tier2_protected(&self, idx: usize) -> bool {
+        if self.owners[idx] == OWNER_CONTESTED {
+            return true;
+        }
+        let p = self.pressure_friendly[idx].max(self.pressure_hostile[idx]);
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for ni in neighbor_scratch {
+            if ni >= self.tile_count || self.claimable_mask[ni] == 0 {
+                continue;
+            }
+            if self.owners[ni] == OWNER_CONTESTED || self.owners[idx] != self.owners[ni] {
+                return true;
+            }
+            let p_n = self.pressure_friendly[ni].max(self.pressure_hostile[ni]);
+            if p > ACTIVE_PRESSURE_EPS && p_n < ACTIVE_PRESSURE_EPS {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// All claimable neighbors share our owner — deep interior (preferred tier-2 drop).
+    fn is_soft_cap_deep_interior(&self, idx: usize) -> bool {
+        if self.owners[idx] == OWNER_CONTESTED {
+            return false;
+        }
+        let owner = self.owners[idx];
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for ni in neighbor_scratch {
+            if ni >= self.tile_count || self.claimable_mask[ni] == 0 {
+                continue;
+            }
+            if self.owners[ni] != owner || self.owners[ni] == OWNER_CONTESTED {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Higher = keep under soft-cap. Frontier / contested beat raw pressure depth.
+    fn active_keep_score(&self, idx: usize) -> f32 {
+        let p = self.pressure_friendly[idx].max(self.pressure_hostile[idx]);
+        // Light pressure weight: deep interior corridors must not outrank thin tips.
+        let mut score = p * 0.05;
+        if self.owners[idx] == OWNER_CONTESTED {
+            score += 100.0;
+        }
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(idx, &mut neighbor_scratch);
+        for ni in neighbor_scratch {
+            if ni >= self.tile_count || self.claimable_mask[ni] == 0 {
+                continue;
+            }
+            if self.owners[ni] == OWNER_CONTESTED || self.owners[idx] != self.owners[ni] {
+                score += 50.0;
+                break;
+            }
+            let p_n = self.pressure_friendly[ni].max(self.pressure_hostile[ni]);
+            // Spreading tip: we hold pressure beside a still-dry claimable neighbor.
+            if p > ACTIVE_PRESSURE_EPS && p_n < ACTIVE_PRESSURE_EPS {
+                score += 40.0;
+                break;
+            }
+        }
+        score
     }
 
     pub fn apply_claimable_delta(
@@ -1099,9 +1265,46 @@ impl TerritoryKernel {
         )
     }
 
+    /// Single display R8 byte for SCD1 territory pulls (avoids enum→R8 on Godot).
+    pub fn owner_display_byte_at(&self, idx: usize) -> u8 {
+        self.owner_display.get(idx).copied().unwrap_or(0)
+    }
+
     /// Full w*h R8 overlay bytes (incremental buffer; no per-call recompute).
     pub fn owner_display_r8(&self) -> Vec<u8> {
         self.owner_display.clone()
+    }
+
+    /// Pressure depth tint for ownership overlay (display-only; uploaded at overlay Hz).
+    /// Neutral / unclaimable → 0. Owned tiles encode team pressure depth in 0.15..1.0.
+    pub fn pressure_depth_r8(&self, vis_ref: f32) -> Vec<u8> {
+        let ref_v = vis_ref.max(0.001);
+        let mut out = vec![0u8; self.tile_count];
+        for idx in 0..self.tile_count {
+            if idx < self.claimable_mask.len() && self.claimable_mask[idx] == 0 {
+                continue;
+            }
+            let p = match self.owners[idx] {
+                OWNER_FRIENDLY => self.pressure_friendly[idx],
+                OWNER_HOSTILE => self.pressure_hostile[idx],
+                OWNER_CONTESTED => self.pressure_friendly[idx].max(self.pressure_hostile[idx]),
+                _ => 0.0,
+            };
+            if p <= 0.0 {
+                continue;
+            }
+            let norm = (p / ref_v).powf(0.55).clamp(0.15, 1.0);
+            out[idx] = (norm * 255.0).round() as u8;
+        }
+        if self.grid_w > 1 {
+            let w = self.grid_w as usize;
+            let h = self.grid_h as usize;
+            for gy in 0..h {
+                let row = gy * w;
+                out[row + w - 1] = out[row];
+            }
+        }
+        out
     }
 
     fn display_byte_for(&self, idx: usize) -> u8 {
@@ -1313,5 +1516,245 @@ mod tests {
         k.enforce_active_set_soft_cap();
         assert!(k.active_indices.len() <= ACTIVE_SET_SOFT_CAP);
         assert_eq!(k.active_indices.len(), k.tile_count);
+    }
+
+    #[test]
+    fn active_set_halo_promotes_wet_neighbors() {
+        let mut k = tiny_kernel(true);
+        k.home_inject_enabled = false;
+        k.active_indices.clear();
+        k.active_seen.fill(0);
+        // Seed a single active cell with enough pressure to overflow to cardinals.
+        let src = (3 * 8 + 3) as usize;
+        k.pressure_friendly[src] = 25.0;
+        k.active_indices.push(src);
+        k.active_seen[src] = 1;
+
+        k.advance_round();
+
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        k.collect_neighbors(src, &mut neighbor_scratch);
+        assert!(!neighbor_scratch.is_empty());
+        let wet_neighbors = neighbor_scratch
+            .iter()
+            .filter(|&&ni| k.pressure_friendly[ni] > 0.0)
+            .count();
+        assert!(
+            wet_neighbors > 0,
+            "source should overflow pressure into neighbors"
+        );
+        for &ni in &neighbor_scratch {
+            if k.pressure_friendly[ni] <= 0.0 {
+                continue;
+            }
+            assert_eq!(
+                k.active_seen[ni], 1,
+                "wet halo neighbor {ni} should be promoted into the active set"
+            );
+            assert!(
+                k.active_indices.contains(&ni),
+                "wet halo neighbor {ni} missing from active_indices"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_cap_tier1_prunes_dry_preserves_wet() {
+        let mut k = tiny_kernel(true);
+        k.active_indices.clear();
+        k.active_seen.fill(0);
+        for i in 0..k.tile_count {
+            k.active_indices.push(i);
+            k.active_seen[i] = 1;
+            if i % 2 == 0 {
+                k.pressure_friendly[i] = 25.0;
+            } else {
+                k.pressure_friendly[i] = 0.0;
+            }
+        }
+        let wet_tiles: Vec<usize> = k
+            .active_indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                let p = k.pressure_friendly[idx].max(k.pressure_hostile[idx]);
+                p > ACTIVE_PRESSURE_EPS
+            })
+            .collect();
+        assert!(!wet_tiles.is_empty());
+        let before_wet: Vec<usize> = wet_tiles
+            .iter()
+            .filter(|&&idx| k.active_seen[idx] == 1)
+            .copied()
+            .collect();
+        // Under global cap tiny grid is a no-op; force tier-1 with a tight cap.
+        k.enforce_active_set_soft_cap_to(48);
+        for idx in before_wet {
+            assert_eq!(
+                k.active_seen[idx], 1,
+                "pressurized tile {idx} must survive tier-1 dry prune"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_cap_prunes_wet_interior_when_all_wet_over_cap() {
+        let mut k = tiny_kernel(true);
+        k.active_indices.clear();
+        k.active_seen.fill(0);
+        for i in 0..k.tile_count {
+            k.pressure_friendly[i] = 10.0;
+            k.owners[i] = OWNER_FRIENDLY;
+            k.active_indices.push(i);
+            k.active_seen[i] = 1;
+        }
+        // Frontier tile at tip stays protected (neighbor different owner).
+        let tip = 0usize;
+        let nbr = 1usize;
+        k.owners[nbr] = OWNER_NEUTRAL;
+        k.pressure_friendly[tip] = 10.0;
+        k.pressure_friendly[nbr] = 0.0;
+
+        let cap = 32usize;
+        k.enforce_active_set_soft_cap_to(cap);
+        assert!(
+            k.active_indices.len() <= cap,
+            "all-wet over-cap must prune down to cap (got {})",
+            k.active_indices.len()
+        );
+        assert_eq!(
+            k.active_seen[tip], 1,
+            "frontier tip must survive tier-2 wet interior prune"
+        );
+    }
+
+    #[test]
+    fn soft_cap_prefers_frontier_over_interior_pressure() {
+        let mut k = tiny_kernel(true);
+        k.active_indices.clear();
+        k.active_seen.fill(0);
+        for i in 0..k.tile_count {
+            k.active_indices.push(i);
+            k.active_seen[i] = 1;
+            k.owners[i] = OWNER_FRIENDLY;
+            k.pressure_friendly[i] = 50.0;
+        }
+        // Carve a frontier tip: wet beside a neutral claimable neighbor.
+        let tip = 0usize;
+        let nbr = 1usize;
+        k.pressure_friendly[tip] = 10.0;
+        k.pressure_friendly[nbr] = 0.0;
+        k.owners[nbr] = OWNER_NEUTRAL;
+
+        let tip_score = k.active_keep_score(tip);
+        let interior = (3 * 8 + 3) as usize;
+        let interior_score = k.active_keep_score(interior);
+        assert!(
+            tip_score > interior_score,
+            "frontier tip ({tip_score}) should outrank calm interior ({interior_score})"
+        );
+
+        let cap = 32usize;
+        k.enforce_active_set_soft_cap_to(cap);
+        assert!(k.active_indices.len() <= cap);
+        assert_eq!(
+            k.active_seen[tip], 1,
+            "frontier tip must outlive deep interior under tier-2 prune"
+        );
+    }
+
+    #[test]
+    fn ownership_is_simple_majority() {
+        let mut k = tiny_kernel(false);
+        k.home_inject_enabled = false;
+        k.use_active_set = false;
+
+        k.pressure_friendly[0] = 1.0;
+        k.pressure_hostile[0] = 0.0;
+        k.sync_ownership_tile(0);
+        assert_eq!(k.owners[0], OWNER_FRIENDLY);
+
+        k.pressure_friendly[0] = 0.0;
+        k.pressure_hostile[0] = 1.0;
+        k.sync_ownership_tile(0);
+        assert_eq!(k.owners[0], OWNER_HOSTILE);
+
+        // Near-tie: any strict lead owns (no 1.15 contested band).
+        k.pressure_friendly[0] = 1.0;
+        k.pressure_hostile[0] = 0.99;
+        k.sync_ownership_tile(0);
+        assert_eq!(k.owners[0], OWNER_FRIENDLY);
+
+        // Equal including both zero → neutral (no sticky prior owner).
+        k.owners[0] = OWNER_FRIENDLY;
+        k.pressure_friendly[0] = 0.0;
+        k.pressure_hostile[0] = 0.0;
+        k.sync_ownership_tile(0);
+        assert_eq!(k.owners[0], OWNER_NEUTRAL);
+
+        k.pressure_friendly[0] = 5.0;
+        k.pressure_hostile[0] = 5.0;
+        k.sync_ownership_tile(0);
+        assert_eq!(k.owners[0], OWNER_NEUTRAL);
+    }
+
+    #[test]
+    fn pressure_dirty_off_active_flips_same_pass() {
+        let mut k = tiny_kernel(true);
+        k.home_inject_enabled = false;
+        // Soft-cap style: cell 0 not in active set, but holds opposing pressure.
+        k.active_indices.clear();
+        k.active_seen.fill(0);
+        k.owners[0] = OWNER_HOSTILE;
+        k.pressure_friendly[0] = 10.0;
+        k.pressure_hostile[0] = 1.0;
+        k.mark_pressure_dirty(0);
+        assert!(k.active_seen[0] == 0, "dirty alone must not imply already active");
+        k.run_gradient_cancel_sync_pass();
+        assert_eq!(
+            k.owners[0],
+            OWNER_FRIENDLY,
+            "majority on pressure-dirty cell must flip same pass"
+        );
+    }
+
+    #[test]
+    fn bomb_pressure_tips_neutral_claimable_same_pass() {
+        let mut k = tiny_kernel(true);
+        k.home_inject_enabled = false;
+        k.owners[0] = OWNER_NEUTRAL;
+        k.pressure_friendly[0] = 0.0;
+        k.pressure_hostile[0] = 0.0;
+        // Friendly bomb: erode hostile, add 0.35 * power friendly.
+        let power = 1000.0;
+        k.pressure_hostile[0] = (k.pressure_hostile[0] - power).max(0.0);
+        k.pressure_friendly[0] += power * 0.35;
+        k.mark_pressure_dirty(0);
+        k.run_gradient_cancel_sync_pass();
+        assert_eq!(k.owners[0], OWNER_FRIENDLY);
+    }
+
+    #[test]
+    fn air_strike_opens_unclaimable_and_flips_owner() {
+        let mut k = tiny_kernel(true);
+        k.home_inject_enabled = false;
+        k.land_mask = vec![1u8; k.tile_count];
+        k.friendly_reachable = vec![0u8; k.tile_count];
+        k.hostile_reachable = vec![0u8; k.tile_count];
+        k.set_claimable_mask_at(0, 0);
+        k.owners[0] = OWNER_UNCLAIMABLE;
+        k.pressure_friendly[0] = 0.0;
+        k.pressure_hostile[0] = 0.0;
+
+        k.open_claimable_for_air_strike(0, OWNER_FRIENDLY);
+        assert_eq!(k.claimable_mask[0], 1);
+        assert_ne!(k.owners[0], OWNER_UNCLAIMABLE);
+
+        let power = 1000.0;
+        k.pressure_hostile[0] = (k.pressure_hostile[0] - power).max(0.0);
+        k.pressure_friendly[0] += power * 0.35;
+        k.mark_pressure_dirty(0);
+        k.run_gradient_cancel_sync_pass();
+        assert_eq!(k.owners[0], OWNER_FRIENDLY);
     }
 }

@@ -1,9 +1,10 @@
 TerritorySim loaded: true
 Has update_claimable: true
 Territory backend: rust
-HQ (75, 106) island (308, 136)
-Before outpost claimable=1 owners=0 rust_claimable=n/a
-After sync claimable=1 owners=1 claimable_tiles=14441
-After 80 steps friendly pressure at island: 44.8203048706055
+HQ (36979, 0) island (5, 0)
+Before beachhead claimable=0 owners=4
+OK ferry beachhead claimable island=(5, 0)
+After outpost sync claimable_tiles=948
+After 80 steps max friendly pressure on island neighbors: 6.58351373672485
 PASS island outpost pressure OK (backend=rust)
-PASS island visual smoke (roads/markers/overlay defer)
+PASS island visual smoke (instant ACTIVE + markers/overlay defer)

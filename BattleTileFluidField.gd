@@ -196,14 +196,13 @@ static func _pressures_to_owners(
 			continue
 		var f: float = friendly[idx] if idx < friendly.size() else 0.0
 		var h: float = hostile[idx] if idx < hostile.size() else 0.0
-		if f < 0.12 and h < 0.12:
-			out[idx] = BattleTileControlLib.OWNER_NEUTRAL
-		elif f > h * 1.15:
+		# Simple majority (matches Rust / BattleTileControl).
+		if f > h:
 			out[idx] = BattleTileControlLib.OWNER_FRIENDLY
-		elif h > f * 1.15:
+		elif h > f:
 			out[idx] = BattleTileControlLib.OWNER_HOSTILE
 		else:
-			out[idx] = BattleTileControlLib.OWNER_CONTESTED
+			out[idx] = BattleTileControlLib.OWNER_NEUTRAL
 	return out
 
 

@@ -213,9 +213,10 @@ static func pack_infra_mask_for_team(map_data, structures: Array, team: int) -> 
 static func resource_supply_hubs(
 	structures: Array,
 	home: Vector2i,
-	map_data = null,
+	_map_data = null,
 	team: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Array[Vector2i]:
+	# R1: hubs = home + ACTIVE buildings (spawner/barracks/hangar). No bridge landings.
 	var out: Array[Vector2i] = []
 	var seen: Dictionary = {}
 	var key: String = ""
@@ -225,7 +226,8 @@ static func resource_supply_hubs(
 	for st: Dictionary in structures:
 		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
 			continue
-		if str(st.get("kind", "")) != "spawner":
+		var kind: String = str(st.get("kind", ""))
+		if kind != KIND_SPAWNER and kind != KIND_BARRACKS and kind != KIND_HANGAR:
 			continue
 		if str(st.get("state", STATE_ACTIVE)) != STATE_ACTIVE:
 			continue
@@ -235,19 +237,6 @@ static func resource_supply_hubs(
 			continue
 		seen[key] = true
 		out.append(pt)
-	if map_data != null:
-		for corridor: Dictionary in map_data.bridge_corridors:
-			if int(corridor.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != team:
-				continue
-			var bx: int = int(corridor.get("gx", -1))
-			var by: int = int(corridor.get("gy", -1))
-			if bx < 0:
-				continue
-			key = "%d,%d" % [bx, by]
-			if seen.has(key):
-				continue
-			seen[key] = true
-			out.append(Vector2i(bx, by))
 	return out
 
 

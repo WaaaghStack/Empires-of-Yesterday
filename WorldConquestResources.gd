@@ -1,52 +1,35 @@
 class_name WorldConquestResources
 extends RefCounted
 
-## Resource site simulation (link + haul visuals) for World Conquest deposits.
+## Owned-deposit mining for World Conquest.
 ##
 ## A8 — wallet boundary (WORLD_DATASET_RESOURCE_WALLET):
 ## - When wallet authority is ON, Rust owns authoritative balances.
 ## - `tick()` returns *yield deltas* in result.friendly / result.hostile for presentation
 ##   and for `BattleTerritorySim.apply_resource_tick_delta` — NOT dual balance writes.
 ## - Godot must NOT treat those arrays as a second wallet: Screen applies deltas via Rust
-##   (`apply_resource_tick_delta` / `sync_resource_balances` / `pull_resource_balances`)
 ##   and mirrors the pulled balances into HUD arrays.
 ## - When wallet authority is OFF (QA/CPU harness only), callers may add deltas to local wallets.
-## - Site phases / haul pulse visuals remain GDScript presentation state (not balance authority).
+##
+## Presentation (R1 visual cut):
+## - No haul paths / link ribbons. Owned deposits enter PHASE_MINING immediately.
+## - Economy credits from ownership yield_acc; shockwave visuals are cadence-capped (F7).
 
-const BattleMapDataLib := preload("res://BattleMapData.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const WorldConquestConfigLib := preload("res://WorldConquestConfig.gd")
-const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 
 const TYPE_AURELIUM := 0
 const TYPE_VERDANTITE := 1
 const TYPE_EMBERSTONE := 2
 
 const PHASE_IDLE := "idle"
-const PHASE_LINKING := "linking"
-const PHASE_HAULING := "hauling"
-
-const _DIRS: Array[Vector2i] = [
-	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
-]
+const PHASE_MINING := "mining"
 
 static var _site_states: Dictionary = {}
-static var _roads_cache: Dictionary = {}
-static var _roads_cache_version: int = -1
-static var _hubs_cache: Array[Vector2i] = []
-static var _hubs_cache_version: int = -1
-static var _bfs_parent: PackedInt32Array = PackedInt32Array()
-static var _bfs_gen: PackedInt32Array = PackedInt32Array()
-static var _bfs_queue: PackedInt32Array = PackedInt32Array()
-static var _search_gen: int = 1
 
 
 static func reset() -> void:
 	_site_states.clear()
-	_roads_cache.clear()
-	_roads_cache_version = -1
-	_hubs_cache = []
-	_hubs_cache_version = -1
 
 
 ## A8: true when production live wallet contract is on (balances live in Rust).
@@ -77,26 +60,27 @@ static func _grid_cell_count(grid) -> int:
 	return 0
 
 
-## Simulate deposit link/haul for visuals + yield deltas.
+## Simulate owned-deposit mining for yield deltas + miner/shockwave presentation.
 ## result.friendly / result.hostile are per-frame yield *deltas* (not balances).
-## Under wallet authority, push deltas via Rust only — never dual-write local wallets (A8).
+## Unused structure/home/version args kept for call-site compatibility.
 static func tick(
 	map_data,
 	grid,
-	structures: Array,
-	player_home: Vector2i,
-	enemy_home: Vector2i,
+	_structures: Array,
+	_player_home: Vector2i,
+	_enemy_home: Vector2i,
 	delta: float,
-	structure_version: int = 0,
-	road_network_version: int = 0,
+	_structure_version: int = 0,
+	_road_network_version: int = 0,
 ) -> Dictionary:
-	var network_key: int = structure_version * 100000 + road_network_version
 	var result := {
 		"friendly": [0.0, 0.0, 0.0],
 		"hostile": [0.0, 0.0, 0.0],
+		"shockwaves": [],
+		"sites_dirty": false,
+		## Compat aliases for any leftover callers.
 		"pulses": [],
 		"links_dirty": false,
-		## A8: when true, caller must apply friendly/hostile via Rust wallet APIs only.
 		"wallet_authority": wallet_authority_active(),
 	}
 	if map_data == null or grid == null or delta <= 0.0:
@@ -104,27 +88,12 @@ static func tick(
 	var deposits: Array = map_data.resource_deposits
 	if deposits.is_empty():
 		return result
-	var w: int = map_data.cell_count if map_data.sphere_mode else map_data.grid_width
-	var h: int = 1 if map_data.sphere_mode else map_data.grid_height
-	var n: int = map_data.gameplay_tile_count()
-	_ensure_bufs(n)
-	var friendly_roads: Dictionary = _road_cells_for_team_cached(
-		map_data, structures, BattleTileControlLib.OWNER_FRIENDLY, network_key
-	)
-	var hostile_roads: Dictionary = {}
-	# Hubs only change when structures/bridges change — cache per network version
-	# instead of rebuilding every frame.
-	if _hubs_cache_version != network_key:
-		_hubs_cache = OutpostBuildLib.resource_supply_hubs(
-			structures, player_home, map_data, BattleTileControlLib.OWNER_FRIENDLY
-		)
-		_hubs_cache_version = network_key
-	var friendly_hubs: Array[Vector2i] = _hubs_cache
-	var hostile_hubs: Array[Vector2i] = []
-	if enemy_home.x >= 0:
-		hostile_hubs.append(enemy_home)
-	var links_dirty: bool = false
-	var pulse_cap: int = WorldConquestConfigLib.RESOURCE_MAX_VISUAL_PULSES
+
+	var sites_dirty: bool = false
+	var wave_cap: int = WorldConquestConfigLib.RESOURCE_MAX_VISUAL_SHOCKWAVES
+	var period: float = WorldConquestConfigLib.RESOURCE_SHOCKWAVE_PERIOD_SEC
+	var cell_n: int = _grid_cell_count(grid)
+
 	for dep: Dictionary in deposits:
 		var dep_id: int = int(dep.get("id", -1))
 		if dep_id < 0:
@@ -132,7 +101,7 @@ static func tick(
 		var gx: int = int(dep.get("gx", 0))
 		var gy: int = int(dep.get("gy", 0))
 		var idx: int = map_data.cell_index(gx, gy)
-		if idx < 0 or idx >= _grid_cell_count(grid):
+		if idx < 0 or idx >= cell_n:
 			continue
 		var owner: int = _grid_owner_at(grid, idx)
 		var team: int = 0
@@ -140,80 +109,68 @@ static func tick(
 			team = BattleTileControlLib.OWNER_FRIENDLY
 		elif owner == BattleTileControlLib.OWNER_HOSTILE:
 			team = BattleTileControlLib.OWNER_HOSTILE
+
 		var state: Dictionary = _site_state(dep_id)
 		if team == 0:
 			if not state.is_empty():
 				_reset_site(dep_id)
-				links_dirty = true
+				sites_dirty = true
 			continue
-		if int(state.get("team", 0)) != team:
+
+		if int(state.get("team", 0)) != team or str(state.get("phase", "")) != PHASE_MINING:
 			_reset_site(dep_id)
 			state = _site_state(dep_id)
-			links_dirty = true
-		state["team"] = team
-		state["type"] = int(dep.get("type", 0))
-		state["gx"] = gx
-		state["gy"] = gy
-		state["yield_per_sec"] = float(dep.get("yield_per_sec", 1.0))
-		var phase: String = str(state.get("phase", PHASE_IDLE))
-		var roads: Dictionary = friendly_roads if team == BattleTileControlLib.OWNER_FRIENDLY else hostile_roads
-		var hubs: Array[Vector2i] = friendly_hubs if team == BattleTileControlLib.OWNER_FRIENDLY else hostile_hubs
-		if phase == PHASE_IDLE:
-			var retry_v: int = int(state.get("link_retry_version", -1))
-			if retry_v == network_key and bool(state.get("link_pending", false)):
-				continue
-			var link_path: PackedInt32Array = _plan_link_path(
-				map_data, grid, gx, gy, team, roads, hubs, w, h
-			)
-			state["link_retry_version"] = network_key
-			if link_path.is_empty():
-				state["link_pending"] = true
-				continue
-			state["link_pending"] = false
-			state["phase"] = PHASE_LINKING
-			state["link_path"] = link_path
-			state["link_built"] = 1.0
-			state["haul_path"] = PackedInt32Array()
-			state["pulses"] = []
+			state["team"] = team
+			state["type"] = int(dep.get("type", 0))
+			state["gx"] = gx
+			state["gy"] = gy
+			state["size"] = int(dep.get("size", 1))
+			state["yield_per_sec"] = float(dep.get("yield_per_sec", 1.0))
 			state["yield_acc"] = 0.0
-			links_dirty = true
-			phase = PHASE_LINKING
-		if phase == PHASE_LINKING:
-			var built: float = float(state.get("link_built", 1.0))
-			var link_path_l: PackedInt32Array = state.get("link_path", PackedInt32Array())
-			var prev_cells: int = int(floor(built))
-			built += WorldConquestConfigLib.RESOURCE_LINK_CELLS_PER_SEC * delta
-			state["link_built"] = built
-			if int(floor(built)) != prev_cells:
-				links_dirty = true
-			if built >= float(link_path_l.size()):
-				var haul: PackedInt32Array = _build_haul_path(
-					map_data, link_path_l, roads, hubs, w, h
-				)
-				if haul.is_empty():
-					state["phase"] = PHASE_IDLE
-					state.erase("link_path")
-					state["link_built"] = 0.0
-				else:
-					state["phase"] = PHASE_HAULING
-					state["haul_path"] = haul
-					state["pulses"] = []
-					state["yield_acc"] = 0.0
-					links_dirty = true
-		if str(state.get("phase", "")) == PHASE_HAULING:
-			var credited: Array = _tick_hauling(state, delta, w, map_data)
-			var wallet: Array = result.friendly if team == BattleTileControlLib.OWNER_FRIENDLY else result.hostile
-			wallet[int(state.get("type", 0))] += float(credited[0])
-			if result.pulses.size() >= pulse_cap:
-				continue
-			var type_i: int = int(state.get("type", 0))
-			for pulse_vis: Dictionary in credited[1]:
-				if result.pulses.size() >= pulse_cap:
-					break
-				pulse_vis["type"] = type_i
-				pulse_vis["team"] = team
-				result.pulses.append(pulse_vis)
-	result.links_dirty = links_dirty
+			state["phase"] = PHASE_MINING
+			# Stagger so mines don't flash in sync (dep_id * 0.37 mod period).
+			state["pulse_t"] = fmod(float(dep_id) * 0.37, period)
+			sites_dirty = true
+		else:
+			state["type"] = int(dep.get("type", 0))
+			state["gx"] = gx
+			state["gy"] = gy
+			state["size"] = int(dep.get("size", 1))
+			state["yield_per_sec"] = float(dep.get("yield_per_sec", 1.0))
+
+		# Full economy credit while owned — independent of shockwave visual budget.
+		var yield_rate: float = float(state.get("yield_per_sec", 1.0))
+		var acc: float = float(state.get("yield_acc", 0.0)) + yield_rate * delta
+		var credited: float = 0.0
+		while acc >= 1.0:
+			credited += 1.0
+			acc -= 1.0
+		state["yield_acc"] = acc
+		if credited > 0.0:
+			var wallet: Array = (
+				result.friendly if team == BattleTileControlLib.OWNER_FRIENDLY else result.hostile
+			)
+			wallet[int(state.get("type", 0))] += credited
+
+		# Shockwave cadence (~2 s) with stagger; skip emit when over visual cap.
+		var pulse_t: float = float(state.get("pulse_t", 0.0)) + delta
+		if pulse_t >= period:
+			pulse_t = fmod(pulse_t, period)
+			if result.shockwaves.size() < wave_cap:
+				var wave := {
+					"gx": gx,
+					"gy": gy,
+					"type": int(state.get("type", 0)),
+					"team": team,
+					"size": int(state.get("size", 1)),
+					"t": 0.0,
+				}
+				result.shockwaves.append(wave)
+		state["pulse_t"] = pulse_t
+
+	result.sites_dirty = sites_dirty
+	result.links_dirty = sites_dirty
+	result.pulses = result.shockwaves
 	return result
 
 
@@ -230,364 +187,3 @@ static func _site_state(dep_id: int) -> Dictionary:
 
 static func _reset_site(dep_id: int) -> void:
 	_site_states.erase("dep_%d" % dep_id)
-
-
-static func _tick_hauling(state: Dictionary, delta: float, grid_w: int, map_data = null) -> Array:
-	var haul: PackedInt32Array = state.get("haul_path", PackedInt32Array())
-	if haul.size() < 2:
-		return [0.0, []]
-	var yield_rate: float = float(state.get("yield_per_sec", 1.0))
-	var acc: float = float(state.get("yield_acc", 0.0)) + yield_rate * delta
-	var credited: float = 0.0
-	var pulses: Array = state.get("pulses", [])
-	while acc >= 1.0:
-		pulses.append({"t": 0.0})
-		acc -= 1.0
-	state["yield_acc"] = acc
-	var speed: float = WorldConquestConfigLib.RESOURCE_HAUL_CELLS_PER_SEC
-	var seg_len: float = maxf(float(haul.size() - 1), 1.0)
-	var step: float = speed * delta / seg_len
-	var alive: Array = []
-	for pulse: Dictionary in pulses:
-		var t: float = float(pulse.get("t", 0.0)) + step
-		if t >= 1.0:
-			credited += 1.0
-			continue
-		pulse["t"] = t
-		alive.append(pulse)
-	state["pulses"] = alive
-	var vis: Array = []
-	for pulse: Dictionary in alive:
-		var sample: Dictionary = _sample_along_path(
-			haul, float(pulse.get("t", 0.0)), grid_w, map_data
-		)
-		sample["t"] = float(pulse.get("t", 0.0))
-		vis.append(sample)
-	return [credited, vis]
-
-
-## Sample a haul path. On sphere, never lerp cell_ids (they are not spatial coords) —
-## return segment endpoints + frac so the globe can slerp in world space.
-static func _sample_along_path(
-	path: PackedInt32Array, t: float, grid_w: int, map_data = null
-) -> Dictionary:
-	var max_i: int = path.size() - 1
-	if max_i < 0:
-		return {"gx": -1, "gy": -1}
-	if max_i == 0:
-		var only: Vector2i = OutpostBuildLib.grid_from_packed_key(path[0], grid_w, map_data)
-		return {"gx": only.x, "gy": only.y}
-	var f: float = clampf(t, 0.0, 1.0) * float(max_i)
-	var i0: int = int(floor(f))
-	var i1: int = mini(i0 + 1, max_i)
-	var frac: float = f - float(i0)
-	var a: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i0], grid_w, map_data)
-	var b: Vector2i = OutpostBuildLib.grid_from_packed_key(path[i1], grid_w, map_data)
-	if map_data != null and map_data.sphere_mode:
-		return {"gx": a.x, "gy": a.y, "nx": b.x, "ny": b.y, "frac": frac}
-	if i0 == i1:
-		return {"gx": a.x, "gy": a.y}
-	return {
-		"gx": int(round(lerpf(float(a.x), float(b.x), frac))),
-		"gy": int(round(lerpf(float(a.y), float(b.y), frac))),
-	}
-
-
-static func _pos_along_path(path: PackedInt32Array, t: float, grid_w: int, map_data = null) -> Vector2i:
-	var sample: Dictionary = _sample_along_path(path, t, grid_w, map_data)
-	return Vector2i(int(sample.get("gx", -1)), int(sample.get("gy", -1)))
-
-
-static func _road_cells_for_team_cached(
-	map_data, structures: Array, team: int, network_key: int
-) -> Dictionary:
-	if _roads_cache_version != network_key:
-		_roads_cache.clear()
-		_roads_cache_version = network_key
-	var cache_key: String = "t%d" % team
-	if _roads_cache.has(cache_key):
-		return _roads_cache[cache_key]
-	var built: Dictionary = OutpostBuildLib.road_cells_for_team(
-		map_data, structures, team
-	)
-	_roads_cache[cache_key] = built
-	return built
-
-
-static func _plan_link_path(
-	map_data,
-	grid,
-	gx: int,
-	gy: int,
-	team: int,
-	roads: Dictionary,
-	hubs: Array[Vector2i],
-	w: int,
-	h: int,
-) -> PackedInt32Array:
-	var start_key: int = _key(gx, gy, w)
-	var hub_targets: Dictionary = {}
-	for hub in hubs:
-		if hub.x >= 0:
-			hub_targets[_key(hub.x, hub.y, w)] = true
-	if roads.is_empty() and hub_targets.is_empty():
-		return PackedInt32Array()
-	var goal_key: int = _bfs_to_targets(
-		map_data, grid, start_key, team, roads, hub_targets, w, h
-	)
-	if goal_key < 0:
-		return PackedInt32Array()
-	return _reconstruct_path(goal_key)
-
-
-static func _build_haul_path(
-	map_data,
-	link_path: PackedInt32Array,
-	roads: Dictionary,
-	hubs: Array[Vector2i],
-	w: int,
-	h: int,
-) -> PackedInt32Array:
-	if link_path.is_empty():
-		return PackedInt32Array()
-	# Haul visuals + credit: deposit (path[0]) → join → hub/outpost (path[-1]).
-	var join_key: int = link_path[link_path.size() - 1]
-	var hub_key: int = _nearest_hub_key(join_key, hubs, w, map_data)
-	var out := PackedInt32Array()
-	out.append_array(link_path)
-	if hub_key < 0 or join_key == hub_key:
-		return out
-	var road_targets: Dictionary = {}
-	for hub in hubs:
-		if hub.x >= 0:
-			road_targets[_key(hub.x, hub.y, w)] = true
-	var road_path: PackedInt32Array = _bfs_on_roads(map_data, join_key, road_targets, roads, w, h)
-	if road_path.is_empty():
-		return out
-	for i in range(1, road_path.size()):
-		out.append(road_path[i])
-	return out
-
-
-static func _nearest_hub_key(from_key: int, hubs: Array[Vector2i], w: int, map_data = null) -> int:
-	if map_data != null and map_data.sphere_mode:
-		var best: int = -1
-		var best_d: int = 0x3FFFFFFF
-		for hub in hubs:
-			if hub.x < 0:
-				continue
-			var hk: int = hub.x
-			var d: int = _sphere_graph_distance(map_data, from_key, hk)
-			if d >= 0 and d < best_d:
-				best_d = d
-				best = hk
-		return best
-	var best: int = -1
-	var best_d: int = 0x3FFFFFFF
-	var fx: int = from_key % w
-	var fy: int = from_key / w
-	for hub in hubs:
-		if hub.x < 0:
-			continue
-		var hk: int = _key(hub.x, hub.y, w)
-		var dx: int = absi(hub.x - fx)
-		dx = mini(dx, w - dx)
-		var dy: int = absi(hub.y - fy)
-		var d: int = dx + dy
-		if d < best_d:
-			best_d = d
-			best = hk
-	return best
-
-
-static func _sphere_graph_distance(map_data, from_key: int, to_key: int) -> int:
-	if map_data == null or from_key == to_key:
-		return 0 if from_key == to_key else -1
-	var n: int = map_data.cell_count
-	if from_key < 0 or from_key >= n or to_key < 0 or to_key >= n:
-		return -1
-	var dist: PackedInt32Array = PackedInt32Array()
-	dist.resize(n)
-	dist.fill(-1)
-	var queue: Array[int] = [from_key]
-	dist[from_key] = 0
-	var qi: int = 0
-	while qi < queue.size():
-		var cur: int = queue[qi]
-		qi += 1
-		if cur == to_key:
-			return dist[cur]
-		for nbr in map_data.get_neighbors(cur):
-			if nbr < 0 or nbr >= n or dist[nbr] >= 0:
-				continue
-			dist[nbr] = dist[cur] + 1
-			queue.append(nbr)
-	return -1
-
-
-static func _bfs_to_targets(
-	map_data,
-	grid,
-	start_key: int,
-	team: int,
-	roads: Dictionary,
-	targets: Dictionary,
-	w: int,
-	h: int,
-) -> int:
-	_bump_search_gen()
-	var gen: int = _search_gen
-	_bfs_queue.clear()
-	_bfs_parent[start_key] = -1
-	_bfs_gen[start_key] = gen
-	_bfs_queue.append(start_key)
-	var head: int = 0
-	if map_data.sphere_mode:
-		while head < _bfs_queue.size():
-			var cur: int = _bfs_queue[head]
-			head += 1
-			if targets.has(cur) or (not roads.is_empty() and roads.has(cur)):
-				return cur
-			for nbr in map_data.get_neighbors(cur):
-				if _bfs_gen[nbr] == gen:
-					continue
-				if not _can_traverse_link(map_data, grid, nbr, 0, team, roads):
-					continue
-				_bfs_gen[nbr] = gen
-				_bfs_parent[nbr] = cur
-				_bfs_queue.append(nbr)
-		return -1
-	while head < _bfs_queue.size():
-		var cur: int = _bfs_queue[head]
-		head += 1
-		if targets.has(cur) or (not roads.is_empty() and roads.has(cur)):
-			return cur
-		var cx: int = cur % w
-		var cy: int = cur / w
-		for d: Vector2i in _DIRS:
-			var nx: int = cx + d.x
-			var ny: int = cy + d.y
-			if ny < 0 or ny >= h:
-				continue
-			if nx < 0:
-				nx = w - 1
-			elif nx >= w:
-				nx = 0
-			var nk: int = _key(nx, ny, w)
-			if _bfs_gen[nk] == gen:
-				continue
-			if not _can_traverse_link(map_data, grid, nx, ny, team, roads):
-				continue
-			_bfs_gen[nk] = gen
-			_bfs_parent[nk] = cur
-			_bfs_queue.append(nk)
-	return -1
-
-
-static func _bfs_on_roads(
-	map_data,
-	start_key: int,
-	targets: Dictionary,
-	roads: Dictionary,
-	w: int,
-	h: int,
-) -> PackedInt32Array:
-	_bump_search_gen()
-	var gen: int = _search_gen
-	_bfs_queue.clear()
-	_bfs_parent[start_key] = -1
-	_bfs_gen[start_key] = gen
-	_bfs_queue.append(start_key)
-	var head: int = 0
-	if map_data != null and map_data.sphere_mode:
-		while head < _bfs_queue.size():
-			var cur: int = _bfs_queue[head]
-			head += 1
-			if targets.has(cur):
-				return _reconstruct_path(cur)
-			for nbr in map_data.get_neighbors(cur):
-				if _bfs_gen[nbr] == gen:
-					continue
-				if not roads.has(nbr) and nbr != start_key:
-					continue
-				_bfs_gen[nbr] = gen
-				_bfs_parent[nbr] = cur
-				_bfs_queue.append(nbr)
-		return PackedInt32Array()
-	while head < _bfs_queue.size():
-		var cur: int = _bfs_queue[head]
-		head += 1
-		if targets.has(cur):
-			return _reconstruct_path(cur)
-		var cx: int = cur % w
-		var cy: int = cur / w
-		for d: Vector2i in _DIRS:
-			var nx: int = cx + d.x
-			var ny: int = cy + d.y
-			if ny < 0 or ny >= h:
-				continue
-			if nx < 0:
-				nx = w - 1
-			elif nx >= w:
-				nx = 0
-			var nk: int = _key(nx, ny, w)
-			if _bfs_gen[nk] == gen:
-				continue
-			if not roads.has(nk) and nk != start_key:
-				continue
-			_bfs_gen[nk] = gen
-			_bfs_parent[nk] = cur
-			_bfs_queue.append(nk)
-	return PackedInt32Array()
-
-
-static func _can_traverse_link(
-	map_data,
-	grid,
-	gx: int,
-	gy: int,
-	team: int,
-	roads: Dictionary,
-) -> bool:
-	var key_w: int = map_data.cell_count if map_data.sphere_mode else map_data.grid_width
-	var key: int = _key(gx, gy, key_w)
-	if roads.has(key):
-		return true
-	if not map_data.is_land_cell(gx, gy):
-		return false
-	var idx: int = map_data.cell_index(gx, gy)
-	if idx < 0 or idx >= _grid_cell_count(grid):
-		return false
-	return _grid_owner_at(grid, idx) == team
-
-
-static func _reconstruct_path(goal_key: int) -> PackedInt32Array:
-	var length: int = 0
-	var cur: int = goal_key
-	while cur >= 0:
-		length += 1
-		cur = _bfs_parent[cur]
-	var out := PackedInt32Array()
-	out.resize(length)
-	cur = goal_key
-	for i in range(length - 1, -1, -1):
-		out[i] = cur
-		cur = _bfs_parent[cur]
-	return out
-
-
-static func _key(gx: int, gy: int, w: int) -> int:
-	return gy * w + gx
-
-
-static func _bump_search_gen() -> void:
-	_search_gen += 1
-	if _search_gen >= 0x7FFFFFF0:
-		_bfs_gen.fill(0)
-		_search_gen = 1
-
-
-static func _ensure_bufs(cell_count: int) -> void:
-	if _bfs_parent.size() < cell_count:
-		_bfs_parent.resize(cell_count)
-		_bfs_gen.resize(cell_count)

@@ -1,17 +1,25 @@
 class_name EnemyStrategy
 extends RefCounted
 
-## Pure decision layer for hostile expansion. Returns prioritized placement intents;
+## Pure decision layer for hostile / AI-vs-AI expansion. Returns prioritized placement intents;
 ## callers execute via existing placement + builder job queues.
 ##
-## Design lock A13/F1 (intentional): enemy AI places **outposts + land bridges only**.
-## No barracks / hangar AI — player-only multi-structure toolkit for now.
+## Design lock A13/F1 (updated): AI places **outposts + barracks + hangar** for both teams
+## (AI vs AI / human vs AI). Still **no bridges** (R1).
+## R1 placeability: candidates/scores require claimable land (beachhead / air-strike opened),
+## reject opponent-owned; barracks/hangar heavily prefer self-owned claimable.
+## Planner caps + supply/mineral reserves are primary. R1 instant ACTIVE makes CONNECTING-count
+## gates useless/harmful — Screen + planner must not stall on concurrent-build connecting counts.
 ##
 ## B1 pathfind policy (Screen must honor via helpers below):
 ## - Always try budgeted/capped route first (`prefer_budgeted_route` / allow_astar=false).
 ## - Full A* only when `route_allow_full_astar` says so (rate-limited, hard expand budget).
 ## - Never enable hover A* from this module (B9 stays false in Config / Screen hover path).
+## - After budgeted + full A* miss: Screen may retry with allow_standalone=true (R1 last resort).
 ## - W3: wire `_drain_enemy_ai_queue` to these APIs and REMOVE unbounded allow_astar=true fallback.
+
+## Last `plan_actions` empty-reason (for throttled soak diagnostics).
+static var last_empty_reason: String = ""
 
 const CFG := preload("res://WorldConquestConfig.gd")
 const EconomyLib := preload("res://EconomyLib.gd")
@@ -19,6 +27,7 @@ const OutpostBuildLib := preload("res://WorldConquestOutpostBuild.gd")
 const BattleTileControlLib := preload("res://BattleTileControl.gd")
 const EarthMapGeneratorLib := preload("res://EarthMapGenerator.gd")
 const BattleTerritorySimLib := preload("res://BattleTerritorySim.gd")
+const ResourceLib := preload("res://WorldConquestResources.gd")
 
 enum Difficulty { BEGINNER, MEDIUM, EXPERT }
 
@@ -106,41 +115,83 @@ static func decorate_action_path_policy(action: Dictionary) -> Dictionary:
 	out["path_attempts"] = int(out.get("path_attempts", 0))
 	out["full_astar_attempts"] = int(out.get("full_astar_attempts", 0))
 	out["max_path_expand"] = max_path_expand_for_ai()
-	# A13/F1: never barracks/hangar from AI planner.
-	var kind: String = str(out.get("kind", ""))
-	if kind != OutpostBuildLib.KIND_SPAWNER and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
-		out["kind"] = OutpostBuildLib.KIND_SPAWNER
+	# Keep kind as planned (spawner / barracks / hangar). R1: still no bridges.
 	return out
 
 
 ## --- Planner ---------------------------------------------------------------------
 
 static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
+	last_empty_reason = ""
 	var map_data = snapshot.get("map_data")
 	if map_data == null:
+		last_empty_reason = "no_map"
 		return []
 	var difficulty: int = int(snapshot.get("difficulty", Difficulty.MEDIUM))
-	var enemy_home: Vector2i = snapshot.get("enemy_home", Vector2i(-1, -1))
-	var player_home: Vector2i = snapshot.get("player_home", Vector2i(-1, -1))
-	if enemy_home.x < 0 or player_home.x < 0:
+	# Team-aware roles (defaults preserve hostile-only enemy AI).
+	var self_owner: int = int(snapshot.get("self_owner", BattleTileControlLib.OWNER_HOSTILE))
+	var opponent_owner: int = int(
+		snapshot.get("opponent_owner", BattleTileControlLib.OWNER_FRIENDLY)
+	)
+	var self_home: Vector2i = snapshot.get(
+		"self_home", snapshot.get("enemy_home", Vector2i(-1, -1))
+	)
+	var opponent_home: Vector2i = snapshot.get(
+		"opponent_home", snapshot.get("player_home", Vector2i(-1, -1))
+	)
+	if self_home.x < 0 or opponent_home.x < 0:
+		last_empty_reason = "missing_homes"
 		return []
 	var structures: Array = snapshot.get("structures", [])
 	var owners: PackedByteArray = snapshot.get("owners", PackedByteArray())
 	if owners.is_empty():
+		last_empty_reason = "no_owners"
 		return []
-	var enemy_supply: float = float(snapshot.get("enemy_supply", 0.0))
-	if enemy_supply < EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER):
+	# R1 placeability: same claimable mask the Screen precheck uses (beachhead / air-strike opened).
+	var claimable: PackedByteArray = snapshot.get("claimable", PackedByteArray())
+	var self_supply: float = float(
+		snapshot.get("self_supply", snapshot.get("enemy_supply", 0.0))
+	)
+	var self_resources: Array = snapshot.get("self_resources", [0.0, 0.0, 0.0])
+	var self_au: float = 0.0
+	var self_em: float = 0.0
+	if self_resources.size() > ResourceLib.TYPE_AURELIUM:
+		self_au = float(self_resources[ResourceLib.TYPE_AURELIUM])
+	if self_resources.size() > ResourceLib.TYPE_EMBERSTONE:
+		self_em = float(self_resources[ResourceLib.TYPE_EMBERSTONE])
+	var outpost_cost: float = EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER)
+	var barracks_cost: float = EconomyLib.supply_cost(OutpostBuildLib.KIND_BARRACKS)
+	var hangar_cost: float = EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR)
+	if self_supply < outpost_cost and self_supply < barracks_cost and self_supply < hangar_cost:
+		last_empty_reason = "supply_below_any_build_cost"
 		return []
-	var connecting: int = int(snapshot.get("connecting_hostile", 0))
-	if connecting >= CFG.ENEMY_AI_MAX_CONCURRENT_BUILDS:
-		return []
+	# R1: do NOT gate on connecting_self — instant ACTIVE makes CONNECTING counts stale/stuck.
 
-	var team: int = BattleTileControlLib.OWNER_HOSTILE
 	var sources: Array[Vector2i] = OutpostBuildLib.operational_sources(
-		structures, enemy_home, map_data, team
+		structures, self_home, map_data, self_owner
 	)
 	if sources.is_empty():
+		last_empty_reason = "no_sources"
 		return []
+
+	var own_spawners: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_SPAWNER)
+	var own_barracks: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_BARRACKS)
+	var own_hangars: int = _count_kind(structures, self_owner, OutpostBuildLib.KIND_HANGAR)
+	var need_outposts: bool = own_spawners < CFG.ENEMY_AI_MIN_OUTPOSTS_BEFORE_MILITARY
+	var allow_military: bool = not need_outposts
+	var allow_barracks: bool = (
+		allow_military
+		and own_barracks < CFG.ENEMY_AI_MAX_BARRACKS
+		and self_supply >= barracks_cost + float(CFG.ENEMY_AI_SUPPLY_RESERVE)
+		and self_au >= CFG.ENEMY_AI_BARRACKS_MIN_AU
+	)
+	var allow_hangar: bool = (
+		allow_military
+		and own_barracks >= 1
+		and own_hangars < CFG.ENEMY_AI_MAX_HANGARS
+		and self_supply >= hangar_cost + float(CFG.ENEMY_AI_SUPPLY_RESERVE)
+		and self_em >= CFG.ENEMY_AI_HANGAR_MIN_EM
+	)
 
 	var vision: int = _vision_radius(difficulty)
 	var stride: int = CFG.ENEMY_AI_FRONTIER_SAMPLE_STRIDE
@@ -148,53 +199,106 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 	var candidates: Array[Vector2i] = _collect_candidates(
 		map_data,
 		owners,
+		claimable,
 		sources,
-		enemy_home,
-		player_home,
+		self_home,
+		opponent_home,
 		vision,
 		stride,
 		max_candidates,
 		difficulty,
+		opponent_owner,
 	)
 	if candidates.is_empty():
+		last_empty_reason = "candidates_empty"
 		return []
 
 	var scored: Array[Dictionary] = []
-	var bridge_budget: int = _max_bridge_checks(difficulty)
-	var bridge_checks: int = 0
-	var bridge_chance: float = _bridge_chance(difficulty)
-
+	var spacing_rejects: int = 0
+	var military_spacing_rejects: int = 0
 	for cand: Vector2i in candidates:
-		var outpost_score: float = _score_outpost_cell(
-			map_data, owners, cand, enemy_home, player_home, structures, difficulty
-		)
-		if outpost_score > 0.0:
-			# A13/F1: outposts only (no barracks/hangar intents).
-			scored.append(decorate_action_path_policy({
-				"kind": OutpostBuildLib.KIND_SPAWNER,
-				"target": cand,
-				"score": outpost_score,
-			}))
-
-		if bridge_checks >= bridge_budget:
-			continue
-		if not OutpostBuildLib.is_coastal_cell(map_data, cand.x, cand.y):
-			continue
-		if not OutpostBuildLib.needs_bridge_route(map_data, cand, sources, team):
-			continue
-		bridge_checks += 1
-		var bridge_score: float = _score_bridge_cell(
-			map_data, owners, cand, player_home, difficulty
-		) * bridge_chance
-		if bridge_score > 0.0:
-			# A13/F1: land bridges only as non-outpost structure kind.
-			scored.append(decorate_action_path_policy({
-				"kind": OutpostBuildLib.KIND_CORRIDOR_LINK,
-				"target": cand,
-				"score": bridge_score,
-			}))
+		if self_supply >= outpost_cost:
+			var outpost_score: float = _score_outpost_cell(
+				map_data,
+				owners,
+				claimable,
+				cand,
+				self_home,
+				opponent_home,
+				structures,
+				difficulty,
+				self_owner,
+				opponent_owner,
+			)
+			if need_outposts and outpost_score > 0.0:
+				outpost_score += 8.0
+			if outpost_score > 0.0:
+				scored.append(decorate_action_path_policy({
+					"kind": OutpostBuildLib.KIND_SPAWNER,
+					"target": cand,
+					"score": outpost_score,
+				}))
+			elif not _spacing_ok_for_kind(
+				map_data, cand, structures, OutpostBuildLib.KIND_SPAWNER
+			):
+				spacing_rejects += 1
+		if allow_barracks:
+			var barracks_score: float = _score_barracks_cell(
+				map_data, owners, claimable, cand, self_home, structures, self_owner, opponent_owner
+			)
+			if barracks_score > 0.0:
+				scored.append(decorate_action_path_policy({
+					"kind": OutpostBuildLib.KIND_BARRACKS,
+					"target": cand,
+					"score": barracks_score,
+				}))
+			elif not _spacing_ok_for_kind(
+				map_data, cand, structures, OutpostBuildLib.KIND_BARRACKS
+			):
+				military_spacing_rejects += 1
+		if allow_hangar:
+			var hangar_score: float = _score_hangar_cell(
+				map_data, owners, claimable, cand, self_home, structures, self_owner, opponent_owner
+			)
+			if hangar_score > 0.0:
+				scored.append(decorate_action_path_policy({
+					"kind": OutpostBuildLib.KIND_HANGAR,
+					"target": cand,
+					"score": hangar_score,
+				}))
+			elif not _spacing_ok_for_kind(
+				map_data, cand, structures, OutpostBuildLib.KIND_HANGAR
+			):
+				military_spacing_rejects += 1
 
 	if scored.is_empty():
+		if (
+			spacing_rejects >= candidates.size()
+			and candidates.size() > 0
+			and not allow_barracks
+			and not allow_hangar
+		):
+			last_empty_reason = "all_candidates_spacing"
+		elif (
+			allow_barracks
+			and military_spacing_rejects >= candidates.size()
+			and candidates.size() > 0
+		):
+			last_empty_reason = "all_candidates_military_spacing"
+		elif self_supply < outpost_cost and not allow_barracks and not allow_hangar:
+			last_empty_reason = "supply_or_military_gated"
+		else:
+			last_empty_reason = (
+				"scored_empty cand=%d spacing_rej=%d mil_sp_rej=%d mil_ok=%s brk=%s hgr=%s"
+				% [
+					candidates.size(),
+					spacing_rejects,
+					military_spacing_rejects,
+					str(allow_military),
+					str(allow_barracks),
+					str(allow_hangar),
+				]
+			)
 		return []
 
 	scored.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -208,34 +312,97 @@ static func plan_actions(snapshot: Dictionary) -> Array[Dictionary]:
 	return out
 
 
+## Snapshot fields for throttled empty-plan soak logs (does not re-plan).
+static func empty_plan_diag(snapshot: Dictionary) -> Dictionary:
+	var structures: Array = snapshot.get("structures", [])
+	var self_owner: int = int(snapshot.get("self_owner", BattleTileControlLib.OWNER_HOSTILE))
+	var self_resources: Array = snapshot.get("self_resources", [0.0, 0.0, 0.0])
+	var self_au: float = 0.0
+	var self_em: float = 0.0
+	if self_resources.size() > ResourceLib.TYPE_AURELIUM:
+		self_au = float(self_resources[ResourceLib.TYPE_AURELIUM])
+	if self_resources.size() > ResourceLib.TYPE_EMBERSTONE:
+		self_em = float(self_resources[ResourceLib.TYPE_EMBERSTONE])
+	return {
+		"reason": last_empty_reason,
+		"supply": float(snapshot.get("self_supply", snapshot.get("enemy_supply", 0.0))),
+		"own_spawners": _count_kind(structures, self_owner, OutpostBuildLib.KIND_SPAWNER),
+		"own_barracks": _count_kind(structures, self_owner, OutpostBuildLib.KIND_BARRACKS),
+		"own_hangars": _count_kind(structures, self_owner, OutpostBuildLib.KIND_HANGAR),
+		"self_au": self_au,
+		"self_em": self_em,
+		"connecting": int(
+			snapshot.get("connecting_self", snapshot.get("connecting_hostile", 0))
+		),
+	}
+
+
+static func _count_kind(structures: Array, self_owner: int, kind: String) -> int:
+	var n: int = 0
+	for st: Dictionary in structures:
+		if int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY)) != self_owner:
+			continue
+		if str(st.get("kind", "")) != kind:
+			continue
+		n += 1
+	return n
+
+
+## Empty claimable = legacy snapshot (treat all land as claimable). Otherwise match Screen precheck.
+static func _cell_claimable(claimable: PackedByteArray, idx: int) -> bool:
+	if claimable.is_empty():
+		return true
+	if idx < 0 or idx >= claimable.size():
+		return false
+	return claimable[idx] != 0
+
+
+## Placeable for self: claimable land that is not opponent-owned (self or neutral OK).
+static func _placeable_for_self(
+	owners: PackedByteArray,
+	claimable: PackedByteArray,
+	idx: int,
+	opponent_owner: int,
+) -> bool:
+	if idx < 0 or idx >= owners.size():
+		return false
+	if int(owners[idx]) == opponent_owner:
+		return false
+	return _cell_claimable(claimable, idx)
+
+
 static func _collect_candidates(
 	map_data,
 	owners: PackedByteArray,
+	claimable: PackedByteArray,
 	sources: Array[Vector2i],
-	enemy_home: Vector2i,
-	player_home: Vector2i,
+	self_home: Vector2i,
+	opponent_home: Vector2i,
 	vision: int,
 	stride: int,
 	max_count: int,
 	difficulty: int,
+	opponent_owner: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Array[Vector2i]:
 	if map_data.sphere_mode:
 		return _collect_candidates_sphere(
 			map_data,
 			owners,
+			claimable,
 			sources,
-			enemy_home,
-			player_home,
+			self_home,
+			opponent_home,
 			vision,
 			stride,
 			max_count,
 			difficulty,
+			opponent_owner,
 		)
 	var w: int = map_data.grid_width
 	var h: int = map_data.grid_height
 	var seen: Dictionary = {}
 	var out: Array[Vector2i] = []
-	var toward: Vector2i = _norm_dir(player_home - enemy_home)
+	var toward: Vector2i = _norm_dir(opponent_home - self_home)
 
 	for src: Vector2i in sources:
 		if out.size() >= max_count:
@@ -256,10 +423,7 @@ static func _collect_candidates(
 				if not map_data.is_land_cell(cand.x, cand.y):
 					continue
 				var idx: int = map_data.cell_index(cand.x, cand.y)
-				if idx < 0 or idx >= owners.size():
-					continue
-				var owner: int = int(owners[idx])
-				if owner == BattleTileControlLib.OWNER_FRIENDLY:
+				if not _placeable_for_self(owners, claimable, idx, opponent_owner):
 					continue
 				out.append(cand)
 
@@ -269,17 +433,15 @@ static func _collect_candidates(
 		rng.seed = int(map_data.map_seed) ^ 0xEAEA
 		for _i in range(8):
 			var gx: int = clampi(
-				enemy_home.x + rng.randi_range(-vision, vision), 0, w - 1
+				self_home.x + rng.randi_range(-vision, vision), 0, w - 1
 			)
 			var gy: int = clampi(
-				enemy_home.y + rng.randi_range(-vision / 2, vision / 2), 0, h - 1
+				self_home.y + rng.randi_range(-vision / 2, vision / 2), 0, h - 1
 			)
 			if not map_data.is_land_cell(gx, gy):
 				continue
 			var idx2: int = map_data.cell_index(gx, gy)
-			if idx2 < 0 or idx2 >= owners.size():
-				continue
-			if int(owners[idx2]) == BattleTileControlLib.OWNER_FRIENDLY:
+			if not _placeable_for_self(owners, claimable, idx2, opponent_owner):
 				continue
 			out.append(Vector2i(gx, gy))
 			if out.size() >= mini(8, max_count):
@@ -290,13 +452,15 @@ static func _collect_candidates(
 static func _collect_candidates_sphere(
 	map_data,
 	owners: PackedByteArray,
+	claimable: PackedByteArray,
 	sources: Array[Vector2i],
-	enemy_home: Vector2i,
-	player_home: Vector2i,
+	self_home: Vector2i,
+	_opponent_home: Vector2i,
 	vision: int,
 	stride: int,
 	max_count: int,
 	difficulty: int,
+	opponent_owner: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> Array[Vector2i]:
 	var n: int = map_data.cell_count
 	var seen: Dictionary = {}
@@ -305,23 +469,30 @@ static func _collect_candidates_sphere(
 	dist.resize(n)
 	dist.fill(-1)
 	var queue: Array[int] = []
+	# Sphere: denser ring sample so post-first-outpost spacing still leaves viable rings.
+	var sample_stride: int = maxi(2, stride / 2)
+	var sample_max: int = maxi(max_count, max_count * 2)
 	for src: Vector2i in sources:
 		var cid: int = src.x
 		if cid < 0 or cid >= n or dist[cid] >= 0:
 			continue
+		# Seeds must be claimable placeable land; otherwise BFS floods ocean → foreign dirt.
+		if not map_data.is_land_cell(cid, 0):
+			continue
+		if not _cell_claimable(claimable, cid):
+			continue
 		dist[cid] = 0
 		queue.append(cid)
 	var qi: int = 0
-	while qi < queue.size() and out.size() < max_count:
+	while qi < queue.size() and out.size() < sample_max:
 		var cur: int = queue[qi]
 		qi += 1
 		var cur_d: int = dist[cur]
 		if cur_d > vision:
 			continue
-		if cur_d > 0 and cur_d % stride == 0:
+		if cur_d > 0 and cur_d % sample_stride == 0:
 			if map_data.is_land_cell(cur, 0):
-				var idx: int = cur
-				if idx >= 0 and idx < owners.size() and int(owners[idx]) != BattleTileControlLib.OWNER_FRIENDLY:
+				if _placeable_for_self(owners, claimable, cur, opponent_owner):
 					var key: String = str(cur)
 					if not seen.has(key):
 						seen[key] = true
@@ -332,31 +503,45 @@ static func _collect_candidates_sphere(
 			var nd: int = cur_d + 1
 			if nd > vision or dist[nbr] >= 0:
 				continue
+			# Stay on the opened beachhead: only walk claimable land (no ocean hop to islands).
+			if not map_data.is_land_cell(nbr, 0):
+				continue
+			if not _cell_claimable(claimable, nbr):
+				continue
 			dist[nbr] = nd
 			queue.append(nbr)
-	if out.is_empty() and difficulty == Difficulty.BEGINNER:
+	# Any difficulty: if rings are empty / all ocean / owned, jitter near visited land.
+	if out.is_empty():
 		var rng := RandomNumberGenerator.new()
-		rng.seed = int(map_data.map_seed) ^ 0xEAEA
+		rng.seed = int(map_data.map_seed) ^ 0xEAEA ^ int(difficulty)
 		var fallback: Array[int] = []
-		if enemy_home.x >= 0 and enemy_home.x < n:
-			fallback.append(enemy_home.x)
-		for _i in range(8):
-			if fallback.is_empty():
+		if self_home.x >= 0 and self_home.x < n and _cell_claimable(claimable, self_home.x):
+			fallback.append(self_home.x)
+		for src2: Vector2i in sources:
+			if src2.x >= 0 and src2.x < n and _cell_claimable(claimable, src2.x):
+				fallback.append(src2.x)
+		for _i in range(24):
+			if fallback.is_empty() or out.size() >= mini(16, sample_max):
 				break
 			var pick: int = fallback[rng.randi_range(0, fallback.size() - 1)]
-			for nbr in map_data.get_neighbors(pick):
-				if nbr < 0 or nbr >= n or dist[nbr] < 0 or dist[nbr] > vision:
+			for nbr2 in map_data.get_neighbors(pick):
+				if nbr2 < 0 or nbr2 >= n:
 					continue
-				if not map_data.is_land_cell(nbr, 0):
+				# Accept unvisited neighbors within vision, or any land neighbor if BFS starved.
+				var d2: int = dist[nbr2]
+				if d2 > vision and d2 >= 0:
 					continue
-				if int(owners[nbr]) == BattleTileControlLib.OWNER_FRIENDLY:
+				if not map_data.is_land_cell(nbr2, 0):
 					continue
-				var key2: String = str(nbr)
+				if not _placeable_for_self(owners, claimable, nbr2, opponent_owner):
+					continue
+				var key2: String = str(nbr2)
 				if seen.has(key2):
 					continue
 				seen[key2] = true
-				out.append(Vector2i(nbr, 0))
-				if out.size() >= mini(8, max_count):
+				out.append(Vector2i(nbr2, 0))
+				fallback.append(nbr2)
+				if out.size() >= mini(16, sample_max):
 					break
 	return out
 
@@ -364,55 +549,103 @@ static func _collect_candidates_sphere(
 static func _score_outpost_cell(
 	map_data,
 	owners: PackedByteArray,
+	claimable: PackedByteArray,
 	cand: Vector2i,
-	enemy_home: Vector2i,
-	player_home: Vector2i,
+	self_home: Vector2i,
+	opponent_home: Vector2i,
 	structures: Array,
 	difficulty: int,
+	self_owner: int = BattleTileControlLib.OWNER_HOSTILE,
+	opponent_owner: int = BattleTileControlLib.OWNER_FRIENDLY,
 ) -> float:
 	var idx: int = map_data.cell_index(cand.x, cand.y)
-	if idx < 0 or idx >= owners.size():
+	if not _placeable_for_self(owners, claimable, idx, opponent_owner):
 		return 0.0
 	var owner: int = int(owners[idx])
-	if owner == BattleTileControlLib.OWNER_FRIENDLY:
-		return 0.0
-	if not _spacing_ok(map_data, cand, structures):
+	if not _spacing_ok_for_kind(map_data, cand, structures, OutpostBuildLib.KIND_SPAWNER):
 		return 0.0
 
 	var score: float = 0.0
-	if owner == BattleTileControlLib.OWNER_NEUTRAL:
-		score += 12.0
-	elif owner == BattleTileControlLib.OWNER_HOSTILE:
-		score += 4.0
+	# Prefer consolidating on self-owned claimable; still score neutral claimable frontier.
+	if owner == self_owner:
+		score += 16.0
+	elif owner == BattleTileControlLib.OWNER_NEUTRAL:
+		score += 10.0
+	else:
+		return 0.0
 
-	if _has_owner_neighbor(owners, map_data, cand, BattleTileControlLib.OWNER_HOSTILE):
+	if _has_owner_neighbor(owners, map_data, cand, self_owner):
 		score += 14.0
-	if _has_owner_neighbor(owners, map_data, cand, BattleTileControlLib.OWNER_FRIENDLY):
+	if _has_owner_neighbor(owners, map_data, cand, opponent_owner):
 		score += 6.0 * _contest_weight(difficulty)
 
-	var dist_player: float = _geo_distance(map_data, cand, player_home)
-	var dist_enemy: float = _geo_distance(map_data, cand, enemy_home)
-	score += _advance_weight(difficulty) * maxf(0.0, 48.0 - dist_player * 0.35)
-	score -= dist_enemy * 0.08
+	var dist_opponent: float = _geo_distance(map_data, cand, opponent_home)
+	var dist_self: float = _geo_distance(map_data, cand, self_home)
+	score += _advance_weight(difficulty) * maxf(0.0, 48.0 - dist_opponent * 0.35)
+	score -= dist_self * 0.08
 	return score
 
 
-static func _score_bridge_cell(
+static func _score_barracks_cell(
 	map_data,
 	owners: PackedByteArray,
+	claimable: PackedByteArray,
 	cand: Vector2i,
-	player_home: Vector2i,
-	difficulty: int,
+	self_home: Vector2i,
+	structures: Array,
+	self_owner: int,
+	opponent_owner: int,
 ) -> float:
-	if not OutpostBuildLib.is_coastal_cell(map_data, cand.x, cand.y):
-		return 0.0
 	var idx: int = map_data.cell_index(cand.x, cand.y)
-	if idx < 0 or idx >= owners.size():
+	if not _placeable_for_self(owners, claimable, idx, opponent_owner):
 		return 0.0
-	if int(owners[idx]) == BattleTileControlLib.OWNER_FRIENDLY:
+	var owner: int = int(owners[idx])
+	if not _spacing_ok_for_kind(map_data, cand, structures, OutpostBuildLib.KIND_BARRACKS):
 		return 0.0
-	var score: float = 18.0 + _advance_weight(difficulty) * 6.0
-	score += maxf(0.0, 40.0 - _geo_distance(map_data, cand, player_home) * 0.25)
+	# Military behind the fluid front: heavily prefer self-owned claimable.
+	var score: float = 0.0
+	if owner == self_owner:
+		score += 42.0
+	elif owner == BattleTileControlLib.OWNER_NEUTRAL:
+		score += 2.0
+	else:
+		return 0.0
+	if _has_owner_neighbor(owners, map_data, cand, self_owner):
+		score += 8.0
+	var dist_self: float = _geo_distance(map_data, cand, self_home)
+	score += maxf(0.0, 24.0 - dist_self * 0.4)
+	return score
+
+
+static func _score_hangar_cell(
+	map_data,
+	owners: PackedByteArray,
+	claimable: PackedByteArray,
+	cand: Vector2i,
+	self_home: Vector2i,
+	structures: Array,
+	self_owner: int,
+	opponent_owner: int,
+) -> float:
+	var idx: int = map_data.cell_index(cand.x, cand.y)
+	if not _placeable_for_self(owners, claimable, idx, opponent_owner):
+		return 0.0
+	var owner: int = int(owners[idx])
+	if not _spacing_ok_for_kind(map_data, cand, structures, OutpostBuildLib.KIND_HANGAR):
+		return 0.0
+	var score: float = 0.0
+	if owner == self_owner:
+		score += 38.0
+	elif owner == BattleTileControlLib.OWNER_NEUTRAL:
+		score += 1.5
+	else:
+		return 0.0
+	if _has_owner_neighbor(owners, map_data, cand, self_owner):
+		score += 6.0
+	var dist_self: float = _geo_distance(map_data, cand, self_home)
+	score += maxf(0.0, 20.0 - dist_self * 0.35)
+	# Slightly below barracks so hangars tend to follow after barracks when scores tie-break.
+	score -= 1.0
 	return score
 
 
@@ -435,7 +668,26 @@ static func _geo_distance(map_data, a: Vector2i, b: Vector2i) -> float:
 
 
 static func _spacing_ok(map_data, cand: Vector2i, structures: Array) -> bool:
-	var min_d: int = CFG.MIN_SPAWNER_SPACING_CELLS
+	return _spacing_ok_for_kind(map_data, cand, structures, OutpostBuildLib.KIND_SPAWNER)
+
+
+## Kind-aware structure spacing.
+## - Spawners: MIN_SPAWNER_SPACING_CELLS vs all structures (unchanged).
+## - Barracks/hangar: soft ENEMY_AI_MILITARY_SPACING_CELLS vs all (incl. outposts) so small
+##   beachheads can host military next to spawners; still prevents stacking.
+static func _min_spacing_cells_for_kind(place_kind: String) -> int:
+	if (
+		place_kind == OutpostBuildLib.KIND_BARRACKS
+		or place_kind == OutpostBuildLib.KIND_HANGAR
+	):
+		return maxi(2, int(CFG.ENEMY_AI_MILITARY_SPACING_CELLS))
+	return CFG.MIN_SPAWNER_SPACING_CELLS
+
+
+static func _spacing_ok_for_kind(
+	map_data, cand: Vector2i, structures: Array, kind: String
+) -> bool:
+	var min_d: int = _min_spacing_cells_for_kind(kind)
 	for st: Dictionary in structures:
 		var bx: int = int(st.get("gx", 0))
 		var by: int = int(st.get("gy", 0))
@@ -503,15 +755,6 @@ static func _vision_radius(difficulty: int) -> int:
 	return CFG.ENEMY_AI_VISION_MEDIUM
 
 
-static func _bridge_chance(difficulty: int) -> float:
-	match difficulty:
-		Difficulty.BEGINNER:
-			return CFG.ENEMY_AI_BRIDGE_CHANCE_BEGINNER
-		Difficulty.EXPERT:
-			return CFG.ENEMY_AI_BRIDGE_CHANCE_EXPERT
-	return CFG.ENEMY_AI_BRIDGE_CHANCE_MEDIUM
-
-
 static func _advance_weight(difficulty: int) -> float:
 	match difficulty:
 		Difficulty.BEGINNER:
@@ -528,15 +771,6 @@ static func _contest_weight(difficulty: int) -> float:
 		Difficulty.EXPERT:
 			return 1.4
 	return 0.9
-
-
-static func _max_bridge_checks(difficulty: int) -> int:
-	match difficulty:
-		Difficulty.BEGINNER:
-			return 2
-		Difficulty.EXPERT:
-			return 8
-	return 4
 
 
 static func run_selfcheck() -> Dictionary:
@@ -576,25 +810,35 @@ static func run_selfcheck() -> Dictionary:
 		"map_data": map_data,
 		"structures": map_data.placed_structures,
 		"owners": tc.owners if tc != null else PackedByteArray(),
+		"claimable": tc.claimable_mask if tc != null else PackedByteArray(),
 		"enemy_home": map_data.enemy_home_grid,
 		"player_home": map_data.player_home_grid,
 		"friendly_tiles": tc.friendly_tiles if tc != null else 0,
 		"hostile_tiles": tc.hostile_tiles if tc != null else 0,
 		"claimable_tiles": sim.claimable_tiles,
 		"enemy_supply": float(CFG.STARTING_SUPPLY),
+		"self_resources": [0.0, 0.0, 0.0],
 		"difficulty": Difficulty.MEDIUM,
 		"connecting_hostile": 0,
 	}
 	var actions: Array[Dictionary] = plan_actions(snap)
 	if actions.is_empty():
 		return {"ok": false, "detail": "plan_actions returned empty on medium snapshot"}
+	var saw_outpost: bool = false
 	for a: Dictionary in actions:
 		var kind: String = str(a.get("kind", ""))
 		if kind == "":
 			return {"ok": false, "detail": "action missing kind"}
-		# A13/F1: outposts + bridges only.
-		if kind != OutpostBuildLib.KIND_SPAWNER and kind != OutpostBuildLib.KIND_CORRIDOR_LINK:
-			return {"ok": false, "detail": "A13/F1 violated: kind=%s" % kind}
+		# Allowed kinds: outpost / barracks / hangar (no bridges). Legacy snapshot should
+		# still prefer outposts when military gates are not met.
+		if (
+			kind != OutpostBuildLib.KIND_SPAWNER
+			and kind != OutpostBuildLib.KIND_BARRACKS
+			and kind != OutpostBuildLib.KIND_HANGAR
+		):
+			return {"ok": false, "detail": "unexpected kind=%s (bridges forbidden)" % kind}
+		if kind == OutpostBuildLib.KIND_SPAWNER:
+			saw_outpost = true
 		var tgt: Vector2i = a.get("target", Vector2i(-1, -1))
 		if tgt.x < 0:
 			return {"ok": false, "detail": "action missing target"}
@@ -604,6 +848,8 @@ static func run_selfcheck() -> Dictionary:
 			return {"ok": false, "detail": "planned actions must start at BUDGETED path tier"}
 		if int(a.get("max_path_expand", 0)) != max_path_expand_for_ai():
 			return {"ok": false, "detail": "action max_path_expand mismatch"}
+	if not saw_outpost:
+		return {"ok": false, "detail": "legacy snapshot expected at least one outpost action"}
 	return {
 		"ok": true,
 		"detail": "actions=%d expand_cap=%d" % [actions.size(), max_path_expand_for_ai()],

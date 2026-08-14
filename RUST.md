@@ -1,6 +1,6 @@
 # Rust GDExtension Integration (Empires of Yesterday)
 
-This document describes how to build and use the Rust native extension that accelerates territory conquest simulation, world session (structures/units), logistics, presentation transactions, replay fluid bake, pressure codec, and tape packing.
+This document describes how to build and use the Rust native extension that accelerates territory conquest simulation, world session (structures/units), presentation transactions, replay fluid bake, pressure codec, and tape packing. (R1: live road/logistics growth is retired; `logistics.rs` may remain as an ABI shell.)
 
 ## Current Status
 
@@ -20,8 +20,8 @@ This document describes how to build and use the Rust native extension that acce
 | `world_session.rs` | Build timers, construction damage, barracks/hangar spawns, soldier upkeep tick |
 | `agents.rs` | Soldiers — march, aura, caps + row `version` |
 | `bombers.rs` | Bombers — strike plans, bomb, caps + row `version` |
-| `logistics.rs` | Shared road network, strain, path completion (replaces builder bots as authority) |
-| `builders.rs` | Legacy builder-agent path (presentation / compatibility; logistics owns live roads) |
+| `logistics.rs` | **R1 shell** — road growth / strain no longer tick in Play; FFI may remain for asserts |
+| `builders.rs` | Legacy builder-agent path (unused when R1 builder_step is no-op) |
 | `economy.rs` | Content tables (costs, drains, caps) mirrored from EconomyCatalog |
 | `resources.rs` | Resource wallet / haul credit authority |
 | `presentation_txn.rs` | **Legacy** change feed (QA only — not live Play paint) |
@@ -35,13 +35,13 @@ This document describes how to build and use the Rust native extension that acce
 
 | Method | Role |
 |--------|------|
-| `pull_domain_since(domain, last_version, force_full)` | Full current rows with `version > last` (or full domain if `force_full` / start). Structures also emit `removed_ids` (tombstones) and `bridge_corridors` on full/incremental packs |
+| `pull_domain_since(domain, last_version, force_full)` | Full current rows with `version > last` (or full domain if `force_full` / start). Structures also emit `removed_ids` (tombstones). Bridge corridor packs are empty under R1 |
 | `scd1_domain_epoch(domain)` | High-water for domain |
 | `scd1_sim_generation()` | Match generation (resets force seed) |
 | `scd1_decide_full_pull(...)` | Allow-list reason or empty (incremental) |
 | `scd1_note_full_pull(reason)` | Cooldown + `FULL_RESYNC` log |
 
-Domains: `territory`, `structures`, `roads`, `agents`, `bombers`, `wallet`. Client: `Scd1DomainPull.gd` (per-domain full-pull cooldown; rewinds `last_version` on full seed / sim_generation). Harness: `scd1_version_pull_harness.gd`.
+Live client domains (`Scd1DomainPull.gd`): `territory`, `structures`, `agents`, `bombers`, `wallet`. Rust may still expose a `roads` slot for ABI — Godot does not pull it under R1. Harness: `scd1_version_pull_harness.gd`.
 
 **Authority split:** Rust is the sim engine (mutations, pathing, domain epochs). Godot is visualization only (SCD1 apply, billboards, overlays). `pull_presentation_txn` is **legacy/QA only** — not live Play paint.
 
@@ -100,6 +100,7 @@ $env:CARGO_HTTP_CHECK_REVOKE = "false"
 
 ```powershell
 godot --headless --path . -s res://bridge_invasion_smoke_test.gd
+# (R1: ferry beachhead smoke; filename is legacy)
 ```
 
 Or: `.\setup_rust.ps1 -RunSmokeTest`. The Rust section of the smoke test logs a WARN if the GDExtension is not loaded.

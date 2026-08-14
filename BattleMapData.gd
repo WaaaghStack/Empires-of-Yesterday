@@ -24,6 +24,8 @@ const IMPASSABLE_MOVE_COST := 50.0
 
 var map_seed: int = 0
 var terrain_tag: String = "open_field"
+## Non-empty → WorldPackLib albedo/height cache key suffix (procedural Custom World).
+var pack_visual_tag: String = ""
 var terrain_mix: Dictionary = {}
 var map_size: Vector2 = Vector2(3072, 2304)
 var grid_width: int = 96

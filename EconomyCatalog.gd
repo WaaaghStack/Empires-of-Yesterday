@@ -3,6 +3,10 @@ extends RefCounted
 
 ## Authoring registry for World Conquest structure/unit economy defs.
 ## Compiled at load by EconomyLib — not read per frame.
+##
+## Design lock R1: KIND_CORRIDOR_LINK (land bridge) is retired from gameplay — no HUD button and
+## every placement path rejects it. The entry stays so the kind↔u8 mapping keeps matching
+## rust/empire_territory/src/structures.rs and old saves still decode.
 
 const PACK_DEFAULT := "default"
 
@@ -59,7 +63,11 @@ const _BUILTIN: Dictionary = {
 					"max_active": _CFG.BARRACKS_MAX_ACTIVE_UNITS,
 					"spawn_cost": {
 						"supply": 0.0,
-						"resources": [_CFG.SOLDIER_SPAWN_AURELIUM_COST, 0.0, 0.0],
+						"resources": [
+							_CFG.SOLDIER_SPAWN_AURELIUM_COST,
+							_CFG.SOLDIER_SPAWN_VERDANTITE_COST,
+							0.0,
+						],
 					},
 				},
 			},
@@ -84,7 +92,11 @@ const _BUILTIN: Dictionary = {
 					"max_active": _CFG.HANGAR_MAX_ACTIVE_UNITS,
 					"spawn_cost": {
 						"supply": 0.0,
-						"resources": [_CFG.BOMBER_SPAWN_AURELIUM_COST, 0.0, 0.0],
+						"resources": [
+							_CFG.BOMBER_SPAWN_AURELIUM_COST,
+							0.0,
+							_CFG.BOMBER_SPAWN_EMBERSTONE_COST,
+						],
 					},
 				},
 			},
@@ -96,7 +108,11 @@ const _BUILTIN: Dictionary = {
 				"global_cap": _CFG.GLOBAL_SOLDIER_CAP,
 				"upkeep_per_sec": {
 					"supply": 0.0,
-					"resources": [_CFG.SOLDIER_UPKEEP_AURELIUM_PER_SEC, 0.0, 0.0],
+					"resources": [
+						_CFG.SOLDIER_UPKEEP_AURELIUM_PER_SEC,
+						_CFG.SOLDIER_UPKEEP_VERDANTITE_PER_SEC,
+						0.0,
+					],
 				},
 			},
 			UNIT_BOMBER: {
