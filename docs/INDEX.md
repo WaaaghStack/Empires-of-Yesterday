@@ -13,6 +13,7 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 | [README.md](../README.md) | Quick start, play summary, Rust requirement for live |
 | [REQUEST_SCD1_VERSIONED_PULL.md](REQUEST_SCD1_VERSIONED_PULL.md) | SCD1 main tables + domain monotonic pulls; full snaps only at start/gap |
 | [AUDIT_CELL_WORLD_BUGS_UX.md](AUDIT_CELL_WORLD_BUGS_UX.md) | Cell-world / SCD1 / pathing / build UX audit + implement status |
+| [REQUEST_SURGE_THEATERS_PAINT.md](REQUEST_SURGE_THEATERS_PAINT.md) | **Planned:** outpost Pump/Drain/Surge, named theaters, beachhead+strike paint |
 
 ## Architecture snapshot (live Play)
 
