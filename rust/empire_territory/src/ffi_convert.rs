@@ -95,6 +95,14 @@ pub fn structure_record_from_dict(spec: &GdDictionary) -> Option<StructureRecord
         .get("spawn_timer")
         .and_then(|v| v.try_to().ok())
         .unwrap_or(0.0);
+    let spawner_mode: u8 = spec
+        .get("spawner_mode")
+        .and_then(|v| v.try_to().ok())
+        .unwrap_or(0);
+    let battery_tank: f32 = spec
+        .get("battery_tank")
+        .and_then(|v| v.try_to().ok())
+        .unwrap_or(0.0);
     Some(StructureRecord {
         id,
         team,
@@ -109,6 +117,8 @@ pub fn structure_record_from_dict(spec: &GdDictionary) -> Option<StructureRecord
         health,
         build_remaining,
         spawn_timer,
+        spawner_mode,
+        battery_tank,
         version: spec
             .get("version")
             .and_then(|v| v.try_to::<i64>().ok())
@@ -163,6 +173,8 @@ pub fn structure_record_to_dict(record: &StructureRecord) -> GdDictionary {
     if record.spawn_timer > 0.0 {
         out.set("spawn_timer", record.spawn_timer);
     }
+    out.set("spawner_mode", record.spawner_mode);
+    out.set("battery_tank", record.battery_tank);
     out
 }
 
@@ -377,6 +389,7 @@ pub fn spawners_from_dict(config: &GdDictionary) -> Vec<Spawner> {
             team: teams.get(i).unwrap_or(0),
             gx: gx.get(i).unwrap_or(-1),
             gy: gy.get(i).unwrap_or(-1),
+            ..Spawner::default()
         });
     }
     spawners

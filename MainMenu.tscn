@@ -29,9 +29,9 @@ anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -280.0
-offset_top = -210.0
+offset_top = -250.0
 offset_right = 280.0
-offset_bottom = 210.0
+offset_bottom = 250.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -59,6 +59,19 @@ theme_override_font_sizes/font_size = 14
 theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
 text = "Random Earth map each run"
 horizontal_alignment = 1
+
+[node name="TheaterRow" type="HBoxContainer" parent="MainPanel/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="TheaterLabel" type="Label" parent="MainPanel/VBox/TheaterRow"]
+custom_minimum_size = Vector2(72, 0)
+layout_mode = 2
+text = "Theater"
+
+[node name="TheaterOption" type="OptionButton" parent="MainPanel/VBox/TheaterRow"]
+layout_mode = 2
+size_flags_horizontal = 3
 
 [node name="AiVsAiCheck" type="CheckBox" parent="MainPanel/VBox"]
 layout_mode = 2
@@ -89,9 +102,9 @@ anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -320.0
-offset_top = -300.0
+offset_top = -340.0
 offset_right = 320.0
-offset_bottom = 300.0
+offset_bottom = 340.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -113,6 +126,19 @@ theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
 text = "Map: Earth (criteria reshape coasts, mountains, minerals)"
 horizontal_alignment = 1
 autowrap_mode = 2
+
+[node name="TheaterRow" type="HBoxContainer" parent="CustomWorldPanel/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="TheaterLabel" type="Label" parent="CustomWorldPanel/VBox/TheaterRow"]
+custom_minimum_size = Vector2(140, 0)
+layout_mode = 2
+text = "Theater"
+
+[node name="CustomTheaterOption" type="OptionButton" parent="CustomWorldPanel/VBox/TheaterRow"]
+layout_mode = 2
+size_flags_horizontal = 3
 
 [node name="SeedRow" type="HBoxContainer" parent="CustomWorldPanel/VBox"]
 layout_mode = 2

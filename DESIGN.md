@@ -1,6 +1,6 @@
 # Empires of Yesterday — Design & Dictionary
 
-**Last updated:** August 1, 2026  
+**Last updated:** August 13, 2026  
 **The game:** World Conquest — a fluid territory-conquest sim (Creeper World style) on a 360×180 Earth globe, with multi-structure logistics and units. This is the only game mode; all legacy modes (galaxy campaign, tactical squads, planet runs, RTS World prototype) were removed.
 
 ---
@@ -15,7 +15,7 @@ The objective is **total conquest**: own every reachable claimable land tile, or
 
 ## 2. Run Loop
 
-1. **Main Menu** → **Play** (random seed, or fixed seed via `RunState.run_seed`) or **Custom World…** (criteria + seed → Generate & Play). The seed controls **map terrain noise and resource scatter**; with Custom World, continents are **procedurally generated** from the seed (`procedural: true`), and `land_bias` / `mountain_bias` / `resource_density` reshape land fraction, mountains, and deposit count. Capital placement is chosen at deploy time (`start_region` biases auto-pick). Optional **AI vs AI** checkbox (`RunState.ai_vs_ai`, or env `EOY_AI_VS_AI=1`) skips deploy, mutes build input, and runs the multi-structure planner on both sides (outposts, barracks, hangars) for spectator / perf testing (orbit/zoom still work).
+1. **Main Menu** → **Play** (theater + random seed, or fixed seed via `RunState.run_seed`) or **Custom World…** (theater preset + criteria + seed → Generate & Play). Theaters: **Earth** (real coasts), **Pangea** (procedural high-land), **Archipelago** (procedural high-ocean). The seed controls **map terrain noise and resource scatter**; with Custom World / Pangea / Archipelago, continents are **procedurally generated** from the seed (`procedural: true`), and `land_bias` / `mountain_bias` / `resource_density` reshape land fraction, mountains, and deposit count. Capital placement is chosen at deploy time (`start_region` biases auto-pick). Optional **AI vs AI** checkbox (`RunState.ai_vs_ai`, or env `EOY_AI_VS_AI=1`) skips deploy, mutes build input, and runs the multi-structure planner on both sides (outposts, barracks, hangars) for spectator / perf testing (orbit/zoom still work).
 2. **Deploy pick** — after the globe loads (~2.5 s minimum), a ~5 s window opens: orbit/zoom the Earth, click land to **lock** your capital, then press **Deploy** (Deploy does nothing until locked). On timer expiry, hover land is used if valid, otherwise a random land cell is chosen (“Capital auto-deployed”). Enemy deploys to the furthest land from your capital. The sim does not tick until deploy resolves.
 3. **World Conquest screen** — live sim on the 3D globe. Watch the fronts, manage Supply / minerals, place structures, field units. On a player's **first run** (`RunState.first_run_clarity`), contextual teach beats appear as **non-blocking top banners** (GameTheme panel, mouse-filter ignore) when relevant systems surface:
    - **Pressure** — match goes LIVE.
@@ -24,7 +24,7 @@ The objective is **total conquest**: own every reachable claimable land tile, or
    - **Ferry** — player owns a coast tile, or 90 sim-seconds after minerals beat.
    - **Bombers** — barracks/hangar affordable, or 120 sim-seconds elapsed.
    Each beat auto-dismisses after 8 s (pressure also dismisses on click; outpost on arm/place). `first_run_clarity` clears after the last beat or when the battle ends. QA harness sets `first_run_clarity = false`.
-4. Battle ends on conquest / zero enemy power / `MAX_SIM_TIME_SEC` (2h sim) → **Battle Over** BI match dashboard (KPIs, side-by-side comparison, forces/meta rows) → **Play Again** (new random seed; keeps Custom World criteria if set), **Same Map** (keep `RunState.run_seed`, new deploy pick on same terrain), or **Menu** (clears Custom World criteria).
+4. Battle ends on conquest / zero enemy power / `MAX_SIM_TIME_SEC` (2h sim) → **Battle Over** BI match dashboard (KPIs, side-by-side comparison, forces/meta rows) → **Play Again** (new random seed; keeps theater + Custom World criteria if set), **Same Map** (keep `RunState.run_seed` + theater, new deploy pick on same terrain), or **Menu** (clears Custom World criteria and theater).
 
 ### Custom World (Main Menu)
 
@@ -32,6 +32,7 @@ Secondary flow from **Custom World…**. Criteria are stored on `RunState` and p
 
 | Criterion | RunState | Effect |
 |-----------|----------|--------|
+| Theater | `theater_id` | earth / pangea / archipelago — fills procedural + land/mountain/resource preset |
 | Seed | `run_seed` | Drives procedural continents, elev noise, resource RNG |
 | Procedural | `custom_world` → `criteria.procedural` | New land mask (no Earth `land.bin`); skips sphere pack cell cache; distinct albedo/height cache tag |
 | Land / ocean | `land_bias` (−1…+1) | Shifts continental noise land threshold (more/less land) |
@@ -53,6 +54,8 @@ Secondary flow from **Custom World…**. Criteria are stored on `RunState` and p
 | **Outpost (400)** | Arm outpost (spawner) placement |
 | **Barracks (400)** | Arm barracks placement — spawns soldiers |
 | **Hangar (400)** | Arm hangar placement — spawns bombers |
+| **Paint** | Arm rally pin: coast → soldier beachhead, inland → bomber strike |
+| Click friendly outpost | Select it — **Mode** cycles Pump/Drain/Battery; **Surge** dumps Battery |
 | **Inspect** | Tile inspector mode |
 | **Pause** / **▶ x1** | Pause / Resume (Space) / cycle sim speed |
 | Esc | Cancel build mode; during deploy, clears capital lock |
@@ -75,7 +78,8 @@ Secondary flow from **Custom World…**. Criteria are stored on `RunState` and p
 | **Territory overlay (live)** | Ownership overlay with **pressure depth tint** (hybrid): R8 owner/border paint plus interior shading from local pressure depth so fronts read as pooling fluid. **Sim truth unchanged** — gradient flow still uses H = P + E. | `ownership_display.gdshader`, `TerritoryKernel.display_byte_for`, `OVERLAY_OWNERS_ONLY` |
 | **Inspect probe** | Hovered tile shows terrain **elevation** (0–100) and **effective height H** (= own-side pressure + elevation), plus pressures and claimability. | `WorldConquestScreen._update_tile_probe`, `query_tile` |
 | **Supply** | Player wallet. Starts at `STARTING_SUPPLY` (1200); income `INCOME_PER_TILE_PER_SEC` (0.8) per owned tile. Spent on outposts (400), barracks (400), and hangars (400). | `WorldConquestScreen`, `WorldConquestConfig`, `EconomyCatalog` |
-| **Outpost (spawner)** | Player-placed pressure pump. Lands on the exact clicked tile; placement is allowed on any land tile except enemy-held ones. **Builds instantly** on valid placement (R1). | `WorldConquestOutpostBuild.gd`, `WorldConquestScreen._resolve_placement` |
+| **Outpost (spawner)** | Player-placed pressure pump. Lands on the exact clicked tile; placement is allowed on any land tile except enemy-held ones. **Builds instantly** on valid placement (R1). Modes: **Pump** (default trickle), **Drain** (erode enemy neighbor pressure), **Battery** (store inject in a tank). **Surge** dumps a Battery tank onto Pump neighbor tiles (manual). Enemy capture **loses** the tank. | `WorldConquestOutpostBuild.gd`, `sim::inject_placed_spawners` |
+| **Paint** | One rally pin per side. Beachhead: soldiers ferry to that landmass and hold until a puddle exists (~8 owned cells). Strike: bombers bomb the cell and its land neighbors until the crater is owned. Pin clears on success, cancel, or a new paint. Does not capture by itself (F5). | `TerritorySim.set_team_paint`, `agents.rs`, `bombers.rs` |
 | **Barracks** | Supply cost 400; **instant** place. Spawns **soldiers** every `BARRACKS_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Verdantite. Cap **5** living per barracks; global soldier cap **100**. | `EconomyCatalog`, `world_session.rs`, `agents.rs` |
 | **Hangar** | Supply cost 400; **instant** place. Spawns **bombers** every `HANGAR_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Emberstone. Cap **5** living per hangar; global bomber cap **100**. | `EconomyCatalog`, `world_session.rs`, `bombers.rs` |
 | **Soldier** | Ground unit: aura pressure + erode enemy pressure; moves on land; can **ferry** open water. **Aurelium + Verdantite upkeep**; Au deficit applies `SOLDIER_UPKEEP_DEFICIT_DPS`. Orphan damage if barracks destroyed. | `WorldConquestConfig`, `agents.rs` |

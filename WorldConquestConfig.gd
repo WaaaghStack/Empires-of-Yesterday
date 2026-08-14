@@ -343,3 +343,82 @@ const ENEMY_AI_HANGAR_MIN_EM := 0.0
 ## Outposts still use MIN_SPAWNER_SPACING_CELLS vs all structures.
 const ENEMY_AI_MILITARY_SPACING_CELLS := 2
 ## R1: bridge AI removed — chance constants retired (unread).
+
+## Named theaters (feat/surge-theaters-paint). Seed still varies procedural continents.
+const THEATER_EARTH := "earth"
+const THEATER_PANGEA := "pangea"
+const THEATER_ARCHIPELAGO := "archipelago"
+const THEATER_IDS: Array[String] = [THEATER_EARTH, THEATER_PANGEA, THEATER_ARCHIPELAGO]
+
+## Outpost inject modes (Rust spawner_mode u8).
+const SPAWNER_MODE_PUMP := 0
+const SPAWNER_MODE_DRAIN := 1
+const SPAWNER_MODE_BATTERY := 2
+
+## Unit paint kinds (Rust paint_kind u8). 0 = none.
+const PAINT_NONE := 0
+const PAINT_BEACHHEAD := 1
+const PAINT_STRIKE := 2
+
+
+static func theater_display_name(theater_id: String) -> String:
+	match theater_id:
+		THEATER_PANGEA:
+			return "Pangea"
+		THEATER_ARCHIPELAGO:
+			return "Archipelago"
+		_:
+			return "Earth"
+
+
+static func theater_blurb(theater_id: String) -> String:
+	match theater_id:
+		THEATER_PANGEA:
+			return "One land war — basins and outposts dominate."
+		THEATER_ARCHIPELAGO:
+			return "Islands — ferry and bombers are the game."
+		_:
+			return "Real Earth coasts — ferry when you leave the continent."
+
+
+## Locked criteria so Earth / Pangea / Archipelago stay stable across seeds.
+static func theater_preset(theater_id: String) -> Dictionary:
+	match theater_id:
+		THEATER_PANGEA:
+			return {
+				"procedural": true,
+				"land_bias": 0.70,
+				"mountain_bias": 0.20,
+				"resource_density": 1.0,
+			}
+		THEATER_ARCHIPELAGO:
+			return {
+				"procedural": true,
+				"land_bias": -0.55,
+				"mountain_bias": 0.0,
+				"resource_density": 1.15,
+			}
+		_:
+			return {
+				"procedural": false,
+				"land_bias": 0.0,
+				"mountain_bias": 0.0,
+				"resource_density": 1.0,
+			}
+
+
+static func normalize_theater_id(theater_id: String) -> String:
+	var tid: String = theater_id.strip_edges().to_lower()
+	if tid == THEATER_PANGEA or tid == THEATER_ARCHIPELAGO:
+		return tid
+	return THEATER_EARTH
+
+
+static func spawner_mode_label(mode: int) -> String:
+	match mode:
+		SPAWNER_MODE_DRAIN:
+			return "Drain"
+		SPAWNER_MODE_BATTERY:
+			return "Battery"
+		_:
+			return "Pump"

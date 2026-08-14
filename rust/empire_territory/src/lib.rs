@@ -47,8 +47,10 @@ use logistics::{clamp_reconcile_budget, LogisticsConfig, LogisticsLayer};
 use resources::ResourceWallet;
 use route::{PortalGraph, RoutePlannerState, RouteSnapshot};
 use sphere_grid::SphereGrid;
-use structures::{scd1_structures_pull_ids, state_from_str, StructureStore};
-use sim::{Spawner, TerritoryKernel};
+use structures::{
+    scd1_structures_pull_ids, state_from_str, StructureStore, KIND_SPAWNER, STATE_ACTIVE,
+};
+use sim::{Spawner, TerritoryKernel, SPAWNER_MODE_BATTERY};
 use tape_codec::{decode_pressure_v2, encode_pressure_v2, pack_territory_tape_v2};
 use domain_version::{
     decide_full_pull, full_pull_allowed_by_cooldown, DomainBook, DomainId, FullPullReason,
@@ -549,6 +551,14 @@ impl TerritorySim {
         let Some(mut record) = structure_record_from_dict(&spec) else {
             return false;
         };
+        if let Some(old) = self.structure_store.structures.get(&record.id) {
+            if spec.get("spawner_mode").is_none() {
+                record.spawner_mode = old.spawner_mode;
+            }
+            if spec.get("battery_tank").is_none() {
+                record.battery_tank = old.battery_tank;
+            }
+        }
         let v = self.domain_book.touch(DomainId::Structures);
         record.version = v;
         self.structure_store.upsert(record);
@@ -1624,8 +1634,119 @@ impl TerritorySim {
                 team: spawner_teams.get(i).unwrap_or(0),
                 gx: spawner_gx.get(i).unwrap_or(-1),
                 gy: spawner_gy.get(i).unwrap_or(-1),
+                ..Spawner::default()
             });
         }
+    }
+
+    fn sync_spawners_from_structures(&mut self) {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return;
+        };
+        if !self.structure_store.ready {
+            return;
+        }
+        kernel.spawners.clear();
+        for st in self.structure_store.structures.values() {
+            if st.kind != KIND_SPAWNER || st.state != STATE_ACTIVE {
+                continue;
+            }
+            kernel.spawners.push(Spawner {
+                team: st.team,
+                gx: st.gx,
+                gy: st.gy,
+                mode: st.spawner_mode,
+                tank: st.battery_tank,
+                sid: st.id,
+            });
+        }
+    }
+
+    #[func]
+    fn set_spawner_mode(&mut self, sid: i32, mode: i32) -> bool {
+        let mode_u = mode.clamp(0, SPAWNER_MODE_BATTERY as i32) as u8;
+        {
+            let Some(st) = self.structure_store.structures.get_mut(&sid) else {
+                return false;
+            };
+            if st.kind != KIND_SPAWNER {
+                return false;
+            }
+            st.spawner_mode = mode_u;
+        }
+        let v = self.domain_book.touch(DomainId::Structures);
+        if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+            st.version = v;
+        }
+        self.sync_spawners_from_structures();
+        true
+    }
+
+    #[func]
+    fn surge_spawner(&mut self, sid: i32) -> f32 {
+        self.sync_spawners_from_structures();
+        let Some(st) = self.structure_store.structures.get(&sid).cloned() else {
+            return 0.0;
+        };
+        if st.kind != KIND_SPAWNER || st.spawner_mode != SPAWNER_MODE_BATTERY {
+            return 0.0;
+        }
+        let Some(kernel) = self.kernel.as_mut() else {
+            return 0.0;
+        };
+        let dumped = kernel.surge_spawner_at(st.gx, st.gy, st.team);
+        if let Some(row) = self.structure_store.structures.get_mut(&sid) {
+            row.battery_tank = 0.0;
+            let v = self.domain_book.touch(DomainId::Structures);
+            row.version = v;
+        }
+        dumped
+    }
+
+    #[func]
+    fn query_spawner(&self, sid: i32) -> GdDictionary {
+        let mut out = GdDictionary::new();
+        let Some(st) = self.structure_store.structures.get(&sid) else {
+            return out;
+        };
+        out.set("id", st.id);
+        out.set("team", st.team);
+        out.set("gx", st.gx);
+        out.set("gy", st.gy);
+        out.set("spawner_mode", st.spawner_mode);
+        out.set("battery_tank", st.battery_tank);
+        out
+    }
+
+    #[func]
+    fn set_team_paint(&mut self, team: i32, kind: i32, gx: i32, gy: i32) -> bool {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return false;
+        };
+        kernel.set_paint(team as u8, kind.max(0) as u8, gx, gy)
+    }
+
+    #[func]
+    fn clear_team_paint(&mut self, team: i32) {
+        if let Some(kernel) = self.kernel.as_mut() {
+            kernel.clear_paint(team as u8);
+        }
+    }
+
+    #[func]
+    fn get_team_paint(&self, team: i32) -> GdDictionary {
+        let mut out = GdDictionary::new();
+        let Some(kernel) = self.kernel.as_ref() else {
+            return out;
+        };
+        let t = team as usize;
+        if t >= kernel.paint_kind.len() {
+            return out;
+        }
+        out.set("kind", kernel.paint_kind[t]);
+        out.set("gx", kernel.paint_gx[t]);
+        out.set("gy", kernel.paint_gy[t]);
+        out
     }
 
     #[func]
@@ -1984,6 +2105,7 @@ impl TerritorySim {
 
     #[func]
     fn advance_round(&mut self) {
+        self.sync_spawners_from_structures();
         let Some(kernel) = self.kernel.as_mut() else {
             return;
         };
@@ -2063,6 +2185,33 @@ impl TerritorySim {
             }
         }
         kernel.advance_round();
+        // Battery tanks live on kernel.spawners this round — stamp back to the structure store.
+        if self.structure_store.ready {
+            let snapshot: Vec<(i32, f32, u8)> = kernel
+                .spawners
+                .iter()
+                .filter(|sp| sp.sid > 0)
+                .map(|sp| (sp.sid, sp.tank, sp.mode))
+                .collect();
+            let mut dirty_sids: Vec<i32> = Vec::new();
+            for (sid, tank, mode) in snapshot {
+                if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+                    if (st.battery_tank - tank).abs() > 0.01 || st.spawner_mode != mode {
+                        st.battery_tank = tank;
+                        st.spawner_mode = mode;
+                        dirty_sids.push(sid);
+                    }
+                }
+            }
+            if !dirty_sids.is_empty() {
+                let tv = self.domain_book.touch(DomainId::Structures);
+                for sid in dirty_sids {
+                    if let Some(st) = self.structure_store.structures.get_mut(&sid) {
+                        st.version = tv;
+                    }
+                }
+            }
+        }
         // Stamp territory cell versions for owner dirty this round (SCD1 pull source).
         let (dirty_idx, dirty_val) = kernel.take_owner_dirty();
         let (display_idx, display_vals) = kernel.take_display_dirty();

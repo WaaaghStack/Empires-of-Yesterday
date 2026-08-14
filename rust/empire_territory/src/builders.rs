@@ -779,6 +779,8 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 0,
         });
         store.ready = true;
@@ -829,6 +831,8 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 0,
         });
         store.ready = true;

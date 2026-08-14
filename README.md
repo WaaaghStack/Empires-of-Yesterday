@@ -15,14 +15,14 @@ See [RUST.md](RUST.md) for build details.
 
 ## How to play
 
-1. **Main Menu → Play** — generates a random Earth run (fixed seed via `RunState.run_seed`). **Custom World…** sets seed + land/resource/mountain criteria before Generate & Play.
+1. **Main Menu → Play** — pick a **theater** (Earth / Pangea / Archipelago) then generate a random run (fixed seed via `RunState.run_seed`). **Custom World…** starts from a theater preset and lets you tweak seed + land/resource/mountain criteria before Generate & Play.
 2. Your capital (blue) and the enemy capital (red) pump pressure continuously.
 3. Earn **Supply** from owned tiles. Spend it on:
-   - **Outpost (400)** — forward pressure pump; place on any land except enemy-held tiles. **Builds instantly.**
+   - **Outpost (400)** — forward pressure pump; place on any land except enemy-held tiles. **Builds instantly.** Click a placed outpost to set **Pump / Drain / Battery**; **Surge** dumps a Battery tank as one wave.
    - **Barracks (400)** — spawns **soldiers** (Aurelium + Verdantite spawn; Au+Ve upkeep).
    - **Hangar (400)** — spawns **bombers** (Aurelium + Emberstone spawn; no continuous upkeep).
 4. Own **Aurelium / Verdantite / Emberstone** deposits — miners appear and pulse when the deposit is in your territory.
-5. Cross oceans with **soldiers** (ferry at 1/4 land speed); landings open beachhead claimable land.
+5. Cross oceans with **soldiers** (ferry at 1/4 land speed); landings open beachhead claimable land. **Paint** a coast to rally ferries, or inland land to aim bombers.
 6. Win by owning all reachable land or draining enemy **pressure** to zero (units do not change the win formula).
 
 ### Controls
@@ -30,6 +30,8 @@ See [RUST.md](RUST.md) for build details.
 - **Right-drag** rotate globe, **wheel** zoom
 - **Left-click** place structure (with a build button armed), **Esc** cancel
 - **Outpost / Barracks / Hangar** arm placement; **Inspect** tile inspector
+- **Paint** — arm a rally pin (coast = soldier beachhead, inland = bomber strike)
+- Click a friendly **Outpost** then **Mode** (Pump / Drain / Battery) and **Surge**
 - **Pause** / **▶ x1** speed controls
 - **F3** — toggle perf HUD (FPS, CPU/GPU counters, sim/overlay context); see [PERFORMANCE.md](PERFORMANCE.md)
 

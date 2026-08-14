@@ -1,6 +1,8 @@
 # RunState.gd — minimal autoload for World Conquest seeding.
 extends Node
 
+const CFG := preload("res://WorldConquestConfig.gd")
+
 var run_seed: int = 0
 ## QA / harness: skip interactive deploy pick (instant random capital).
 var skip_deploy_pick: bool = false
@@ -26,6 +28,8 @@ var mountain_bias: float = 0.0
 var start_region: String = "any"
 ## Enemy AI difficulty; −1 = WorldConquestConfig default. 0=Beginner, 1=Medium, 2=Expert.
 var ai_difficulty: int = -1
+## Named theater: earth | pangea | archipelago. Play Again keeps this; Menu resets.
+var theater_id: String = "earth"
 
 
 func is_ai_vs_ai() -> bool:
@@ -46,11 +50,17 @@ func map_gen_criteria() -> Dictionary:
 	return crit
 
 
+func apply_theater(id: String) -> void:
+	theater_id = CFG.normalize_theater_id(id)
+	var preset: Dictionary = CFG.theater_preset(theater_id)
+	custom_world = bool(preset.get("procedural", false))
+	land_bias = float(preset.get("land_bias", 0.0))
+	mountain_bias = float(preset.get("mountain_bias", 0.0))
+	resource_density = float(preset.get("resource_density", 1.0))
+	world_map_id = "earth"
+
+
 func reset_custom_world_defaults() -> void:
-	custom_world = false
-	land_bias = 0.0
-	resource_density = 1.0
-	mountain_bias = 0.0
+	apply_theater(CFG.THEATER_EARTH)
 	start_region = "any"
 	ai_difficulty = -1
-	world_map_id = "earth"

@@ -22,6 +22,16 @@ pub const OWNER_HOSTILE: u8 = 2;
 pub const OWNER_CONTESTED: u8 = 3;
 pub const OWNER_UNCLAIMABLE: u8 = 4;
 
+pub const SPAWNER_MODE_PUMP: u8 = 0;
+pub const SPAWNER_MODE_DRAIN: u8 = 1;
+pub const SPAWNER_MODE_BATTERY: u8 = 2;
+/// Battery stores this many inject-waves of neighbor output before capping.
+pub const BATTERY_MAX_WAVES: f32 = 24.0;
+
+pub const PAINT_NONE: u8 = 0;
+pub const PAINT_BEACHHEAD: u8 = 1;
+pub const PAINT_STRIKE: u8 = 2;
+
 pub(crate) const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
 #[inline]
@@ -29,11 +39,14 @@ pub(crate) fn effective_height(pressure: f32, elevation: f32) -> f32 {
     pressure + elevation
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Spawner {
     pub team: u8,
     pub gx: i32,
     pub gy: i32,
+    pub mode: u8,
+    pub tank: f32,
+    pub sid: i32,
 }
 
 pub struct TerritoryKernel {
@@ -54,6 +67,12 @@ pub struct TerritoryKernel {
     pub player_home_idx: i32,
     pub enemy_home_idx: i32,
     pub spawners: Vec<Spawner>,
+    /// Per-team paint (index by owner id 1/2). kind 0 = none.
+    pub paint_kind: [u8; 3],
+    pub paint_gx: [i32; 3],
+    pub paint_gy: [i32; 3],
+    /// 1 on cells in the painted landmass (beachhead) or strike crater.
+    pub paint_land: [Vec<u8>; 3],
     pub friendly_tiles: i32,
     pub hostile_tiles: i32,
     pub claimable_tile_count: i32,
@@ -153,6 +172,14 @@ impl TerritoryKernel {
             player_home_idx,
             enemy_home_idx,
             spawners,
+            paint_kind: [PAINT_NONE; 3],
+            paint_gx: [-1; 3],
+            paint_gy: [-1; 3],
+            paint_land: [
+                vec![0u8; tile_count],
+                vec![0u8; tile_count],
+                vec![0u8; tile_count],
+            ],
             friendly_tiles,
             hostile_tiles,
             claimable_tile_count,
@@ -377,6 +404,7 @@ impl TerritoryKernel {
         }
 
         self.preserve_homes();
+        self.maybe_clear_paint();
         self.maybe_rebuild_active_indices(false);
     }
 
@@ -474,8 +502,19 @@ impl TerritoryKernel {
     fn inject_placed_spawners(&mut self) {
         let spawners: Vec<Spawner> = self.spawners.clone();
         let mut dirty: Vec<usize> = Vec::new();
-        for sp in &spawners {
+        let mut tanks: Vec<(usize, f32)> = Vec::new();
+        for (si, sp) in spawners.iter().enumerate() {
             if sp.gx < 0 || sp.gy < 0 {
+                continue;
+            }
+            let cell = self.cell_index(sp.gx, sp.gy);
+            if cell < 0 {
+                continue;
+            }
+            let cell_ui = cell as usize;
+            // Lost the tile — tank dumps into the void (design: lost, not flipped).
+            if cell_ui < self.owners.len() && self.owners[cell_ui] != sp.team {
+                tanks.push((si, 0.0));
                 continue;
             }
             let amount = if sp.team == OWNER_FRIENDLY {
@@ -483,28 +522,347 @@ impl TerritoryKernel {
             } else {
                 self.hostile_spawn_rate
             };
-            let is_friendly = sp.team == OWNER_FRIENDLY;
-            let si = self.cell_index(sp.gx, sp.gy);
-            if si < 0 {
+            if amount <= 0.0 {
                 continue;
             }
+            let is_friendly = sp.team == OWNER_FRIENDLY;
             let mut neighbor_scratch = Vec::with_capacity(6);
-            self.collect_neighbors(si as usize, &mut neighbor_scratch);
+            self.collect_neighbors(cell_ui, &mut neighbor_scratch);
+            let mut fed: Vec<usize> = Vec::new();
             for ui in neighbor_scratch {
-                if self.claimable_mask[ui] == 0 {
+                if ui >= self.claimable_mask.len() || self.claimable_mask[ui] == 0 {
                     continue;
                 }
-                if is_friendly {
-                    self.pressure_friendly[ui] += amount;
-                } else {
-                    self.pressure_hostile[ui] += amount;
+                fed.push(ui);
+            }
+            if fed.is_empty() {
+                continue;
+            }
+            match sp.mode {
+                SPAWNER_MODE_PUMP => {
+                    for ui in fed {
+                        if is_friendly {
+                            self.pressure_friendly[ui] += amount;
+                        } else {
+                            self.pressure_hostile[ui] += amount;
+                        }
+                        dirty.push(ui);
+                    }
                 }
-                dirty.push(ui);
+                SPAWNER_MODE_DRAIN => {
+                    for ui in fed {
+                        if is_friendly {
+                            let take = self.pressure_hostile[ui].min(amount);
+                            if take > 0.0 {
+                                self.pressure_hostile[ui] -= take;
+                                dirty.push(ui);
+                            }
+                        } else {
+                            let take = self.pressure_friendly[ui].min(amount);
+                            if take > 0.0 {
+                                self.pressure_friendly[ui] -= take;
+                                dirty.push(ui);
+                            }
+                        }
+                    }
+                }
+                SPAWNER_MODE_BATTERY => {
+                    let add = amount * fed.len() as f32;
+                    let cap = amount * fed.len() as f32 * BATTERY_MAX_WAVES;
+                    tanks.push((si, (sp.tank + add).min(cap)));
+                }
+                _ => {}
+            }
+        }
+        for (si, tank) in tanks {
+            if si < self.spawners.len() {
+                self.spawners[si].tank = tank;
             }
         }
         for ui in dirty {
             self.mark_active_dirty(ui);
         }
+    }
+
+    /// Empty a battery tank onto Pump neighbor tiles. Returns dumped amount.
+    pub fn surge_spawner_at(&mut self, gx: i32, gy: i32, team: u8) -> f32 {
+        let mut dump = 0.0f32;
+        let mut found = None;
+        for (i, sp) in self.spawners.iter().enumerate() {
+            if sp.gx == gx && sp.gy == gy && sp.team == team {
+                found = Some(i);
+                dump = sp.tank;
+                break;
+            }
+        }
+        let Some(si) = found else {
+            return 0.0;
+        };
+        if dump <= 0.0 {
+            self.spawners[si].tank = 0.0;
+            return 0.0;
+        }
+        let cell = self.cell_index(gx, gy);
+        if cell < 0 {
+            self.spawners[si].tank = 0.0;
+            return 0.0;
+        }
+        let cell_ui = cell as usize;
+        if cell_ui < self.owners.len() && self.owners[cell_ui] != team {
+            self.spawners[si].tank = 0.0;
+            return 0.0;
+        }
+        let mut neighbor_scratch = Vec::with_capacity(6);
+        self.collect_neighbors(cell_ui, &mut neighbor_scratch);
+        let mut fed: Vec<usize> = Vec::new();
+        for ui in neighbor_scratch {
+            if ui < self.claimable_mask.len() && self.claimable_mask[ui] != 0 {
+                fed.push(ui);
+            }
+        }
+        if fed.is_empty() {
+            self.spawners[si].tank = 0.0;
+            return 0.0;
+        }
+        let each = dump / fed.len() as f32;
+        let is_friendly = team == OWNER_FRIENDLY;
+        for ui in fed {
+            if is_friendly {
+                self.pressure_friendly[ui] += each;
+            } else {
+                self.pressure_hostile[ui] += each;
+            }
+            self.mark_active_dirty(ui);
+        }
+        self.spawners[si].tank = 0.0;
+        dump
+    }
+
+    pub fn is_land_idx(&self, ui: usize) -> bool {
+        if !self.land_mask.is_empty() {
+            return ui < self.land_mask.len() && self.land_mask[ui] != 0;
+        }
+        ui < self.claimable_mask.len() && self.claimable_mask[ui] != 0
+    }
+
+    pub fn paint_cell_marked(&self, team: u8, gx: i32, gy: i32) -> bool {
+        let t = team as usize;
+        if t >= self.paint_kind.len() || self.paint_kind[t] == PAINT_NONE {
+            return false;
+        }
+        let idx = self.cell_index(gx, gy);
+        if idx < 0 {
+            return false;
+        }
+        let ui = idx as usize;
+        ui < self.paint_land[t].len() && self.paint_land[t][ui] != 0
+    }
+
+    pub fn clear_paint(&mut self, team: u8) {
+        let t = team as usize;
+        if t >= self.paint_kind.len() {
+            return;
+        }
+        self.paint_kind[t] = PAINT_NONE;
+        self.paint_gx[t] = -1;
+        self.paint_gy[t] = -1;
+        if t < self.paint_land.len() {
+            for v in &mut self.paint_land[t] {
+                *v = 0;
+            }
+        }
+    }
+
+    /// Snap water clicks to nearest land for beachhead. Returns false if no land seed.
+    pub fn set_paint(&mut self, team: u8, kind: u8, gx: i32, gy: i32) -> bool {
+        let t = team as usize;
+        if t != OWNER_FRIENDLY as usize && t != OWNER_HOSTILE as usize {
+            return false;
+        }
+        if kind == PAINT_NONE {
+            self.clear_paint(team);
+            return true;
+        }
+        let mut seed = self.cell_index(gx, gy);
+        if seed < 0 {
+            return false;
+        }
+        if kind == PAINT_BEACHHEAD && !self.is_land_idx(seed as usize) {
+            seed = self.nearest_land_idx(seed as usize);
+            if seed < 0 {
+                return false;
+            }
+        }
+        if kind == PAINT_STRIKE && !self.is_land_idx(seed as usize) {
+            return false;
+        }
+        let (pgx, pgy) = self.grid_from_idx(seed);
+        self.paint_kind[t] = kind;
+        self.paint_gx[t] = pgx;
+        self.paint_gy[t] = pgy;
+        self.rebuild_paint_land(team);
+        true
+    }
+
+    fn grid_from_idx(&self, idx: i32) -> (i32, i32) {
+        if self.graph_topology {
+            return (idx, 0);
+        }
+        let w = self.grid_w.max(1);
+        (idx % w, idx / w)
+    }
+
+    fn nearest_land_idx(&self, start: usize) -> i32 {
+        if start >= self.tile_count {
+            return -1;
+        }
+        if self.is_land_idx(start) {
+            return start as i32;
+        }
+        let mut seen = vec![false; self.tile_count];
+        let mut q = Vec::new();
+        q.push(start);
+        seen[start] = true;
+        let mut head = 0usize;
+        let mut scratch = Vec::with_capacity(6);
+        while head < q.len() && head < 8000 {
+            let cur = q[head];
+            head += 1;
+            scratch.clear();
+            self.collect_neighbors(cur, &mut scratch);
+            for n in scratch.clone() {
+                if n >= self.tile_count || seen[n] {
+                    continue;
+                }
+                if self.is_land_idx(n) {
+                    return n as i32;
+                }
+                seen[n] = true;
+                q.push(n);
+            }
+        }
+        -1
+    }
+
+    pub fn rebuild_paint_land(&mut self, team: u8) {
+        let t = team as usize;
+        if t >= self.paint_land.len() {
+            return;
+        }
+        for v in &mut self.paint_land[t] {
+            *v = 0;
+        }
+        let kind = self.paint_kind[t];
+        if kind == PAINT_NONE {
+            return;
+        }
+        let seed = self.cell_index(self.paint_gx[t], self.paint_gy[t]);
+        if seed < 0 {
+            return;
+        }
+        let seed_ui = seed as usize;
+        if kind == PAINT_STRIKE {
+            if self.is_land_idx(seed_ui) {
+                self.paint_land[t][seed_ui] = 1;
+            }
+            let mut scratch = Vec::with_capacity(6);
+            self.collect_neighbors(seed_ui, &mut scratch);
+            for n in scratch {
+                if n < self.tile_count && self.is_land_idx(n) {
+                    self.paint_land[t][n] = 1;
+                }
+            }
+            return;
+        }
+        // Beachhead: flood contiguous land from seed.
+        if !self.is_land_idx(seed_ui) {
+            return;
+        }
+        let mut q = vec![seed_ui];
+        self.paint_land[t][seed_ui] = 1;
+        let mut head = 0usize;
+        let mut scratch = Vec::with_capacity(6);
+        while head < q.len() {
+            let cur = q[head];
+            head += 1;
+            scratch.clear();
+            self.collect_neighbors(cur, &mut scratch);
+            for n in scratch.clone() {
+                if n >= self.tile_count || self.paint_land[t][n] != 0 {
+                    continue;
+                }
+                if !self.is_land_idx(n) {
+                    continue;
+                }
+                self.paint_land[t][n] = 1;
+                q.push(n);
+            }
+        }
+    }
+
+    pub fn maybe_clear_paint(&mut self) {
+        for team in [OWNER_FRIENDLY, OWNER_HOSTILE] {
+            let t = team as usize;
+            match self.paint_kind[t] {
+                PAINT_BEACHHEAD => {
+                    let owned = self.paint_owned_count(team);
+                    let total = self.paint_marked_count(team);
+                    if owned >= 8 || (total > 0 && owned >= total) {
+                        self.clear_paint(team);
+                    }
+                }
+                PAINT_STRIKE => {
+                    if self.strike_crater_owned(team) {
+                        self.clear_paint(team);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn paint_owned_count(&self, team: u8) -> i32 {
+        let t = team as usize;
+        if t >= self.paint_land.len() {
+            return 0;
+        }
+        let mut n = 0;
+        let mask = &self.paint_land[t];
+        let lim = mask.len().min(self.owners.len());
+        for i in 0..lim {
+            if mask[i] != 0 && self.owners[i] == team {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn paint_marked_count(&self, team: u8) -> i32 {
+        let t = team as usize;
+        if t >= self.paint_land.len() {
+            return 0;
+        }
+        self.paint_land[t].iter().filter(|&&v| v != 0).count() as i32
+    }
+
+    fn strike_crater_owned(&self, team: u8) -> bool {
+        let t = team as usize;
+        if t >= self.paint_land.len() {
+            return false;
+        }
+        let mask = &self.paint_land[t];
+        let lim = mask.len().min(self.owners.len());
+        let mut any = false;
+        for i in 0..lim {
+            if mask[i] == 0 {
+                continue;
+            }
+            any = true;
+            if self.owners[i] != team {
+                return false;
+            }
+        }
+        any
     }
 
     fn run_gradient_cancel_sync_pass(&mut self) {
@@ -1756,5 +2114,75 @@ mod tests {
         k.mark_pressure_dirty(0);
         k.run_gradient_cancel_sync_pass();
         assert_eq!(k.owners[0], OWNER_FRIENDLY);
+    }
+
+    #[test]
+    fn battery_stores_inject_and_surge_dumps() {
+        let mut k = tiny_kernel(false);
+        k.home_inject_enabled = false;
+        k.spawner_inject_interval_rounds = 1;
+        k.friendly_spawn_rate = 2.0;
+        k.claimable_mask.fill(1);
+        k.owners[0] = OWNER_FRIENDLY;
+        k.spawners.push(Spawner {
+            team: OWNER_FRIENDLY,
+            gx: 0,
+            gy: 0,
+            mode: SPAWNER_MODE_BATTERY,
+            tank: 0.0,
+            sid: 1,
+        });
+        k.inject_placed_spawners();
+        assert!(k.spawners[0].tank > 0.0, "battery should accrue instead of leaking");
+        let before_pf: f32 = k.pressure_friendly.iter().sum();
+        let dumped = k.surge_spawner_at(0, 0, OWNER_FRIENDLY);
+        assert!(dumped > 0.0);
+        assert_eq!(k.spawners[0].tank, 0.0);
+        let after_pf: f32 = k.pressure_friendly.iter().sum();
+        assert!(after_pf > before_pf, "surge should add friendly pressure");
+    }
+
+    #[test]
+    fn drain_erodes_enemy_neighbor_pressure() {
+        let mut k = tiny_kernel(false);
+        k.home_inject_enabled = false;
+        k.friendly_spawn_rate = 3.0;
+        k.claimable_mask.fill(1);
+        k.owners[0] = OWNER_FRIENDLY;
+        k.pressure_hostile[1] = 10.0;
+        k.spawners.push(Spawner {
+            team: OWNER_FRIENDLY,
+            gx: 0,
+            gy: 0,
+            mode: SPAWNER_MODE_DRAIN,
+            tank: 0.0,
+            sid: 2,
+        });
+        k.inject_placed_spawners();
+        assert!(k.pressure_hostile[1] < 10.0, "drain should cut enemy film on neighbors");
+    }
+
+    #[test]
+    fn beachhead_paint_marks_mass_and_clears_when_owned() {
+        let mut k = tiny_kernel(false);
+        k.claimable_mask.fill(1);
+        k.owners.fill(OWNER_NEUTRAL);
+        assert!(k.set_paint(OWNER_FRIENDLY, PAINT_BEACHHEAD, 0, 0));
+        assert_eq!(k.paint_kind[OWNER_FRIENDLY as usize], PAINT_BEACHHEAD);
+        let marked = k.paint_marked_count(OWNER_FRIENDLY);
+        assert!(marked >= 8, "contiguous claimable should flood a landmass");
+        let mut painted = 0;
+        for i in 0..k.tile_count {
+            if k.paint_land[OWNER_FRIENDLY as usize][i] != 0 && painted < 8 {
+                k.owners[i] = OWNER_FRIENDLY;
+                painted += 1;
+            }
+        }
+        k.maybe_clear_paint();
+        assert_eq!(
+            k.paint_kind[OWNER_FRIENDLY as usize],
+            PAINT_NONE,
+            "beachhead paint should release after ~8 owned cells"
+        );
     }
 }

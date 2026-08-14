@@ -237,6 +237,19 @@ layout_mode = 2
 toggle_mode = true
 text = "Inspect"
 
+[node name="PaintButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+toggle_mode = true
+text = "Paint"
+
+[node name="ModeButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+text = "Mode: Pump"
+
+[node name="SurgeButton" type="Button" parent="HUD/HBox"]
+layout_mode = 2
+text = "Surge"
+
 [node name="TileProbeLabel" type="Label" parent="HUD"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 11

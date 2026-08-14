@@ -506,6 +506,8 @@ mod tests {
             health: 10.0,
             build_remaining: 0.01,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 0,
         });
         store.ready = true;

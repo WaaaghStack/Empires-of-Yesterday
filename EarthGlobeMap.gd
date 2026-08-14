@@ -98,6 +98,9 @@ var _path_cache: Dictionary = {} # sid -> PackedInt32Array
 var _preview: Node3D
 var _preview_route: Node3D
 var _preview_pins: Node3D
+var _command_pin: Node3D
+var _command_pin_grid: Vector2i = Vector2i(-99999, -99999)
+var _command_pin_kind: int = -1
 var _preview_material: StandardMaterial3D
 var _preview_bridge_material: StandardMaterial3D
 var _marker_pulse: float = 0.0
@@ -278,6 +281,9 @@ func _build_scene() -> void:
 	_preview_pins = Node3D.new()
 	_preview_pins.name = "Pins"
 	_preview.add_child(_preview_pins)
+	_command_pin = Node3D.new()
+	_command_pin.name = "CommandPin"
+	add_child(_command_pin)
 	_preview_material = StandardMaterial3D.new()
 	_preview_material.albedo_color = Color(0.45, 0.72, 1.0, 0.38)
 	_preview_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -1358,6 +1364,29 @@ func clear_placement_preview() -> void:
 	_preview_path_sig = 0
 	_preview_landing = Vector2i(-99999, -99999)
 	_preview_click = Vector2i(-99999, -99999)
+
+
+func set_command_pin(grid: Vector2i, kind: int) -> void:
+	if _command_pin == null:
+		return
+	if grid == _command_pin_grid and kind == _command_pin_kind:
+		return
+	_command_pin_grid = grid
+	_command_pin_kind = kind
+	for c in _command_pin.get_children():
+		c.queue_free()
+	if grid.x < 0:
+		return
+	var col: Color = Color(0.95, 0.82, 0.28, 0.95)
+	if kind == WorldConquestConfigLib.PAINT_STRIKE:
+		col = Color(1.0, 0.45, 0.22, 0.95)
+	elif kind == WorldConquestConfigLib.PAINT_BEACHHEAD:
+		col = Color(0.35, 0.92, 0.78, 0.95)
+	_add_capital_marker_to(_command_pin, grid, col, 1.35, 1.0)
+
+
+func clear_command_pin() -> void:
+	set_command_pin(Vector2i(-1, -1), 0)
 
 
 func _path_preview_signature(path_packed: PackedInt32Array) -> int:

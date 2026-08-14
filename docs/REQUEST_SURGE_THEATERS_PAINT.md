@@ -1,7 +1,6 @@
 # Request: outpost modes, named theaters, and unit paint
 
-**Status:** planned (branch `feat/surge-theaters-paint`)  
-**Does not ship on this branch until implemented.** Live Play stays R1 (instant place, ferry, no roads/bridges) until each item lands.
+**Status:** implemented on `feat/surge-theaters-paint` (player-only modes + paint; AI does not pick modes/paint yet).
 
 Three player-facing features. Win formula stays **land conquest or zero enemy pressure**; units still do not change it (F5). Roads and land bridges stay gone (R1).
 

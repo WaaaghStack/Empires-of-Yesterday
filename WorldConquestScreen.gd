@@ -42,6 +42,9 @@ const Scd1DomainPullLib := preload("res://Scd1DomainPull.gd")
 @onready var hangar_button: Button = $HUD/HBox/HangarButton
 @onready var corridor_link_button: Button = $HUD/HBox/CorridorLinkButton
 @onready var inspect_button: Button = $HUD/HBox/InspectButton
+@onready var paint_button: Button = $HUD/HBox/PaintButton
+@onready var mode_button: Button = $HUD/HBox/ModeButton
+@onready var surge_button: Button = $HUD/HBox/SurgeButton
 @onready var tile_probe_label: Label = $HUD/TileProbeLabel
 @onready var back_button: Button = $TopBar/BackButton
 @onready var build_hint_label: Label = $HUD/BuildHintLabel
@@ -113,6 +116,8 @@ var _overlay_clock: float = 0.0
 var _depth_overlay_clock: float = 0.0
 var _battle_finished: bool = false
 var _build_mode: String = ""
+var _paint_armed: bool = false
+var _selected_sid: int = -1
 var _last_overlay_step: int = -1
 var _next_structure_id: int = 1
 var _build_hint_clock: float = 0.0
@@ -282,6 +287,15 @@ func _ready() -> void:
 		corridor_link_button.disabled = true
 		corridor_link_button.visible = false
 	inspect_button.toggled.connect(_on_inspect_toggled)
+	if paint_button:
+		paint_button.toggled.connect(_on_paint_toggled)
+		paint_button.tooltip_text = "Paint a rally: coast = beachhead, inland = bomber strike. One pin."
+	if mode_button:
+		mode_button.pressed.connect(_on_mode_pressed)
+		mode_button.tooltip_text = "Cycle selected outpost: Pump / Drain / Battery."
+	if surge_button:
+		surge_button.pressed.connect(_on_surge_pressed)
+		surge_button.tooltip_text = "Dump a Battery outpost's stored pressure as one wave."
 	if tile_probe_label:
 		tile_probe_label.visible = false
 	end_overlay.visible = false
@@ -374,12 +388,21 @@ func _bootstrap_async() -> void:
 	_loading = false
 	_reset_run_metrics()
 	_apply_ai_vs_ai_mode()
+	if paint_button:
+		paint_button.visible = not RunState.is_ai_vs_ai()
+		paint_button.disabled = false
 	_clarity_on_match_live()
 	if _frame_profiler != null:
 		_frame_profiler.reset_samples()
 	RunLog.info(
-		"World Conquest — %dx%d Earth globe" % [battle_data.grid_width, battle_data.grid_height]
+		"World Conquest — %s  %dx%d" % [
+			CFG.theater_display_name(RunState.theater_id),
+			battle_data.grid_width,
+			battle_data.grid_height,
+		]
 	)
+	if has_node("TopBar/Title"):
+		$TopBar/Title.text = "World Conquest — %s" % CFG.theater_display_name(RunState.theater_id)
 
 
 func _await_min_load_time() -> void:
@@ -1114,10 +1137,14 @@ func _on_play_area_gui_input(event: InputEvent) -> void:
 		elif (
 			mb.button_index == MOUSE_BUTTON_LEFT
 			and mb.pressed
-			and _is_build_mode_active()
 			and not RunState.is_ai_vs_ai()
 		):
-			_try_place_structure()
+			if _paint_armed:
+				_try_set_paint()
+			elif _is_build_mode_active():
+				_try_place_structure()
+			else:
+				_try_select_structure_at_cursor()
 			sub_viewport_container.accept_event()
 	elif event is InputEventMouseMotion and _orbit_drag and globe_map != null:
 		var mm := event as InputEventMouseMotion
@@ -2994,6 +3021,13 @@ func _apply_ai_vs_ai_mode() -> void:
 		barracks_button.disabled = true
 	if hangar_button:
 		hangar_button.disabled = true
+	if paint_button:
+		paint_button.disabled = true
+		paint_button.button_pressed = false
+	if mode_button:
+		mode_button.disabled = true
+	if surge_button:
+		surge_button.disabled = true
 	if build_hint_label:
 		build_hint_label.text = "AI vs AI — orbit/zoom to watch (build input muted)"
 	if status_label:
@@ -3807,6 +3841,169 @@ func _on_inspect_toggled(on: bool) -> void:
 		tile_probe_label.text = ""
 
 
+func _rust_commands():
+	if territory_sim == null:
+		return null
+	return territory_sim.rust_field
+
+
+func _set_paint_armed(on: bool) -> void:
+	_paint_armed = on and not RunState.is_ai_vs_ai()
+	if paint_button:
+		paint_button.set_block_signals(true)
+		paint_button.button_pressed = _paint_armed
+		paint_button.set_block_signals(false)
+	if _paint_armed:
+		_apply_build_mode("")
+	_update_build_ui()
+
+
+func _on_paint_toggled(on: bool) -> void:
+	if RunState.is_ai_vs_ai():
+		_set_paint_armed(false)
+		return
+	if on:
+		_apply_build_mode("")
+		_paint_armed = true
+	else:
+		_paint_armed = false
+	_update_build_ui()
+
+
+func _paint_kind_for_grid(grid: Vector2i) -> int:
+	if battle_data == null:
+		return CFG.PAINT_NONE
+	var cid: int = battle_data.cell_index(grid.x, grid.y)
+	if cid < 0:
+		return CFG.PAINT_NONE
+	if not battle_data.is_land_cell_id(cid):
+		return CFG.PAINT_BEACHHEAD
+	for nbr in battle_data.get_neighbors(cid):
+		if int(nbr) >= 0 and not battle_data.is_land_cell_id(int(nbr)):
+			return CFG.PAINT_BEACHHEAD
+	return CFG.PAINT_STRIKE
+
+
+func _try_set_paint() -> void:
+	var grid: Vector2i = _mouse_to_grid()
+	if not _is_on_map_grid(grid.x, grid.y):
+		build_hint_label.text = "Click the globe to paint a rally."
+		return
+	var kind: int = _paint_kind_for_grid(grid)
+	if kind == CFG.PAINT_NONE:
+		build_hint_label.text = "Need a coast or a land tile."
+		return
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("set_team_paint"):
+		build_hint_label.text = "Paint needs the live Rust sim."
+		return
+	if not rust.set_team_paint(BattleTileControlLib.OWNER_FRIENDLY, kind, grid.x, grid.y):
+		build_hint_label.text = "Could not pin that tile."
+		return
+	_refresh_paint_pin()
+	_set_paint_armed(false)
+	var pin: Dictionary = rust.get_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+	var noun: String = "beachhead" if int(pin.get("kind", kind)) == CFG.PAINT_BEACHHEAD else "strike"
+	build_hint_label.text = "Painted %s at (%d,%d). Units go there, then you still need an outpost." % [
+		noun,
+		int(pin.get("gx", grid.x)),
+		int(pin.get("gy", grid.y)),
+	]
+
+
+func _refresh_paint_pin() -> void:
+	if globe_map == null:
+		return
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("get_team_paint"):
+		globe_map.clear_command_pin()
+		return
+	var pin: Dictionary = rust.get_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+	var kind: int = int(pin.get("kind", 0))
+	if kind == CFG.PAINT_NONE:
+		globe_map.clear_command_pin()
+		return
+	globe_map.set_command_pin(Vector2i(int(pin.get("gx", -1)), int(pin.get("gy", -1))), kind)
+
+
+func _try_select_structure_at_cursor() -> void:
+	var grid: Vector2i = _mouse_to_grid()
+	if not _is_on_map_grid(grid.x, grid.y) or battle_data == null:
+		return
+	var hit_sid: int = -1
+	for st_var in battle_data.placed_structures:
+		if not (st_var is Dictionary):
+			continue
+		var st: Dictionary = st_var
+		if str(st.get("kind", "")) != OutpostBuildLib.KIND_SPAWNER:
+			continue
+		if int(st.get("team", 0)) != BattleTileControlLib.OWNER_FRIENDLY:
+			continue
+		if int(st.get("gx", -999)) == grid.x and int(st.get("gy", -999)) == grid.y:
+			hit_sid = int(st.get("id", -1))
+			break
+	if hit_sid < 0:
+		_clear_structure_selection()
+		return
+	_selected_sid = hit_sid
+	_refresh_command_hud()
+	_update_build_ui()
+
+
+func _clear_structure_selection() -> void:
+	_selected_sid = -1
+	_refresh_command_hud()
+
+
+func _refresh_command_hud() -> void:
+	var rust = _rust_commands()
+	var mode: int = CFG.SPAWNER_MODE_PUMP
+	var tank: float = 0.0
+	var has_outpost: bool = _selected_sid >= 0
+	if has_outpost and rust != null and rust.has_method("query_spawner"):
+		var q: Dictionary = rust.query_spawner(_selected_sid)
+		if not q.is_empty():
+			mode = int(q.get("spawner_mode", 0))
+			tank = float(q.get("battery_tank", 0.0))
+	if mode_button:
+		mode_button.visible = not RunState.is_ai_vs_ai()
+		mode_button.disabled = not has_outpost
+		mode_button.text = "Mode: %s" % CFG.spawner_mode_label(mode)
+	if surge_button:
+		surge_button.visible = not RunState.is_ai_vs_ai()
+		surge_button.disabled = not has_outpost or mode != CFG.SPAWNER_MODE_BATTERY or tank <= 0.01
+		surge_button.text = "Surge" if tank <= 0.01 else "Surge %.0f" % tank
+	_refresh_paint_pin()
+
+
+func _on_mode_pressed() -> void:
+	if _selected_sid < 0 or RunState.is_ai_vs_ai():
+		return
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("set_spawner_mode"):
+		return
+	var q: Dictionary = rust.query_spawner(_selected_sid)
+	var cur: int = int(q.get("spawner_mode", 0))
+	var nxt: int = (cur + 1) % 3
+	rust.set_spawner_mode(_selected_sid, nxt)
+	_refresh_command_hud()
+	build_hint_label.text = "Outpost is now %s." % CFG.spawner_mode_label(nxt)
+
+
+func _on_surge_pressed() -> void:
+	if _selected_sid < 0 or RunState.is_ai_vs_ai():
+		return
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("surge_spawner"):
+		return
+	var dumped: float = float(rust.surge_spawner(_selected_sid))
+	_refresh_command_hud()
+	if dumped <= 0.01:
+		build_hint_label.text = "Battery is empty — wait, then Surge."
+	else:
+		build_hint_label.text = "Surged %.0f pressure from the outpost." % dumped
+
+
 func _sync_active_spawners_to_sim() -> void:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return
@@ -3960,6 +4157,7 @@ func _update_hud() -> void:
 	_maybe_show_conquest_nudge()
 	speed_button.text = "▶ x%.0f" % _speed_mult
 	_bump_run_force_peaks()
+	_refresh_command_hud()
 	spawner_button.text = str(
 		_cached_structure_hud_labels.get(OutpostBuildLib.KIND_SPAWNER, "Outpost")
 	)
@@ -4030,14 +4228,20 @@ func _update_build_ui() -> void:
 			% _format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR))
 		)
 	else:
-		build_hint_label.text = (
-			"Outpost (%s) · Barracks (%s) · Hangar (%s)"
-			% [
-				_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER)),
-				_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_BARRACKS)),
-				_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR)),
-			]
-		)
+		if _paint_armed:
+			build_hint_label.text = "Click a coast for a beachhead, or inland land for a bomber strike. Esc cancel."
+		elif _selected_sid >= 0:
+			build_hint_label.text = "Outpost selected — Mode cycles Pump/Drain/Battery. Surge fires a Battery wave."
+		else:
+			build_hint_label.text = (
+				"Outpost (%s) · Barracks (%s) · Hangar (%s) · Paint a rally"
+				% [
+					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER)),
+					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_BARRACKS)),
+					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR)),
+				]
+			)
+	_refresh_command_hud()
 
 
 func _update_build_hover_hint() -> void:
@@ -4081,6 +4285,12 @@ func _show_landing_preview(grid: Vector2i) -> void:
 func _apply_build_mode(mode: String) -> void:
 	if RunState.is_ai_vs_ai() and mode != "":
 		mode = ""
+	if mode != "":
+		_paint_armed = false
+		if paint_button:
+			paint_button.set_block_signals(true)
+			paint_button.button_pressed = false
+			paint_button.set_block_signals(false)
 	if _corridor_kind_removed(mode):
 		# R1: land bridges removed — never enter corridor build mode.
 		build_hint_label.text = "Land bridges removed."
@@ -4587,6 +4797,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 			else:
 				_apply_build_mode("")
+				_set_paint_armed(false)
+				_clear_structure_selection()
+				get_viewport().set_input_as_handled()
 
 
 func _is_on_map_grid(gx: int, gy: int) -> bool:

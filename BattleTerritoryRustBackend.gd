@@ -1312,3 +1312,41 @@ func get_bomber_snapshot() -> Dictionary:
 	if _sim.has_method("get_bomber_snapshot"):
 		return _sim.call("get_bomber_snapshot")
 	return {}
+
+
+func set_spawner_mode(sid: int, mode: int) -> bool:
+	if not ready or _sim == null or not _sim.has_method("set_spawner_mode"):
+		return false
+	return bool(_sim.call("set_spawner_mode", sid, mode))
+
+
+func surge_spawner(sid: int) -> float:
+	if not ready or _sim == null or not _sim.has_method("surge_spawner"):
+		return 0.0
+	return float(_sim.call("surge_spawner", sid))
+
+
+func query_spawner(sid: int) -> Dictionary:
+	if not ready or _sim == null or not _sim.has_method("query_spawner"):
+		return {}
+	var row = _sim.call("query_spawner", sid)
+	return row if row is Dictionary else {}
+
+
+func set_team_paint(team: int, kind: int, gx: int, gy: int) -> bool:
+	if not ready or _sim == null or not _sim.has_method("set_team_paint"):
+		return false
+	return bool(_sim.call("set_team_paint", team, kind, gx, gy))
+
+
+func clear_team_paint(team: int) -> void:
+	if not ready or _sim == null or not _sim.has_method("clear_team_paint"):
+		return
+	_sim.call("clear_team_paint", team)
+
+
+func get_team_paint(team: int) -> Dictionary:
+	if not ready or _sim == null or not _sim.has_method("get_team_paint"):
+		return {}
+	var row = _sim.call("get_team_paint", team)
+	return row if row is Dictionary else {}

@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
 use crate::pathfind::kernel::{RoutePath, SearchKernel};
 use crate::pathfind::nav_rules::{
-    is_stance_goal_at, rule_by_id, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
+    infantry_ferry_context, is_stance_goal_at, rule_by_id, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE,
+    NAV_RULE_INFANTRY_RETREAT,
 };
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
-    OWNER_UNCLAIMABLE, MIN_CLAIM_PRESSURE,
+    OWNER_UNCLAIMABLE, MIN_CLAIM_PRESSURE, PAINT_BEACHHEAD,
 };
 
 const HOSTILE_TERRITORY_DPS: f32 = 3.0;
@@ -589,6 +590,41 @@ impl AgentLayer {
             }
         }
 
+        let paint_beachhead = (team as usize) < kernel.paint_kind.len()
+            && kernel.paint_kind[team as usize] == PAINT_BEACHHEAD;
+        if paint_beachhead {
+            let on_mass = kernel.paint_cell_marked(team, gx, gy) && kernel.is_land_idx(start_ui);
+            if on_mass {
+                self.agents[agent_i].goal_gx = gx;
+                self.agents[agent_i].goal_gy = gy;
+                self.agents[agent_i].deploy_path = vec![start_idx];
+                self.agents[agent_i].deploy_path_pos = 0;
+                self.agents[agent_i].step_gx = -1;
+                self.agents[agent_i].step_gy = -1;
+                return;
+            }
+            if let Some(route) =
+                Self::find_paint_beachhead_path(kernel, &mut self.nav_search, start_idx, team)
+            {
+                if route.path.len() >= 2 {
+                    let w = kernel.grid_w;
+                    let goal_idx = *route.path.last().unwrap();
+                    let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
+                    self.agents[agent_i].goal_gx = goal_x;
+                    self.agents[agent_i].goal_gy = goal_y;
+                    self.claim_goal(goal_x, goal_y, except_id);
+                    self.agents[agent_i].deploy_path = route.path;
+                    self.agents[agent_i].deploy_path_pos = 0;
+                    self.sync_step_from_deploy_path(kernel, agent_i);
+                    return;
+                }
+            }
+            // Path miss: idle and retry. Do not fall through to a local land front.
+            self.agents[agent_i].step_gx = -1;
+            self.agents[agent_i].step_gy = -1;
+            return;
+        }
+
         let hold = {
             let masks = AgentNavMasks {
                 friendly_corridor: &self.friendly_corridor,
@@ -596,7 +632,7 @@ impl AgentLayer {
                 friendly_bridge: &self.friendly_bridge,
                 hostile_bridge: &self.hostile_bridge,
             };
-            is_stance_goal_at(kernel, &masks, team, gx, gy)
+            !paint_beachhead && is_stance_goal_at(kernel, &masks, team, gx, gy)
         };
         if hold {
             self.agents[agent_i].goal_gx = gx;
@@ -702,6 +738,36 @@ impl AgentLayer {
         self.agents[agent_i].step_gy = -1;
         self.agents[agent_i].deploy_path.clear();
         self.agents[agent_i].deploy_path_pos = 0;
+    }
+
+    fn find_paint_beachhead_path(
+        kernel: &TerritoryKernel,
+        nav_search: &mut SearchKernel,
+        start_idx: i32,
+        team: u8,
+    ) -> Option<RoutePath> {
+        let t = team as usize;
+        if t >= kernel.paint_land.len() {
+            return None;
+        }
+        let masks = AgentNavMasks {
+            friendly_corridor: &[],
+            hostile_corridor: &[],
+            friendly_bridge: &[],
+            hostile_bridge: &[],
+        };
+        let view = BattleNavView::new(kernel, &masks, team);
+        nav_search.ensure_capacity(kernel.tile_count);
+        let ctx = infantry_ferry_context(kernel.tile_count);
+        let land = &kernel.paint_land[t];
+        nav_search
+            .find_nearest_goal(&view, &[start_idx], ctx, |idx| {
+                idx < land.len()
+                    && land[idx] != 0
+                    && kernel.is_land_idx(idx)
+                    && kernel.owners[idx] != team
+            })
+            .map(|(path, _)| path)
     }
 
     fn claim_goal(&mut self, gx: i32, gy: i32, agent_id: u32) {

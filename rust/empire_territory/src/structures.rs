@@ -32,6 +32,10 @@ pub struct StructureRecord {
     /// Seconds left in BUILDING phase; < 0 when not building.
     pub build_remaining: f32,
     pub spawn_timer: f32,
+    /// Pump / Drain / Battery (SPAWNER_MODE_*). Ignored for non-spawners.
+    pub spawner_mode: u8,
+    /// Stored inject energy while Battery. Lost if the tile flips.
+    pub battery_tank: f32,
     /// SCD1 domain version stamp (structures epoch at last write).
     pub version: u64,
 }
@@ -191,6 +195,8 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 1,
         });
         assert!(store.remove_with_tombstone(7, 5));
@@ -211,6 +217,8 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 6,
         });
         assert!(!store.tombstones.contains_key(&7));
@@ -233,6 +241,8 @@ mod tests {
             health: -1.0,
             build_remaining: -1.0,
             spawn_timer: 0.0,
+            spawner_mode: 0,
+            battery_tank: 0.0,
             version: 2,
         });
         // Client last_version = 2 is caught up; remove stamps tombstone v=3.

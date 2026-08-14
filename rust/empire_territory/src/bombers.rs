@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 
 use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
-use crate::pathfind::kernel::{RoutePath, SearchKernel};
+use crate::pathfind::kernel::{RouteContext, RoutePath, SearchKernel};
 use crate::pathfind::nav_rules::{
     is_air_strike_target_at, rule_by_id, run_bomber_strike_rule, NAV_RULE_BOMBER_STRIKE,
 };
-use crate::sim::{TerritoryKernel, OWNER_FRIENDLY};
+use crate::sim::{TerritoryKernel, OWNER_FRIENDLY, PAINT_STRIKE};
 
 /// After free-goal BFS misses, skip free search for this many replan cycles (C1/C4 FPS).
 const FREE_GOAL_MISS_SKIP_TICKS: u8 = 8;
@@ -538,6 +538,60 @@ impl BomberLayer {
             return;
         }
 
+        let paint_strike = (team as usize) < kernel.paint_kind.len()
+            && kernel.paint_kind[team as usize] == PAINT_STRIKE;
+        if paint_strike {
+            self.clear_goal_claim_for_bomber(except_id);
+            let start_ui = start_idx as usize;
+            let in_crater = kernel.paint_cell_marked(team, gx, gy);
+            let crater_enemy = in_crater
+                && start_ui < kernel.owners.len()
+                && kernel.owners[start_ui] != team
+                && kernel.is_land_idx(start_ui);
+            if crater_enemy && !prefer_alternate_goal {
+                self.bombers[bomber_i].goal_gx = gx;
+                self.bombers[bomber_i].goal_gy = gy;
+                self.claim_goal(gx, gy, except_id);
+                self.bombers[bomber_i].deploy_path = vec![start_idx];
+                self.bombers[bomber_i].deploy_path_pos = 0;
+                self.bombers[bomber_i].step_gx = -1;
+                self.bombers[bomber_i].step_gy = -1;
+                self.note_strike_search_result(bomber_i, kernel, true);
+                return;
+            }
+            self.nav_search.ensure_capacity(kernel.tile_count);
+            let max_expand = self.capped_search_expand(kernel, &self.bombers[bomber_i]);
+            if let Some(route) = Self::find_paint_strike_path(
+                &mut self.nav_search,
+                kernel,
+                start_idx,
+                team,
+                except_id,
+                &self.occupant_at,
+                &self.goal_claims,
+                max_expand,
+            ) {
+                if route.path.len() >= 2 {
+                    let w = kernel.grid_w;
+                    let goal_idx = *route.path.last().unwrap();
+                    let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
+                    self.bombers[bomber_i].goal_gx = goal_x;
+                    self.bombers[bomber_i].goal_gy = goal_y;
+                    self.claim_goal(goal_x, goal_y, except_id);
+                    self.bombers[bomber_i].deploy_path = route.path;
+                    self.bombers[bomber_i].deploy_path_pos = 0;
+                    self.sync_step_from_deploy_path(kernel, bomber_i);
+                    self.note_strike_search_result(bomber_i, kernel, true);
+                    return;
+                }
+            }
+            // Keep hunting the pin; don't peel to a random island while paint is live.
+            self.note_strike_search_result(bomber_i, kernel, false);
+            self.bombers[bomber_i].step_gx = -1;
+            self.bombers[bomber_i].step_gy = -1;
+            return;
+        }
+
         self.clear_goal_claim_for_bomber(except_id);
 
         {
@@ -682,6 +736,62 @@ impl BomberLayer {
 
     fn clear_goal_claim_for_bomber(&mut self, bomber_id: u32) {
         self.goal_claims.retain(|_, &mut id| id != bomber_id);
+    }
+
+    fn find_paint_strike_path(
+        nav_search: &mut SearchKernel,
+        kernel: &TerritoryKernel,
+        start_idx: i32,
+        team: u8,
+        except_id: u32,
+        occupant_at: &HashMap<CellKey, u32>,
+        goal_claims: &HashMap<CellKey, u32>,
+        max_expand: usize,
+    ) -> Option<RoutePath> {
+        let t = team as usize;
+        if t >= kernel.paint_land.len() {
+            return None;
+        }
+        let masks = AgentNavMasks {
+            friendly_corridor: &[],
+            hostile_corridor: &[],
+            friendly_bridge: &[],
+            hostile_bridge: &[],
+        };
+        let view = BattleNavView::new(kernel, &masks, team);
+        let ctx = RouteContext {
+            allow_water: true,
+            infra_only: false,
+            use_astar: false,
+            land_step: 1,
+            water_step: 1,
+            max_expand,
+            corridor: None,
+            flight_mode: true,
+        };
+        let land = &kernel.paint_land[t];
+        let w = kernel.grid_w.max(1);
+        nav_search
+            .find_nearest_goal(&view, &[start_idx], ctx, |idx| {
+                if idx >= land.len() || land[idx] == 0 || !kernel.is_land_idx(idx) {
+                    return false;
+                }
+                if kernel.owners[idx] == team {
+                    return false;
+                }
+                let cx = (idx as i32) % w;
+                let cy = (idx as i32) / w;
+                let key = (cx, cy);
+                match occupant_at.get(&key) {
+                    Some(&oid) if oid != except_id => return false,
+                    _ => {}
+                }
+                match goal_claims.get(&key) {
+                    Some(&cid) if cid != except_id => false,
+                    _ => true,
+                }
+            })
+            .map(|(path, _)| path)
     }
 
     fn find_strike_path(

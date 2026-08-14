@@ -6,6 +6,7 @@ extends SceneTree
 const WorldConquestMapGeneratorLib := preload("res://WorldConquestMapGenerator.gd")
 const WorldMapCatalogLib := preload("res://WorldMapCatalog.gd")
 const BattleMapDataLib := preload("res://BattleMapData.gd")
+const CFG := preload("res://WorldConquestConfig.gd")
 
 
 func _init() -> void:
@@ -109,6 +110,20 @@ func _init() -> void:
 		if float(proc_a.cell_lon[east.x]) < 0.0:
 			ok = false
 			detail.append("east spawn lon should be >= 0 (got %f)" % float(proc_a.cell_lon[east.x]))
+
+	var pangea_preset: Dictionary = CFG.theater_preset(CFG.THEATER_PANGEA)
+	var arch_preset: Dictionary = CFG.theater_preset(CFG.THEATER_ARCHIPELAGO)
+	var pangea = WorldConquestMapGeneratorLib.generate(
+		WorldMapCatalogLib.MAP_EARTH, seed_a, false, pangea_preset
+	)
+	var arch = WorldConquestMapGeneratorLib.generate(
+		WorldMapCatalogLib.MAP_EARTH, seed_a, false, arch_preset
+	)
+	var pangea_land: int = _count_land(pangea)
+	var arch_land: int = _count_land(arch)
+	if pangea_land <= arch_land:
+		ok = false
+		detail.append("Pangea should have more land than Archipelago (%d vs %d)" % [pangea_land, arch_land])
 
 	var summary: String = (
 		"CUSTOM_WORLD_SMOKE ok=%s land=%d/%d/%d mtn=%d/%d res=%d/%d/%d jacc_earth=%.3f jacc_seeds=%.3f west=%s east=%s"
