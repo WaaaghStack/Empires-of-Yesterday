@@ -58,11 +58,11 @@ Live play is tuned so a match **breathes**: pressure creeps instead of flooding,
 | **Outpost (400)** | Arm outpost (spawner) placement |
 | **Barracks (400)** | Arm barracks placement — spawns soldiers |
 | **Hangar (400)** | Arm hangar placement — spawns bombers |
-| **Paint** | Arm rally pin: coast → soldier beachhead, inland → bomber strike |
+| **Paint** | Arm area paint: click-drag a region on the globe |
 | Click friendly outpost | Select it — **Mode** cycles Pump/Drain/Battery; **Surge** dumps Battery |
 | **Inspect** | Tile inspector mode |
 | **Pause** / **▶ x1** | Pause / Resume (Space) / cycle sim speed |
-| Esc | Cancel build mode; during deploy, clears capital lock |
+| Esc | Cancel build mode or in-progress paint; during deploy, clears capital lock |
 | F3 | Toggle perf HUD (see PERFORMANCE.md) |
 | **Same Map** (end screen) | Rematch on the current map seed — returns to deploy pick (new capital placement) |
 
@@ -83,7 +83,7 @@ Live play is tuned so a match **breathes**: pressure creeps instead of flooding,
 | **Inspect probe** | Hovered tile shows terrain **elevation** (0–100) and **effective height H** (= own-side pressure + elevation), plus pressures and claimability. | `WorldConquestScreen._update_tile_probe`, `query_tile` |
 | **Supply** | Player wallet. Starts at `STARTING_SUPPLY` (800); income `INCOME_PER_TILE_PER_SEC` (0.15) per owned tile. Spent on outposts (400), barracks (400), and hangars (400). Opening wallet is two buildings; further pumps wait on the blob. | `WorldConquestScreen`, `WorldConquestConfig`, `EconomyCatalog` |
 | **Outpost (spawner)** | Player-placed pressure pump. Lands on the exact clicked tile; placement is allowed on any land tile except enemy-held ones. **Builds instantly** on valid placement (R1). Modes: **Pump** (default trickle), **Drain** (erode enemy neighbor pressure), **Battery** (store inject in a tank). **Surge** dumps a Battery tank onto Pump neighbor tiles (manual). Enemy capture **loses** the tank. | `WorldConquestOutpostBuild.gd`, `sim::inject_placed_spawners` |
-| **Paint** | One rally pin per side. Beachhead: soldiers ferry to that landmass and hold until a puddle exists (~8 owned cells). Strike: bombers bomb the cell and its land neighbors until the crater is owned. Pin clears on success, cancel, or a new paint. Does not capture by itself (F5). | `TerritorySim.set_team_paint`, `agents.rs`, `bombers.rs` |
+| **Paint** | One region per side (click-drag stroke, capped at 108 land cells). Soldiers ferry to unowned painted land; bombers strike inland / unopened painted cells. Glow marks the tiles. Clears when every painted cell is owned, on cancel, or a new stroke. Does not capture by itself (F5). | `TerritorySim.begin_team_paint_stroke`, `agents.rs`, `bombers.rs` |
 | **Barracks** | Supply cost 400; **instant** place. Spawns **soldiers** every `BARRACKS_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Verdantite. Cap **5** living per barracks; global soldier cap **100**. | `EconomyCatalog`, `world_session.rs`, `agents.rs` |
 | **Hangar** | Supply cost 400; **instant** place. Spawns **bombers** every `HANGAR_SPAWN_INTERVAL_SEC` (10 s) for Aurelium + Emberstone. Cap **5** living per hangar; global bomber cap **100**. | `EconomyCatalog`, `world_session.rs`, `bombers.rs` |
 | **Soldier** | Ground unit: aura pressure + erode enemy pressure; moves on land at `SOLDIER_MOVE_CELLS_PER_SEC` (0.55); can **ferry** open water. **Aurelium + Verdantite upkeep**; Au deficit applies `SOLDIER_UPKEEP_DEFICIT_DPS`. Orphan damage if barracks destroyed. | `WorldConquestConfig`, `agents.rs` |

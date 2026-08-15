@@ -5,12 +5,11 @@ use std::collections::HashMap;
 use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
 use crate::pathfind::kernel::{RoutePath, SearchKernel};
 use crate::pathfind::nav_rules::{
-    infantry_ferry_context, is_stance_goal_at, rule_by_id, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE,
-    NAV_RULE_INFANTRY_RETREAT,
+    is_stance_goal_at, rule_by_id, run_nav_rule, NAV_RULE_INFANTRY_ADVANCE, NAV_RULE_INFANTRY_RETREAT,
 };
 use crate::sim::{
     TerritoryKernel, OWNER_CONTESTED, OWNER_FRIENDLY, OWNER_HOSTILE, OWNER_NEUTRAL,
-    OWNER_UNCLAIMABLE, MIN_CLAIM_PRESSURE, PAINT_BEACHHEAD,
+    OWNER_UNCLAIMABLE, MIN_CLAIM_PRESSURE,
 };
 
 const HOSTILE_TERRITORY_DPS: f32 = 3.0;
@@ -168,6 +167,25 @@ impl AgentLayer {
         self.land_advance_goal_cache = [None; 3];
     }
 
+    /// Player paint committed or cleared — peel off the local front this tick.
+    pub fn notify_paint_orders(&mut self, kernel: &TerritoryKernel, team: u8) {
+        self.nav_masks_epoch = self.nav_masks_epoch.wrapping_add(1);
+        if self.nav_masks_epoch == 0 {
+            self.nav_masks_epoch = 1;
+        }
+        let t = team as usize;
+        if t < self.free_miss_cd.len() {
+            self.free_miss_cd[t] = 0;
+        }
+        self.land_advance_goal_cache = [None; 3];
+        for i in 0..self.agents.len() {
+            if self.agents[i].team == team {
+                self.agents[i].retarget_cd = 0;
+                self.steer_agent_to_paint(kernel, i);
+            }
+        }
+    }
+
     pub fn living_count(&self) -> u32 {
         self.agents.len() as u32
     }
@@ -244,6 +262,7 @@ impl AgentLayer {
         let mut dead: Vec<u32> = Vec::new();
         let n = self.agents.len();
 
+        kernel.rebuild_live_paint_flows();
         self.run_budgeted_replans(kernel);
 
         for i in 0..n {
@@ -265,6 +284,9 @@ impl AgentLayer {
             }
             self.agents[i].move_accum += move_rate * dt;
             while self.agents[i].move_accum >= 1.0 {
+                if kernel.paint_orders_live(team) {
+                    self.steer_agent_to_paint(kernel, i);
+                }
                 let sx = self.agents[i].step_gx;
                 let sy = self.agents[i].step_gy;
                 let id = self.agents[i].id;
@@ -362,6 +384,10 @@ impl AgentLayer {
 
         for i in 0..n {
             let team = self.agents[i].team;
+            if kernel.paint_orders_live(team) {
+                // Globe-wide paint flow steers every unit in the move loop.
+                continue;
+            }
             let id = self.agents[i].id;
             let holding = self.holding_at_goal(kernel, team, &self.agents[i]);
             let stuck = self.agents[i].step_gx < 0 && !holding;
@@ -573,6 +599,12 @@ impl AgentLayer {
         }
 
         let start_ui = start_idx as usize;
+        let paint_active = kernel.paint_orders_live(team);
+        if paint_active {
+            self.steer_agent_to_paint(kernel, agent_i);
+            return;
+        }
+
         let enemy = enemy_team(team);
         if kernel.owners[start_ui] == enemy
             && !self.adjacent_to_team_supply(kernel, team, gx, gy)
@@ -590,41 +622,6 @@ impl AgentLayer {
             }
         }
 
-        let paint_beachhead = (team as usize) < kernel.paint_kind.len()
-            && kernel.paint_kind[team as usize] == PAINT_BEACHHEAD;
-        if paint_beachhead {
-            let on_mass = kernel.paint_cell_marked(team, gx, gy) && kernel.is_land_idx(start_ui);
-            if on_mass {
-                self.agents[agent_i].goal_gx = gx;
-                self.agents[agent_i].goal_gy = gy;
-                self.agents[agent_i].deploy_path = vec![start_idx];
-                self.agents[agent_i].deploy_path_pos = 0;
-                self.agents[agent_i].step_gx = -1;
-                self.agents[agent_i].step_gy = -1;
-                return;
-            }
-            if let Some(route) =
-                Self::find_paint_beachhead_path(kernel, &mut self.nav_search, start_idx, team)
-            {
-                if route.path.len() >= 2 {
-                    let w = kernel.grid_w;
-                    let goal_idx = *route.path.last().unwrap();
-                    let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
-                    self.agents[agent_i].goal_gx = goal_x;
-                    self.agents[agent_i].goal_gy = goal_y;
-                    self.claim_goal(goal_x, goal_y, except_id);
-                    self.agents[agent_i].deploy_path = route.path;
-                    self.agents[agent_i].deploy_path_pos = 0;
-                    self.sync_step_from_deploy_path(kernel, agent_i);
-                    return;
-                }
-            }
-            // Path miss: idle and retry. Do not fall through to a local land front.
-            self.agents[agent_i].step_gx = -1;
-            self.agents[agent_i].step_gy = -1;
-            return;
-        }
-
         let hold = {
             let masks = AgentNavMasks {
                 friendly_corridor: &self.friendly_corridor,
@@ -632,7 +629,7 @@ impl AgentLayer {
                 friendly_bridge: &self.friendly_bridge,
                 hostile_bridge: &self.hostile_bridge,
             };
-            !paint_beachhead && is_stance_goal_at(kernel, &masks, team, gx, gy)
+            !paint_active && is_stance_goal_at(kernel, &masks, team, gx, gy)
         };
         if hold {
             self.agents[agent_i].goal_gx = gx;
@@ -740,34 +737,46 @@ impl AgentLayer {
         self.agents[agent_i].deploy_path_pos = 0;
     }
 
-    fn find_paint_beachhead_path(
-        kernel: &TerritoryKernel,
-        nav_search: &mut SearchKernel,
-        start_idx: i32,
-        team: u8,
-    ) -> Option<RoutePath> {
-        let t = team as usize;
-        if t >= kernel.paint_land.len() {
-            return None;
+    fn steer_agent_to_paint(&mut self, kernel: &TerritoryKernel, agent_i: usize) {
+        let team = self.agents[agent_i].team;
+        let gx = self.agents[agent_i].gx;
+        let gy = self.agents[agent_i].gy;
+        let except_id = self.agents[agent_i].id;
+        let start_idx = kernel.cell_index(gx, gy);
+        if start_idx < 0 || !kernel.paint_orders_live(team) {
+            self.agents[agent_i].step_gx = -1;
+            self.agents[agent_i].step_gy = -1;
+            return;
         }
-        let masks = AgentNavMasks {
-            friendly_corridor: &[],
-            hostile_corridor: &[],
-            friendly_bridge: &[],
-            hostile_bridge: &[],
+        let start_ui = start_idx as usize;
+        self.clear_goal_claim_for_agent(except_id);
+        if kernel.paint_cell_marked(team, gx, gy)
+            && kernel.is_land_idx(start_ui)
+            && start_ui < kernel.owners.len()
+            && kernel.owners[start_ui] != team
+        {
+            self.agents[agent_i].goal_gx = gx;
+            self.agents[agent_i].goal_gy = gy;
+            self.agents[agent_i].deploy_path = vec![start_idx];
+            self.agents[agent_i].deploy_path_pos = 0;
+            self.agents[agent_i].step_gx = -1;
+            self.agents[agent_i].step_gy = -1;
+            return;
+        }
+        let Some(next) = kernel.paint_flow_next_idx(team, start_ui) else {
+            self.agents[agent_i].step_gx = -1;
+            self.agents[agent_i].step_gy = -1;
+            self.agents[agent_i].deploy_path.clear();
+            self.agents[agent_i].deploy_path_pos = 0;
+            return;
         };
-        let view = BattleNavView::new(kernel, &masks, team);
-        nav_search.ensure_capacity(kernel.tile_count);
-        let ctx = infantry_ferry_context(kernel.tile_count);
-        let land = &kernel.paint_land[t];
-        nav_search
-            .find_nearest_goal(&view, &[start_idx], ctx, |idx| {
-                idx < land.len()
-                    && land[idx] != 0
-                    && kernel.is_land_idx(idx)
-                    && kernel.owners[idx] != team
-            })
-            .map(|(path, _)| path)
+        let (sx, sy) = kernel.grid_from_idx(next as i32);
+        self.agents[agent_i].goal_gx = sx;
+        self.agents[agent_i].goal_gy = sy;
+        self.agents[agent_i].step_gx = sx;
+        self.agents[agent_i].step_gy = sy;
+        self.agents[agent_i].deploy_path.clear();
+        self.agents[agent_i].deploy_path_pos = 0;
     }
 
     fn claim_goal(&mut self, gx: i32, gy: i32, agent_id: u32) {
@@ -849,6 +858,17 @@ impl AgentLayer {
     }
 
     fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, agent: &Agent) -> bool {
+        if kernel.paint_orders_live(team) {
+            let idx = kernel.cell_index(agent.gx, agent.gy);
+            if idx < 0 {
+                return false;
+            }
+            let ui = idx as usize;
+            return kernel.paint_cell_marked(team, agent.gx, agent.gy)
+                && kernel.is_land_idx(ui)
+                && ui < kernel.owners.len()
+                && kernel.owners[ui] != team;
+        }
         let masks = AgentNavMasks {
             friendly_corridor: &self.friendly_corridor,
             hostile_corridor: &self.hostile_corridor,
@@ -1514,5 +1534,44 @@ mod tests {
             layer.agents[0].retarget_cd >= layer.config.replan_fallback_rounds,
             "backoff should be at least replan_fallback_rounds"
         );
+    }
+
+    #[test]
+    fn paint_flow_steers_every_soldier_toward_brush() {
+        let mut k = line_graph_kernel();
+        k.owners = vec![OWNER_HOSTILE; 4];
+        k.owners[3] = OWNER_NEUTRAL;
+        assert!(k.begin_paint_stroke(OWNER_FRIENDLY));
+        k.paint_land[OWNER_FRIENDLY as usize].fill(0);
+        k.paint_land[OWNER_FRIENDLY as usize][3] = 1;
+        k.paint_kind[OWNER_FRIENDLY as usize] = crate::sim::PAINT_AREA;
+        k.commit_paint_stroke(OWNER_FRIENDLY);
+
+        let mut layer = AgentLayer::new(AgentConfig::default());
+        layer.friendly_corridor = vec![0; 4];
+        layer.hostile_corridor = vec![0; 4];
+        layer.friendly_bridge = vec![0; 4];
+        layer.hostile_bridge = vec![0; 4];
+        push_test_agent(&mut layer, 1, OWNER_FRIENDLY, 0, 0);
+        layer.agents[0].step_gx = 0;
+        layer.agents[0].step_gy = 0;
+        layer.notify_paint_orders(&k, OWNER_FRIENDLY);
+        assert_eq!(
+            (layer.agents[0].step_gx, layer.agents[0].step_gy),
+            (1, 0),
+            "release must turn the soldier toward painted land"
+        );
+
+        layer.replan_route(&k, 0);
+        assert_eq!(
+            (layer.agents[0].step_gx, layer.agents[0].step_gy),
+            (1, 0),
+            "paint must override retreat back to the local front"
+        );
+
+        layer.agents[0].move_accum = 1.0;
+        layer.tick(&mut k);
+        assert_eq!(layer.agents[0].gx, 1);
+        assert_eq!(layer.agents[0].gy, 0);
     }
 }

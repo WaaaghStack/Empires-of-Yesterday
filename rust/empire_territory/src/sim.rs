@@ -29,8 +29,16 @@ pub const SPAWNER_MODE_BATTERY: u8 = 2;
 pub const BATTERY_MAX_WAVES: f32 = 24.0;
 
 pub const PAINT_NONE: u8 = 0;
-pub const PAINT_BEACHHEAD: u8 = 1;
+/// Player-brushed priority region (soldiers + bombers hunt unowned cells in the mask).
+pub const PAINT_AREA: u8 = 1;
+/// Legacy alias kept so Godot `PAINT_BEACHHEAD` still matches kind 1.
+#[allow(dead_code)]
+pub const PAINT_BEACHHEAD: u8 = PAINT_AREA;
+/// Unused live kind; kept so Godot `PAINT_STRIKE` stays a stable 2.
+#[allow(dead_code)]
 pub const PAINT_STRIKE: u8 = 2;
+/// Max land cells in one paint stroke (~3× the first 36-cell stain).
+pub const PAINT_CELL_CAP: i32 = 108;
 
 pub(crate) const CARDINAL: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
@@ -71,8 +79,13 @@ pub struct TerritoryKernel {
     pub paint_kind: [u8; 3],
     pub paint_gx: [i32; 3],
     pub paint_gy: [i32; 3],
-    /// 1 on cells in the painted landmass (beachhead) or strike crater.
+    /// 1 on cells in the painted region (player stroke, capped).
     pub paint_land: [Vec<u8>; 3],
+    /// Hop distance to the nearest unowned painted land (`i32::MAX` = unreachable).
+    /// Rebuilt on commit and while orders are live so every unit can step downhill.
+    paint_flow_dist: [Vec<i32>; 3],
+    /// True while Godot is still brushing; maybe_clear_paint waits until commit.
+    paint_stroke_open: [bool; 3],
     pub friendly_tiles: i32,
     pub hostile_tiles: i32,
     pub claimable_tile_count: i32,
@@ -180,6 +193,12 @@ impl TerritoryKernel {
                 vec![0u8; tile_count],
                 vec![0u8; tile_count],
             ],
+            paint_flow_dist: [
+                vec![i32::MAX; tile_count],
+                vec![i32::MAX; tile_count],
+                vec![i32::MAX; tile_count],
+            ],
+            paint_stroke_open: [false; 3],
             friendly_tiles,
             hostile_tiles,
             claimable_tile_count,
@@ -666,50 +685,221 @@ impl TerritoryKernel {
         self.paint_kind[t] = PAINT_NONE;
         self.paint_gx[t] = -1;
         self.paint_gy[t] = -1;
+        self.paint_stroke_open[t] = false;
         if t < self.paint_land.len() {
             for v in &mut self.paint_land[t] {
                 *v = 0;
             }
         }
+        if t < self.paint_flow_dist.len() {
+            self.paint_flow_dist[t].fill(i32::MAX);
+        }
     }
 
-    /// Snap water clicks to nearest land for beachhead. Returns false if no land seed.
-    pub fn set_paint(&mut self, team: u8, kind: u8, gx: i32, gy: i32) -> bool {
+    /// Latest stroke replaces the previous mask. Call before dragging stamps.
+    pub fn begin_paint_stroke(&mut self, team: u8) -> bool {
         let t = team as usize;
         if t != OWNER_FRIENDLY as usize && t != OWNER_HOSTILE as usize {
             return false;
         }
-        if kind == PAINT_NONE {
-            self.clear_paint(team);
-            return true;
+        self.clear_paint(team);
+        self.paint_stroke_open[t] = true;
+        true
+    }
+
+    pub fn commit_paint_stroke(&mut self, team: u8) {
+        let t = team as usize;
+        if t < self.paint_stroke_open.len() {
+            self.paint_stroke_open[t] = false;
+        }
+        self.rebuild_paint_flow(team);
+    }
+
+    /// True after the player releases a stroke: units must peel to unowned painted land.
+    pub fn paint_orders_live(&self, team: u8) -> bool {
+        let t = team as usize;
+        t < self.paint_kind.len()
+            && self.paint_kind[t] != PAINT_NONE
+            && !self.paint_stroke_open[t]
+    }
+
+    /// Snap water to nearest land, then mark a 2-ring land blob until cap.
+    pub fn stamp_paint(&mut self, team: u8, gx: i32, gy: i32) -> bool {
+        let t = team as usize;
+        if t >= self.paint_kind.len() || !self.paint_stroke_open[t] {
+            return false;
         }
         let mut seed = self.cell_index(gx, gy);
         if seed < 0 {
             return false;
         }
-        if kind == PAINT_BEACHHEAD && !self.is_land_idx(seed as usize) {
+        if !self.is_land_idx(seed as usize) {
             seed = self.nearest_land_idx(seed as usize);
             if seed < 0 {
                 return false;
             }
         }
-        if kind == PAINT_STRIKE && !self.is_land_idx(seed as usize) {
-            return false;
+        let seed_ui = seed as usize;
+        let mut marked = self.paint_marked_count(team);
+        if marked >= PAINT_CELL_CAP {
+            return true;
         }
-        let (pgx, pgy) = self.grid_from_idx(seed);
-        self.paint_kind[t] = kind;
-        self.paint_gx[t] = pgx;
-        self.paint_gy[t] = pgy;
-        self.rebuild_paint_land(team);
-        true
+        let mut candidates = Vec::with_capacity(48);
+        candidates.push(seed_ui);
+        let mut ring = Vec::with_capacity(8);
+        self.collect_neighbors(seed_ui, &mut ring);
+        let first_ring = ring.clone();
+        candidates.extend(first_ring.iter().copied());
+        let mut scratch = Vec::with_capacity(8);
+        for &n in &first_ring {
+            scratch.clear();
+            self.collect_neighbors(n, &mut scratch);
+            candidates.extend(scratch.iter().copied());
+        }
+        let mut any = false;
+        for n in candidates {
+            if marked >= PAINT_CELL_CAP {
+                break;
+            }
+            if n >= self.tile_count || !self.is_land_idx(n) {
+                continue;
+            }
+            if self.paint_land[t][n] != 0 {
+                any = true;
+                continue;
+            }
+            self.paint_land[t][n] = 1;
+            marked += 1;
+            any = true;
+        }
+        if any && self.paint_kind[t] == PAINT_NONE {
+            let (pgx, pgy) = self.grid_from_idx(seed);
+            self.paint_kind[t] = PAINT_AREA;
+            self.paint_gx[t] = pgx;
+            self.paint_gy[t] = pgy;
+        }
+        any
     }
 
-    fn grid_from_idx(&self, idx: i32) -> (i32, i32) {
+    pub fn paint_cell_indices(&self, team: u8) -> Vec<i32> {
+        let t = team as usize;
+        if t >= self.paint_land.len() {
+            return Vec::new();
+        }
+        self.paint_land[t]
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v != 0)
+            .map(|(i, _)| i as i32)
+            .collect()
+    }
+
+    /// Tests / one-shot pin: begin, stamp a blob, commit.
+    pub fn set_paint(&mut self, team: u8, kind: u8, gx: i32, gy: i32) -> bool {
+        if kind == PAINT_NONE {
+            self.clear_paint(team);
+            return true;
+        }
+        if !self.begin_paint_stroke(team) {
+            return false;
+        }
+        let ok = self.stamp_paint(team, gx, gy);
+        self.commit_paint_stroke(team);
+        ok
+    }
+
+    pub(crate) fn grid_from_idx(&self, idx: i32) -> (i32, i32) {
         if self.graph_topology {
             return (idx, 0);
         }
         let w = self.grid_w.max(1);
         (idx % w, idx / w)
+    }
+
+    /// Multi-source BFS from unowned painted land through every cell (land + water).
+    /// One globe-wide field replaces per-unit paint searches that timed out at 24k hops.
+    pub fn rebuild_paint_flow(&mut self, team: u8) {
+        let t = team as usize;
+        if t >= self.paint_flow_dist.len() {
+            return;
+        }
+        if self.paint_flow_dist[t].len() != self.tile_count {
+            self.paint_flow_dist[t] = vec![i32::MAX; self.tile_count];
+        } else {
+            self.paint_flow_dist[t].fill(i32::MAX);
+        }
+        if !self.paint_orders_live(team) || t >= self.paint_land.len() {
+            return;
+        }
+        let mut q: Vec<usize> = Vec::new();
+        for idx in 0..self.tile_count {
+            if self.paint_land[t][idx] == 0 || !self.is_land_idx(idx) {
+                continue;
+            }
+            if idx < self.owners.len() && self.owners[idx] == team {
+                continue;
+            }
+            self.paint_flow_dist[t][idx] = 0;
+            q.push(idx);
+        }
+        let mut head = 0usize;
+        let mut scratch = Vec::with_capacity(8);
+        while head < q.len() {
+            let cur = q[head];
+            head += 1;
+            let d = self.paint_flow_dist[t][cur];
+            self.collect_neighbors(cur, &mut scratch);
+            for &n in &scratch {
+                if n >= self.tile_count {
+                    continue;
+                }
+                let nd = d.saturating_add(1);
+                if nd < self.paint_flow_dist[t][n] {
+                    self.paint_flow_dist[t][n] = nd;
+                    q.push(n);
+                }
+            }
+        }
+    }
+
+    pub fn rebuild_live_paint_flows(&mut self) {
+        self.rebuild_paint_flow(OWNER_FRIENDLY);
+        self.rebuild_paint_flow(OWNER_HOSTILE);
+    }
+
+    /// Neighbor that strictly decreases hop distance to unowned painted land.
+    pub fn paint_flow_next_idx(&self, team: u8, from_idx: usize) -> Option<usize> {
+        let t = team as usize;
+        if t >= self.paint_flow_dist.len() || from_idx >= self.paint_flow_dist[t].len() {
+            return None;
+        }
+        let d0 = self.paint_flow_dist[t][from_idx];
+        if d0 == 0 || d0 == i32::MAX {
+            return None;
+        }
+        let mut best: Option<usize> = None;
+        let mut best_d = d0;
+        self.for_each_neighbor_idx(from_idx, |n| {
+            if n >= self.paint_flow_dist[t].len() {
+                return;
+            }
+            let dn = self.paint_flow_dist[t][n];
+            if dn >= d0 {
+                return;
+            }
+            let land = self.is_land_idx(n);
+            let better = match best {
+                None => true,
+                Some(bi) => {
+                    dn < best_d || (dn == best_d && land && !self.is_land_idx(bi))
+                }
+            };
+            if better {
+                best_d = dn;
+                best = Some(n);
+            }
+        });
+        best
     }
 
     fn nearest_land_idx(&self, start: usize) -> i32 {
@@ -744,79 +934,22 @@ impl TerritoryKernel {
         -1
     }
 
-    pub fn rebuild_paint_land(&mut self, team: u8) {
-        let t = team as usize;
-        if t >= self.paint_land.len() {
-            return;
-        }
-        for v in &mut self.paint_land[t] {
-            *v = 0;
-        }
-        let kind = self.paint_kind[t];
-        if kind == PAINT_NONE {
-            return;
-        }
-        let seed = self.cell_index(self.paint_gx[t], self.paint_gy[t]);
-        if seed < 0 {
-            return;
-        }
-        let seed_ui = seed as usize;
-        if kind == PAINT_STRIKE {
-            if self.is_land_idx(seed_ui) {
-                self.paint_land[t][seed_ui] = 1;
-            }
-            let mut scratch = Vec::with_capacity(6);
-            self.collect_neighbors(seed_ui, &mut scratch);
-            for n in scratch {
-                if n < self.tile_count && self.is_land_idx(n) {
-                    self.paint_land[t][n] = 1;
-                }
-            }
-            return;
-        }
-        // Beachhead: flood contiguous land from seed.
-        if !self.is_land_idx(seed_ui) {
-            return;
-        }
-        let mut q = vec![seed_ui];
-        self.paint_land[t][seed_ui] = 1;
-        let mut head = 0usize;
-        let mut scratch = Vec::with_capacity(6);
-        while head < q.len() {
-            let cur = q[head];
-            head += 1;
-            scratch.clear();
-            self.collect_neighbors(cur, &mut scratch);
-            for n in scratch.clone() {
-                if n >= self.tile_count || self.paint_land[t][n] != 0 {
-                    continue;
-                }
-                if !self.is_land_idx(n) {
-                    continue;
-                }
-                self.paint_land[t][n] = 1;
-                q.push(n);
-            }
-        }
-    }
-
     pub fn maybe_clear_paint(&mut self) {
         for team in [OWNER_FRIENDLY, OWNER_HOSTILE] {
             let t = team as usize;
-            match self.paint_kind[t] {
-                PAINT_BEACHHEAD => {
-                    let owned = self.paint_owned_count(team);
-                    let total = self.paint_marked_count(team);
-                    if owned >= 8 || (total > 0 && owned >= total) {
-                        self.clear_paint(team);
-                    }
-                }
-                PAINT_STRIKE => {
-                    if self.strike_crater_owned(team) {
-                        self.clear_paint(team);
-                    }
-                }
-                _ => {}
+            if t >= self.paint_kind.len() || self.paint_stroke_open[t] {
+                continue;
+            }
+            if self.paint_kind[t] == PAINT_NONE {
+                continue;
+            }
+            let owned = self.paint_owned_count(team);
+            let total = self.paint_marked_count(team);
+            let unowned = total - owned;
+            // Only remaining unowned cells matter — brushing your own land must not
+            // auto-cancel the order.
+            if total <= 0 || unowned <= 0 {
+                self.clear_paint(team);
             }
         }
     }
@@ -837,32 +970,12 @@ impl TerritoryKernel {
         n
     }
 
-    fn paint_marked_count(&self, team: u8) -> i32 {
+    pub fn paint_marked_count(&self, team: u8) -> i32 {
         let t = team as usize;
         if t >= self.paint_land.len() {
             return 0;
         }
         self.paint_land[t].iter().filter(|&&v| v != 0).count() as i32
-    }
-
-    fn strike_crater_owned(&self, team: u8) -> bool {
-        let t = team as usize;
-        if t >= self.paint_land.len() {
-            return false;
-        }
-        let mask = &self.paint_land[t];
-        let lim = mask.len().min(self.owners.len());
-        let mut any = false;
-        for i in 0..lim {
-            if mask[i] == 0 {
-                continue;
-            }
-            any = true;
-            if self.owners[i] != team {
-                return false;
-            }
-        }
-        any
     }
 
     fn run_gradient_cancel_sync_pass(&mut self) {
@@ -2163,26 +2276,119 @@ mod tests {
     }
 
     #[test]
-    fn beachhead_paint_marks_mass_and_clears_when_owned() {
+    fn area_paint_stamps_blob_and_clears_when_all_unowned_are_owned() {
         let mut k = tiny_kernel(false);
         k.claimable_mask.fill(1);
         k.owners.fill(OWNER_NEUTRAL);
-        assert!(k.set_paint(OWNER_FRIENDLY, PAINT_BEACHHEAD, 0, 0));
-        assert_eq!(k.paint_kind[OWNER_FRIENDLY as usize], PAINT_BEACHHEAD);
+        assert!(k.set_paint(OWNER_FRIENDLY, PAINT_AREA, 3, 3));
+        assert_eq!(k.paint_kind[OWNER_FRIENDLY as usize], PAINT_AREA);
         let marked = k.paint_marked_count(OWNER_FRIENDLY);
-        assert!(marked >= 8, "contiguous claimable should flood a landmass");
-        let mut painted = 0;
+        assert!(marked >= 1 && marked <= PAINT_CELL_CAP);
+        assert!(
+            marked < k.tile_count as i32,
+            "area paint must not flood the whole grid"
+        );
+        let mut owned_n = 0;
         for i in 0..k.tile_count {
-            if k.paint_land[OWNER_FRIENDLY as usize][i] != 0 && painted < 8 {
+            if k.paint_land[OWNER_FRIENDLY as usize][i] != 0 && owned_n + 1 < marked {
                 k.owners[i] = OWNER_FRIENDLY;
-                painted += 1;
+                owned_n += 1;
+            }
+        }
+        k.maybe_clear_paint();
+        assert_eq!(
+            k.paint_kind[OWNER_FRIENDLY as usize],
+            PAINT_AREA,
+            "paint must stay live while any painted cell is unowned"
+        );
+        for i in 0..k.tile_count {
+            if k.paint_land[OWNER_FRIENDLY as usize][i] != 0 {
+                k.owners[i] = OWNER_FRIENDLY;
             }
         }
         k.maybe_clear_paint();
         assert_eq!(
             k.paint_kind[OWNER_FRIENDLY as usize],
             PAINT_NONE,
-            "beachhead paint should release after ~8 owned cells"
+            "area paint should release when every painted cell is owned"
+        );
+    }
+
+    #[test]
+    fn area_paint_orders_live_only_after_commit() {
+        let mut k = tiny_kernel(false);
+        k.claimable_mask.fill(1);
+        k.owners.fill(OWNER_NEUTRAL);
+        assert!(k.begin_paint_stroke(OWNER_FRIENDLY));
+        assert!(k.stamp_paint(OWNER_FRIENDLY, 3, 3));
+        assert!(
+            !k.paint_orders_live(OWNER_FRIENDLY),
+            "units must wait until the stroke is released"
+        );
+        k.commit_paint_stroke(OWNER_FRIENDLY);
+        assert!(k.paint_orders_live(OWNER_FRIENDLY));
+    }
+
+    #[test]
+    fn area_paint_holds_while_stroke_open() {
+        let mut k = tiny_kernel(false);
+        k.claimable_mask.fill(1);
+        k.owners.fill(OWNER_NEUTRAL);
+        assert!(k.begin_paint_stroke(OWNER_FRIENDLY));
+        assert!(k.stamp_paint(OWNER_FRIENDLY, 0, 0));
+        for i in 0..k.tile_count {
+            if k.paint_land[OWNER_FRIENDLY as usize][i] != 0 {
+                k.owners[i] = OWNER_FRIENDLY;
+            }
+        }
+        k.maybe_clear_paint();
+        assert_eq!(
+            k.paint_kind[OWNER_FRIENDLY as usize],
+            PAINT_AREA,
+            "open stroke must not auto-clear"
+        );
+        k.commit_paint_stroke(OWNER_FRIENDLY);
+        k.maybe_clear_paint();
+        assert_eq!(k.paint_kind[OWNER_FRIENDLY as usize], PAINT_NONE);
+    }
+
+    #[test]
+    fn area_paint_caps_at_cell_limit() {
+        let mut k = tiny_kernel(false);
+        k.claimable_mask.fill(1);
+        k.owners.fill(OWNER_NEUTRAL);
+        assert!(k.begin_paint_stroke(OWNER_FRIENDLY));
+        for y in 0..k.grid_h {
+            for x in 0..k.grid_w {
+                k.stamp_paint(OWNER_FRIENDLY, x, y);
+            }
+        }
+        k.commit_paint_stroke(OWNER_FRIENDLY);
+        let marked = k.paint_marked_count(OWNER_FRIENDLY);
+        assert!(marked > 0 && marked <= PAINT_CELL_CAP);
+    }
+
+    #[test]
+    fn paint_flow_points_every_cell_at_unowned_paint() {
+        let mut k = tiny_kernel(false);
+        k.claimable_mask.fill(1);
+        k.owners.fill(OWNER_NEUTRAL);
+        assert!(k.begin_paint_stroke(OWNER_FRIENDLY));
+        k.paint_land[OWNER_FRIENDLY as usize].fill(0);
+        k.paint_land[OWNER_FRIENDLY as usize][7] = 1;
+        k.paint_kind[OWNER_FRIENDLY as usize] = PAINT_AREA;
+        k.commit_paint_stroke(OWNER_FRIENDLY);
+        let t = OWNER_FRIENDLY as usize;
+        assert_eq!(k.paint_flow_dist[t][7], 0);
+        assert_eq!(k.paint_flow_dist[t][6], 1);
+        assert_eq!(k.paint_flow_dist[t][0], 7);
+        assert_eq!(k.paint_flow_next_idx(OWNER_FRIENDLY, 0), Some(1));
+        k.owners[7] = OWNER_FRIENDLY;
+        k.rebuild_paint_flow(OWNER_FRIENDLY);
+        assert_eq!(
+            k.paint_flow_dist[t][0],
+            i32::MAX,
+            "owned paint must drop out of the flow"
         );
     }
 }

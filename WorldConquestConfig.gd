@@ -76,9 +76,10 @@ const SOFT_CAP_HEALTHY_FRAMES_TO_RAISE := 45
 ## Rate-limit soft_cap RunLog lines (ms) even if state flips again.
 const SOFT_CAP_LOG_INTERVAL_MS := 3000
 ## Minimum time on the World Conquest loading screen (shader compile, Rust warm-up).
-const WORLD_CONQUEST_MIN_LOAD_SEC := 2.5
+## Skipped when sphere/world pack + albedo are already on disk (warm Earth).
+const WORLD_CONQUEST_MIN_LOAD_SEC := 1.0
 ## Capital deploy pick window once the globe is interactable (US-START-01).
-const DEPLOY_PICK_SEC := 5.0
+const DEPLOY_PICK_SEC := 10.0
 ## Brief enemy capital pin after player commits deploy.
 const DEPLOY_ENEMY_REVEAL_SEC := 1.5
 ## Orbit sensitivity multiplier while choosing a capital (pick phase only).
@@ -274,6 +275,8 @@ const CAMERA_ORBIT_SPEED := 0.35
 const CAMERA_PITCH_MIN := -1.2
 const CAMERA_PITCH_MAX := 1.2
 const CAMERA_ZOOM_STEP := 1.12
+## Wheel zoom lerp rate (higher = snappier). Distance eases toward the target each frame.
+const CAMERA_ZOOM_LERP := 8.0
 ## Keep camera outside globe radius + max elevation + fluid lift.
 const CAMERA_MIN_DISTANCE := 155.0
 const CAMERA_MAX_DISTANCE := 320.0
@@ -365,10 +368,12 @@ const SPAWNER_MODE_PUMP := 0
 const SPAWNER_MODE_DRAIN := 1
 const SPAWNER_MODE_BATTERY := 2
 
-## Unit paint kinds (Rust paint_kind u8). 0 = none.
+## Unit paint kinds (Rust paint_kind u8). 0 = none. Area stroke is the live verb.
 const PAINT_NONE := 0
+const PAINT_AREA := 1
 const PAINT_BEACHHEAD := 1
 const PAINT_STRIKE := 2
+const PAINT_CELL_CAP := 108
 
 
 static func theater_display_name(theater_id: String) -> String:

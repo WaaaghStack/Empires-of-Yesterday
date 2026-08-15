@@ -68,6 +68,14 @@ pub fn infantry_ferry_context(_tile_count: usize) -> RouteContext {
     CTX_INFANTRY_FERRY.with_max_expand(FERRY_MAX_EXPAND.min(MAX_PATHFIND_EXPAND))
 }
 
+/// Player paint is a rare order — allow a longer ferry/land search than auto-hunt.
+pub const PAINT_MAX_EXPAND: usize = 24_000;
+
+#[allow(dead_code)]
+pub fn infantry_paint_context() -> RouteContext {
+    CTX_INFANTRY_FERRY.with_max_expand(PAINT_MAX_EXPAND)
+}
+
 pub fn any_land_advance_goal(view: &BattleNavView<'_>, tile_count: usize) -> bool {
     for idx in 0..tile_count {
         if view.is_advance_goal(idx) {

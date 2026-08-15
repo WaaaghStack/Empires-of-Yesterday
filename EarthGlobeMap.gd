@@ -30,6 +30,8 @@ const _ROAD_RIBBON_SHADER: Shader = preload("res://shaders/globe/road_ribbon.gds
 const RESOURCE_RENDER_PRIORITY := 6
 const MARKER_RENDER_PRIORITY := 7
 const UNIT_RENDER_PRIORITY := 10
+const _PAINT_BYTE_OWNED := 90
+const _PAINT_BYTE_UNOWNED := 220
 ## Billboard pixel art (res://assets/units). pixel_size ≈ world meters per texture pixel.
 const SOLDIER_SPRITE_PIXEL_SIZE := 0.0055
 const BOMBER_SPRITE_PIXEL_SIZE := 0.0065
@@ -78,6 +80,17 @@ var _builder_pool: Array[MeshInstance3D] = []
 var _builder_pool_used: int = 0
 var _builder_mesh: BoxMesh
 var _marker_box_mesh: BoxMesh
+var _mesh_capital: CylinderMesh
+var _mesh_outpost: CylinderMesh
+var _mesh_outpost_drain: CylinderMesh
+var _mesh_outpost_battery: CylinderMesh
+var _mesh_barracks: BoxMesh
+var _mesh_barracks_yard: BoxMesh
+var _mesh_hangar: BoxMesh
+var _mesh_hangar_wing: BoxMesh
+var _mesh_beacon: SphereMesh
+var _mesh_bomber_shadow: SphereMesh
+var _select_ring: MeshInstance3D
 var _road_land_mm: MultiMeshInstance3D
 var _road_bridge_mm: MultiMeshInstance3D
 ## Live instance counts (MultiMesh.instance_count is capacity; visible_instance_count is drawn).
@@ -136,6 +149,10 @@ var _road_img_gpu: Image
 var _road_bytes_cache: PackedByteArray = PackedByteArray()
 var _road_cache_by_cell: PackedByteArray = PackedByteArray()
 var _road_gpu_upload_pending: bool = false
+var _paint_tex_gpu: ImageTexture
+var _paint_img_gpu: Image
+var _paint_bytes_cache: PackedByteArray = PackedByteArray()
+var _paint_overlay_sig: int = -1
 var _surface_lut: PackedVector3Array = PackedVector3Array()
 var _shared_road_box: BoxMesh
 var _shared_link_box: BoxMesh
@@ -146,8 +163,14 @@ var _cell_eq_pix: PackedInt32Array = PackedInt32Array()
 ## Sphere: per-cell R8 owner cache for O(1) reconcile (mirrors equirect writes).
 var _owner_cache_by_cell: PackedByteArray = PackedByteArray()
 var _cam_distance: float = WorldConquestConfigLib.CAMERA_DEFAULT_DISTANCE
+var _cam_distance_target: float = WorldConquestConfigLib.CAMERA_DEFAULT_DISTANCE
 var _yaw: float = -0.6
 var _pitch: float = 0.35
+var _cam_look_tween: Tween
+var _surge_flash_sid: int = -1
+var _surge_flash_until_msec: int = 0
+var _bomber_shadow_pool: Array[MeshInstance3D] = []
+var _bomber_shadow_used: int = 0
 var _dragging: bool = false
 var _last_mouse: Vector2 = Vector2.ZERO
 var _owner_gpu_upload_pending: bool = false
@@ -218,6 +241,46 @@ func _build_scene() -> void:
 	_shared_link_box.size = Vector3.ONE
 	_marker_box_mesh = BoxMesh.new()
 	_marker_box_mesh.size = Vector3.ONE
+	_mesh_capital = CylinderMesh.new()
+	_mesh_capital.top_radius = 0.14
+	_mesh_capital.bottom_radius = 0.42
+	_mesh_capital.height = 2.6
+	_mesh_capital.radial_segments = 10
+	_mesh_outpost = CylinderMesh.new()
+	_mesh_outpost.top_radius = 0.2
+	_mesh_outpost.bottom_radius = 0.4
+	_mesh_outpost.height = 1.55
+	_mesh_outpost.radial_segments = 8
+	_mesh_barracks = BoxMesh.new()
+	_mesh_barracks.size = Vector3(1.55, 0.48, 1.1)
+	_mesh_hangar = BoxMesh.new()
+	_mesh_hangar.size = Vector3(1.90, 0.14, 1.40)
+	_mesh_hangar_wing = BoxMesh.new()
+	_mesh_hangar_wing.size = Vector3(1.55, 0.07, 0.42)
+	_mesh_barracks = BoxMesh.new()
+	_mesh_barracks.size = Vector3(1.70, 0.16, 1.20)
+	_mesh_barracks_yard = BoxMesh.new()
+	_mesh_barracks_yard.size = Vector3(0.85, 0.12, 0.70)
+	_mesh_outpost_drain = CylinderMesh.new()
+	_mesh_outpost_drain.top_radius = 0.42
+	_mesh_outpost_drain.bottom_radius = 0.16
+	_mesh_outpost_drain.height = 1.35
+	_mesh_outpost_drain.radial_segments = 8
+	_mesh_outpost_battery = CylinderMesh.new()
+	_mesh_outpost_battery.top_radius = 0.32
+	_mesh_outpost_battery.bottom_radius = 0.38
+	_mesh_outpost_battery.height = 1.15
+	_mesh_outpost_battery.radial_segments = 10
+	_mesh_beacon = SphereMesh.new()
+	_mesh_beacon.radius = 0.11
+	_mesh_beacon.height = 0.22
+	_mesh_beacon.radial_segments = 8
+	_mesh_beacon.rings = 4
+	_mesh_bomber_shadow = SphereMesh.new()
+	_mesh_bomber_shadow.radius = 0.55
+	_mesh_bomber_shadow.height = 0.08
+	_mesh_bomber_shadow.radial_segments = 8
+	_mesh_bomber_shadow.rings = 3
 	_shockwave_ring_mesh = TorusMesh.new()
 	# Unit ring — scaled in update_resource_shockwaves to world radii.
 	_shockwave_ring_mesh.inner_radius = 0.82
@@ -409,6 +472,7 @@ func _apply_terrain_material() -> void:
 		"height_scale", WorldConquestConfigLib.HEIGHT_SCALE
 	)
 	_terrain_shader_mat.set_shader_parameter("ambient_boost", 0.22)
+	_terrain_shader_mat.set_shader_parameter("hemisphere_mode", 0.0)
 	_globe_mi.material_override = _terrain_shader_mat
 
 
@@ -709,6 +773,12 @@ func _setup_gpu_ownership_material(w: int, h: int) -> void:
 	_road_tex_gpu = ImageTexture.create_from_image(_road_img_gpu)
 	_road_bytes_cache.resize(w * h)
 	_road_bytes_cache.fill(0)
+	_paint_img_gpu = Image.create(w, h, false, Image.FORMAT_R8)
+	_paint_img_gpu.fill(Color(0, 0, 0))
+	_paint_tex_gpu = ImageTexture.create_from_image(_paint_img_gpu)
+	_paint_bytes_cache.resize(w * h)
+	_paint_bytes_cache.fill(0)
+	_paint_overlay_sig = -1
 	var land_img := Image.create(w, h, false, Image.FORMAT_R8)
 	for gy in range(h):
 		for gx in range(w):
@@ -732,6 +802,8 @@ func _setup_gpu_ownership_material(w: int, h: int) -> void:
 	_ownership_shader_mat.set_shader_parameter("depth_map", _depth_tex_gpu)
 	_ownership_shader_mat.set_shader_parameter("land_mask", _land_tex_gpu)
 	_ownership_shader_mat.set_shader_parameter("road_map", _road_tex_gpu)
+	_ownership_shader_mat.set_shader_parameter("paint_map", _paint_tex_gpu)
+	_ownership_shader_mat.set_shader_parameter("inspect_boost", 0.0)
 	_ownership_shader_mat.render_priority = 1
 	_fluid_mi.material_override = _ownership_shader_mat
 	_fluid_mi.visible = true
@@ -1377,16 +1449,74 @@ func set_command_pin(grid: Vector2i, kind: int) -> void:
 		c.queue_free()
 	if grid.x < 0:
 		return
-	var col: Color = Color(0.95, 0.82, 0.28, 0.95)
+	var col: Color = Color(0.35, 0.92, 0.78, 0.95)
 	if kind == WorldConquestConfigLib.PAINT_STRIKE:
 		col = Color(1.0, 0.45, 0.22, 0.95)
-	elif kind == WorldConquestConfigLib.PAINT_BEACHHEAD:
-		col = Color(0.35, 0.92, 0.78, 0.95)
 	_add_capital_marker_to(_command_pin, grid, col, 1.35, 1.0)
 
 
 func clear_command_pin() -> void:
 	set_command_pin(Vector2i(-1, -1), 0)
+
+
+func set_paint_overlay(cell_ids: PackedInt32Array, team: int, owners: PackedByteArray) -> void:
+	if not _gpu_ownership_ready or battle_data == null or _paint_img_gpu == null or _paint_tex_gpu == null:
+		return
+	var w: int = battle_data.grid_width
+	var h: int = battle_data.grid_height
+	var n: int = w * h
+	var owned_n: int = 0
+	var id_mix: int = 0
+	for i in range(cell_ids.size()):
+		var cid: int = int(cell_ids[i])
+		id_mix ^= cid * (i + 1)
+		if cid >= 0 and cid < owners.size() and int(owners[cid]) == team:
+			owned_n += 1
+	var sig: int = cell_ids.size() * 10007 + owned_n * 17 + id_mix
+	if sig == _paint_overlay_sig:
+		return
+	_paint_overlay_sig = sig
+	if _paint_bytes_cache.size() != n:
+		_paint_bytes_cache.resize(n)
+	_paint_bytes_cache.fill(0)
+	for i in range(cell_ids.size()):
+		var cell: int = int(cell_ids[i])
+		var byte_v: int = _PAINT_BYTE_UNOWNED
+		if cell >= 0 and cell < owners.size() and int(owners[cell]) == team:
+			byte_v = _PAINT_BYTE_OWNED
+		_write_paint_byte_for_cell(cell, byte_v)
+	_paint_img_gpu.set_data(w, h, false, Image.FORMAT_R8, _paint_bytes_cache)
+	_paint_tex_gpu.update(_paint_img_gpu)
+
+
+func clear_paint_overlay() -> void:
+	set_paint_overlay(PackedInt32Array(), 0, PackedByteArray())
+
+
+func _write_paint_byte_for_cell(cell_id: int, byte_v: int) -> void:
+	if battle_data == null or cell_id < 0:
+		return
+	if battle_data.sphere_mode:
+		if cell_id + 1 >= _cell_eq_offsets.size():
+			return
+		var start: int = _cell_eq_offsets[cell_id]
+		var end: int = _cell_eq_offsets[cell_id + 1]
+		var ow: int = battle_data.grid_width
+		var hh: int = battle_data.grid_height
+		for slot in range(start, end):
+			var pidx: int = _cell_eq_pix[slot]
+			if pidx < 0 or pidx >= _paint_bytes_cache.size():
+				continue
+			if pidx < _land_mask.size() and _land_mask[pidx] == 0:
+				continue
+			_paint_bytes_cache[pidx] = byte_v
+			var gx: int = pidx % ow
+			if gx == 0:
+				var gy: int = pidx / ow
+				if gy >= 0 and gy < hh:
+					_paint_bytes_cache[gy * ow + ow - 1] = byte_v
+	elif cell_id < _paint_bytes_cache.size():
+		_paint_bytes_cache[cell_id] = byte_v
 
 
 func _path_preview_signature(path_packed: PackedInt32Array) -> int:
@@ -1456,8 +1586,8 @@ func refresh_markers(
 	# during the 4 Hz construction-pulse refresh).
 	_marker_pool_used = 0
 	_marker_sid_slot.clear()
-	_place_pooled_marker(home_player, Color(0.2, 0.55, 1.0), 2.2)
-	_place_pooled_marker(home_enemy, Color(0.95, 0.3, 0.22), 2.2)
+	_place_pooled_marker(home_player, Color(0.2, 0.55, 1.0), 2.2, 1.0, "capital")
+	_place_pooled_marker(home_enemy, Color(0.95, 0.3, 0.22), 2.2, 1.0, "capital")
 	var pulse: float = 0.55 + 0.45 * sin(_marker_pulse * TAU)
 	for st: Dictionary in structures:
 		var kind: String = str(st.get("kind", ""))
@@ -1516,7 +1646,12 @@ func refresh_markers(
 		var sid: int = int(st.get("id", -1))
 		if sid >= 0:
 			_marker_sid_slot[sid] = _marker_pool_used
-		_place_pooled_marker(Vector2i(gx, gy), col, scale_f, alpha)
+		if sid == _surge_flash_sid and Time.get_ticks_msec() < _surge_flash_until_msec:
+			scale_f *= 1.15
+			col = col.lightened(0.25)
+		_place_pooled_marker(
+			Vector2i(gx, gy), col, scale_f, alpha, kind, int(st.get("spawner_mode", 0))
+		)
 	# Completed land bridges live in bridge_corridors (not placed_structures) — solid pin at landing.
 	if battle_data != null:
 		for corridor: Dictionary in battle_data.bridge_corridors:
@@ -1531,7 +1666,7 @@ func refresh_markers(
 			var csid: int = int(corridor.get("id", -1))
 			if csid >= 0:
 				_marker_sid_slot[csid] = _marker_pool_used
-			_place_pooled_marker(Vector2i(cgx, cgy), ccol, 1.05, 1.0)
+			_place_pooled_marker(Vector2i(cgx, cgy), ccol, 1.05, 1.0, WorldConquestOutpostBuildLib.KIND_CORRIDOR_LINK)
 	for i in range(_marker_pool_used, _marker_pool.size()):
 		_marker_pool[i].visible = false
 
@@ -1635,17 +1770,18 @@ func _apply_structure_marker_to_slot(st: Dictionary, slot: int, pulse: float) ->
 		col = col.lerp(Color(0.92, 0.28, 0.18), 1.0 - hp_frac)
 		scale_f *= lerpf(0.85, 1.0, hp_frac)
 	var node: MeshInstance3D = _marker_pool[slot]
+	_ensure_marker_extras(node)
 	node.visible = true
-	node.position = _grid_surface_pos(Vector2i(gx, gy), 1.5)
+	node.mesh = _mesh_for_structure_kind(kind, int(st.get("spawner_mode", 0)))
+	var pos: Vector3 = _grid_surface_pos(Vector2i(gx, gy), 1.5)
+	node.position = pos
+	_orient_on_globe(node, pos)
+	if int(st.get("id", -1)) == _surge_flash_sid and Time.get_ticks_msec() < _surge_flash_until_msec:
+		scale_f *= 1.15
+		col = col.lightened(0.25)
 	node.scale = Vector3.ONE * (1.8 * scale_f)
-	var mat := node.material_override as StandardMaterial3D
-	mat.albedo_color = Color(col.r, col.g, col.b, alpha)
-	mat.emission = Color(col.r, col.g, col.b) * 0.5
-	mat.transparency = (
-		BaseMaterial3D.TRANSPARENCY_ALPHA
-		if alpha < 0.99
-		else BaseMaterial3D.TRANSPARENCY_DISABLED
-	)
+	node.visible = _is_front_hemisphere(pos)
+	_style_structure_marker(node, col, alpha, kind, int(st.get("spawner_mode", 0)))
 
 
 func grid_lerp_surface_pos(grid_a: Vector2i, grid_b: Vector2i, t: float, lift: float) -> Vector3:
@@ -1797,7 +1933,14 @@ func _place_pooled_soldier(grid: Vector2i, team: int) -> void:
 	_soldier_pool_used += 1
 	sprite.visible = true
 	sprite.texture = _unit_sprite_texture(false, team)
-	sprite.position = _grid_surface_pos(grid, SOLDIER_SURFACE_LIFT)
+	var lift: float = SOLDIER_SURFACE_LIFT
+	if battle_data != null:
+		var on_land: bool = (
+			battle_data.is_land_cell_id(grid.x) if battle_data.sphere_mode else battle_data.is_land_cell(grid.x, grid.y)
+		)
+		if not on_land:
+			lift = SOLDIER_SURFACE_LIFT + 0.85
+	sprite.position = _grid_surface_pos(grid, lift)
 	sprite.scale = Vector3.ONE
 	sprite.visible = _is_front_hemisphere(sprite.position)
 
@@ -1811,6 +1954,7 @@ func sync_bombers(
 	if _bombers == null:
 		return
 	_bomber_pool_used = 0
+	_bomber_shadow_used = 0
 	var n: int = mini(teams.size(), mini(gx.size(), gy.size()))
 	for i in range(n):
 		var grid := Vector2i(gx[i], gy[i])
@@ -1820,6 +1964,8 @@ func sync_bombers(
 		_place_pooled_bomber(grid, int(teams[i]), scope)
 	for j in range(_bomber_pool_used, _bomber_pool.size()):
 		_bomber_pool[j].visible = false
+	for j in range(_bomber_shadow_used, _bomber_shadow_pool.size()):
+		_bomber_shadow_pool[j].visible = false
 
 
 func _bomber_scope_visual_scale(scope: int) -> float:
@@ -1852,6 +1998,29 @@ func _place_pooled_bomber(grid: Vector2i, team: int, search_scope: int = 0) -> v
 	sprite.scale = Vector3(scope_scale, scope_scale, scope_scale)
 	sprite.position = _grid_surface_pos(grid, WorldConquestConfigLib.BOMBER_SURFACE_LIFT)
 	sprite.visible = _is_front_hemisphere(sprite.position)
+	_place_bomber_shadow(grid, sprite.visible)
+
+
+func _place_bomber_shadow(grid: Vector2i, show: bool) -> void:
+	if _bombers == null:
+		return
+	while _bomber_shadow_pool.size() <= _bomber_shadow_used:
+		var disc := MeshInstance3D.new()
+		disc.mesh = _mesh_bomber_shadow
+		disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(0.02, 0.03, 0.05, 0.45)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		disc.material_override = mat
+		_bombers.add_child(disc)
+		_bomber_shadow_pool.append(disc)
+	var shadow: MeshInstance3D = _bomber_shadow_pool[_bomber_shadow_used]
+	_bomber_shadow_used += 1
+	var pos: Vector3 = _grid_surface_pos(grid, 0.6)
+	shadow.position = pos
+	_orient_on_globe(shadow, pos)
+	shadow.visible = show
 
 
 func play_bomb_drops(teams: PackedByteArray, gx: PackedInt32Array, gy: PackedInt32Array) -> void:
@@ -2484,7 +2653,7 @@ func _ensure_shockwave_pool() -> void:
 
 
 func _place_pooled_marker(
-	grid: Vector2i, color: Color, scale_f: float, alpha: float = 1.0
+	grid: Vector2i, color: Color, scale_f: float, alpha: float = 1.0, kind: String = "", mode: int = 0
 ) -> void:
 	if _markers == null or battle_data == null or grid.x < 0:
 		return
@@ -2493,24 +2662,269 @@ func _place_pooled_marker(
 		node.mesh = _marker_box_mesh
 		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		node.material_override = StandardMaterial3D.new()
-		(node.material_override as StandardMaterial3D).emission_enabled = true
+		(node.material_override as StandardMaterial3D).emission_enabled = false
+		_ensure_marker_extras(node)
 		_markers.add_child(node)
 		_marker_pool.append(node)
 	var box: MeshInstance3D = _marker_pool[_marker_pool_used]
 	_marker_pool_used += 1
-	box.position = _grid_surface_pos(grid, 1.5)
+	box.mesh = _mesh_for_structure_kind(kind, mode)
+	var pos: Vector3 = _grid_surface_pos(grid, 1.5)
+	box.position = pos
+	_orient_on_globe(box, pos)
 	box.scale = Vector3.ONE * (1.8 * scale_f)
-	box.visible = _is_front_hemisphere(box.position)
-	var mat := box.material_override as StandardMaterial3D
-	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
-	mat.emission = Color(color.r, color.g, color.b) * 0.5
+	box.visible = _is_front_hemisphere(pos)
+	_style_structure_marker(box, color, alpha, kind, mode)
+
+
+func _mesh_for_structure_kind(kind: String, mode: int = 0) -> Mesh:
+	match kind:
+		"capital":
+			return _mesh_capital if _mesh_capital != null else _marker_box_mesh
+		WorldConquestOutpostBuildLib.KIND_BARRACKS:
+			return _mesh_barracks if _mesh_barracks != null else _marker_box_mesh
+		WorldConquestOutpostBuildLib.KIND_HANGAR:
+			return _mesh_hangar if _mesh_hangar != null else _marker_box_mesh
+		WorldConquestOutpostBuildLib.KIND_SPAWNER:
+			if mode == WorldConquestConfigLib.SPAWNER_MODE_DRAIN and _mesh_outpost_drain != null:
+				return _mesh_outpost_drain
+			if mode == WorldConquestConfigLib.SPAWNER_MODE_BATTERY and _mesh_outpost_battery != null:
+				return _mesh_outpost_battery
+			return _mesh_outpost if _mesh_outpost != null else _marker_box_mesh
+		_:
+			return _mesh_outpost if _mesh_outpost != null else _marker_box_mesh
+
+
+func _orient_on_globe(node: Node3D, pos: Vector3) -> void:
+	var n: Vector3 = pos.normalized()
+	if n.length_squared() < 0.0001:
+		return
+	var up := Vector3.UP
+	if absf(n.dot(up)) > 0.94:
+		up = Vector3.RIGHT
+	node.look_at(pos + n, up)
+	node.rotate_object_local(Vector3.RIGHT, -PI * 0.5)
+
+
+func look_at_grid(grid: Vector2i) -> void:
+	if battle_data == null or grid.x < 0:
+		return
+	var pos: Vector3 = _grid_surface_pos(grid, 0.0)
+	if pos.length_squared() < 0.0001:
+		return
+	var n: Vector3 = pos.normalized()
+	_yaw = atan2(n.x, n.z)
+	_pitch = clampf(
+		asin(clampf(n.y, -1.0, 1.0)) * 0.85,
+		WorldConquestConfigLib.CAMERA_PITCH_MIN,
+		WorldConquestConfigLib.CAMERA_PITCH_MAX,
+	)
+	_apply_camera()
+
+
+func ease_look_at_grid(grid: Vector2i, sec: float) -> void:
+	if battle_data == null or grid.x < 0:
+		return
+	var pos: Vector3 = _grid_surface_pos(grid, 0.0)
+	if pos.length_squared() < 0.0001:
+		return
+	var n: Vector3 = pos.normalized()
+	var start_yaw: float = _yaw
+	var start_pitch: float = _pitch
+	var target_yaw: float = atan2(n.x, n.z)
+	var target_pitch: float = clampf(
+		asin(clampf(n.y, -1.0, 1.0)) * 0.85,
+		WorldConquestConfigLib.CAMERA_PITCH_MIN,
+		WorldConquestConfigLib.CAMERA_PITCH_MAX,
+	)
+	if _cam_look_tween != null:
+		_cam_look_tween.kill()
+	_cam_look_tween = create_tween()
+	_cam_look_tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_cam_look_tween.tween_method(
+		func(t: float) -> void:
+			_yaw = lerp_angle(start_yaw, target_yaw, t)
+			_pitch = lerpf(start_pitch, target_pitch, t)
+			_apply_camera(),
+		0.0,
+		1.0,
+		maxf(0.05, sec),
+	)
+
+
+func frame_both_capitals(a: Vector2i, b: Vector2i) -> void:
+	if battle_data == null:
+		return
+	var pa: Vector3 = _grid_surface_pos(a, 0.0)
+	var pb: Vector3 = _grid_surface_pos(b, 0.0)
+	if pa.length_squared() < 0.0001 or pb.length_squared() < 0.0001:
+		return
+	var mid: Vector3 = pa.normalized() + pb.normalized()
+	if mid.length_squared() < 0.0001:
+		mid = pa.normalized().cross(Vector3.UP)
+		if mid.length_squared() < 0.0001:
+			mid = pa.normalized().cross(Vector3.RIGHT)
+	mid = mid.normalized()
+	_yaw = atan2(mid.x, mid.z)
+	_pitch = clampf(
+		asin(clampf(mid.y, -1.0, 1.0)) * 0.55 + 0.18,
+		WorldConquestConfigLib.CAMERA_PITCH_MIN,
+		WorldConquestConfigLib.CAMERA_PITCH_MAX,
+	)
+	var gap: float = acos(clampf(pa.normalized().dot(pb.normalized()), -1.0, 1.0))
+	_cam_distance_target = clampf(
+		WorldConquestConfigLib.CAMERA_DEFAULT_DISTANCE + gap * 55.0,
+		WorldConquestConfigLib.CAMERA_MIN_DISTANCE,
+		WorldConquestConfigLib.CAMERA_MAX_DISTANCE,
+	)
+	_cam_distance = _cam_distance_target
+	_apply_camera()
+
+
+func grid_world_pos(grid: Vector2i) -> Vector3:
+	return _grid_surface_pos(grid, 2.1)
+
+
+func set_hemisphere_dim(mode: int) -> void:
+	if _terrain_shader_mat != null:
+		_terrain_shader_mat.set_shader_parameter("hemisphere_mode", float(clampi(mode, 0, 2)))
+
+
+func set_inspect_boost(on: bool) -> void:
+	if _ownership_shader_mat != null:
+		_ownership_shader_mat.set_shader_parameter("inspect_boost", 1.0 if on else 0.0)
+
+
+func flash_structure(sid: int) -> void:
+	_surge_flash_sid = sid
+	_surge_flash_until_msec = Time.get_ticks_msec() + 400
+
+
+func pulse_lock_marker(grid: Vector2i) -> void:
+	if _preview_pins == null:
+		return
+	for c in _preview_pins.get_children():
+		if c is Node3D:
+			var node := c as Node3D
+			var tw := create_tween()
+			tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tw.tween_property(node, "scale", node.scale * 1.4, 0.14)
+			tw.tween_property(node, "scale", node.scale, 0.14)
+
+
+func _ensure_marker_extras(node: MeshInstance3D) -> void:
+	if node.get_node_or_null("Beacon") == null:
+		var beacon := MeshInstance3D.new()
+		beacon.name = "Beacon"
+		beacon.mesh = _mesh_beacon
+		beacon.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var bmat := StandardMaterial3D.new()
+		bmat.emission_enabled = true
+		bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		beacon.material_override = bmat
+		beacon.position = Vector3(0, 0.85, 0)
+		node.add_child(beacon)
+	if node.get_node_or_null("Detail") == null:
+		var detail := MeshInstance3D.new()
+		detail.name = "Detail"
+		detail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		detail.material_override = StandardMaterial3D.new()
+		detail.visible = false
+		node.add_child(detail)
+
+
+func _style_structure_marker(node: MeshInstance3D, team_col: Color, alpha: float, kind: String, mode: int) -> void:
+	var stone := Color(0.45, 0.42, 0.38, alpha)
+	var mat := node.material_override as StandardMaterial3D
+	if mat == null:
+		mat = StandardMaterial3D.new()
+		node.material_override = mat
+	mat.albedo_color = stone
+	mat.emission_enabled = false
 	mat.no_depth_test = false
 	mat.render_priority = MARKER_RENDER_PRIORITY
 	mat.transparency = (
-		BaseMaterial3D.TRANSPARENCY_ALPHA
-		if alpha < 0.99
-		else BaseMaterial3D.TRANSPARENCY_DISABLED
+		BaseMaterial3D.TRANSPARENCY_ALPHA if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED
 	)
+	var beacon: MeshInstance3D = node.get_node_or_null("Beacon") as MeshInstance3D
+	if beacon:
+		beacon.visible = true
+		var bmat := beacon.material_override as StandardMaterial3D
+		if bmat:
+			bmat.albedo_color = team_col
+			bmat.emission = team_col * 1.2
+		if kind == "capital":
+			beacon.position = Vector3(0, 1.15, 0)
+			beacon.scale = Vector3.ONE * 1.15
+		elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+			beacon.position = Vector3(0.7, 0.42, 0)
+			beacon.scale = Vector3.ONE
+		elif kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+			beacon.position = Vector3(0.7, 0.22, 0.4)
+			beacon.scale = Vector3.ONE
+		else:
+			beacon.position = Vector3(0, 0.78, 0)
+			beacon.scale = Vector3.ONE
+	var detail: MeshInstance3D = node.get_node_or_null("Detail") as MeshInstance3D
+	if detail:
+		var dmat := detail.material_override as StandardMaterial3D
+		if kind == WorldConquestOutpostBuildLib.KIND_BARRACKS:
+			detail.visible = true
+			detail.mesh = _mesh_barracks_yard
+			detail.position = Vector3(0, 0.02, 0)
+			detail.rotation_degrees = Vector3.ZERO
+			if dmat:
+				dmat.albedo_color = Color(0.08, 0.09, 0.11, alpha)
+				dmat.emission_enabled = false
+		elif kind == WorldConquestOutpostBuildLib.KIND_HANGAR:
+			detail.visible = true
+			detail.mesh = _mesh_hangar_wing
+			detail.position = Vector3(0, 0.38, 0)
+			detail.rotation_degrees = Vector3(12, 0, 0)
+			if dmat:
+				dmat.albedo_color = stone
+		elif kind == WorldConquestOutpostBuildLib.KIND_SPAWNER and mode == WorldConquestConfigLib.SPAWNER_MODE_BATTERY:
+			detail.visible = false
+			detail.scale = Vector3.ONE
+		else:
+			detail.visible = false
+			detail.scale = Vector3.ONE
+
+
+func _process(delta: float) -> void:
+	if absf(_cam_distance - _cam_distance_target) > 0.05:
+		var k: float = 1.0 - exp(-WorldConquestConfigLib.CAMERA_ZOOM_LERP * delta)
+		_cam_distance = lerpf(_cam_distance, _cam_distance_target, k)
+		_apply_camera()
+
+
+func set_selected_structure_grid(grid: Vector2i) -> void:
+	if _select_ring == null:
+		_select_ring = MeshInstance3D.new()
+		_select_ring.name = "SelectRing"
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.72
+		torus.outer_radius = 0.95
+		torus.rings = 12
+		torus.ring_segments = 24
+		_select_ring.mesh = torus
+		_select_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(0.95, 0.92, 0.55, 0.9)
+		mat.emission_enabled = true
+		mat.emission = Color(0.95, 0.88, 0.35)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_select_ring.material_override = mat
+		add_child(_select_ring)
+	if grid.x < 0:
+		_select_ring.visible = false
+		return
+	var pos: Vector3 = _grid_surface_pos(grid, 2.1)
+	_select_ring.position = pos
+	_orient_on_globe(_select_ring, pos)
+	_select_ring.scale = Vector3.ONE * 1.35
+	_select_ring.visible = _is_front_hemisphere(pos)
 
 
 func _add_capital_marker_to(
@@ -2519,21 +2933,37 @@ func _add_capital_marker_to(
 	if parent == null or battle_data == null or grid.x < 0:
 		return
 	var pos: Vector3 = _grid_surface_pos(grid, 1.5)
-	var box := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(1.8 * scale_f, 1.8 * scale_f, 1.8 * scale_f)
-	box.mesh = bm
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(color.r, color.g, color.b, alpha)
 	mat.emission_enabled = true
-	mat.emission = Color(color.r, color.g, color.b) * 0.5
+	mat.emission = Color(color.r, color.g, color.b) * 0.55
 	mat.no_depth_test = false
 	mat.render_priority = MARKER_RENDER_PRIORITY
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED
+	mat.transparency = (
+		BaseMaterial3D.TRANSPARENCY_ALPHA if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED
+	)
+	var box := MeshInstance3D.new()
+	box.mesh = _mesh_capital if _mesh_capital != null else _marker_box_mesh
 	box.material_override = mat
-	box.position = pos
-	box.visible = _is_front_hemisphere(pos)
 	parent.add_child(box)
+	box.position = pos
+	_orient_on_globe(box, pos)
+	box.visible = _is_front_hemisphere(pos)
+	var bloom := MeshInstance3D.new()
+	var disc := SphereMesh.new()
+	disc.radius = 1.15 * scale_f
+	disc.height = 0.22 * scale_f
+	bloom.mesh = disc
+	var bmat := StandardMaterial3D.new()
+	bmat.albedo_color = Color(color.r, color.g, color.b, alpha * 0.35)
+	bmat.emission_enabled = true
+	bmat.emission = Color(color.r, color.g, color.b) * 0.8
+	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bloom.material_override = bmat
+	parent.add_child(bloom)
+	bloom.position = pos
+	_orient_on_globe(bloom, pos)
+	bloom.visible = _is_front_hemisphere(pos)
 
 
 func _add_preview_segment(a: Vector2i, b: Vector2i) -> void:
@@ -2752,6 +3182,9 @@ func _water_surface_pos(grid: Vector2i, lift: float) -> Vector3:
 
 
 func orbit_camera(delta: float, mouse_delta: Vector2) -> void:
+	if _cam_look_tween != null:
+		_cam_look_tween.kill()
+		_cam_look_tween = null
 	if mouse_delta != Vector2.ZERO:
 		_yaw -= mouse_delta.x * WorldConquestConfigLib.CAMERA_ORBIT_SPEED * 0.01
 		_pitch = clampf(
@@ -2764,13 +3197,12 @@ func orbit_camera(delta: float, mouse_delta: Vector2) -> void:
 
 func zoom_camera(zoom_in: bool) -> void:
 	var step: float = WorldConquestConfigLib.CAMERA_ZOOM_STEP
-	_cam_distance = _cam_distance / step if zoom_in else _cam_distance * step
-	_cam_distance = clampf(
-		_cam_distance,
+	_cam_distance_target = _cam_distance_target / step if zoom_in else _cam_distance_target * step
+	_cam_distance_target = clampf(
+		_cam_distance_target,
 		WorldConquestConfigLib.CAMERA_MIN_DISTANCE,
 		WorldConquestConfigLib.CAMERA_MAX_DISTANCE,
 	)
-	_apply_camera()
 
 
 func pick_grid_from_viewport(vp_pos: Vector2) -> Vector2i:
@@ -2811,6 +3243,7 @@ func _frame_camera() -> void:
 	_yaw = -0.5
 	_pitch = 0.4
 	_cam_distance = WorldConquestConfigLib.CAMERA_DEFAULT_DISTANCE
+	_cam_distance_target = _cam_distance
 	_apply_camera()
 
 

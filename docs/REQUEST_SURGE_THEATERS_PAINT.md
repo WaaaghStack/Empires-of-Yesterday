@@ -1,6 +1,6 @@
 # Request: outpost modes, named theaters, and unit paint
 
-**Status:** implemented on `feat/surge-theaters-paint` (player-only modes + paint; AI does not pick modes/paint yet).
+**Status:** theaters + outpost modes shipped; paint is an **area stroke** on `feat/area-paint` (player-only; AI does not pick modes/paint yet).
 
 Three player-facing features. Win formula stays **land conquest or zero enemy pressure**; units still do not change it (F5). Roads and land bridges stay gone (R1).
 
@@ -8,7 +8,7 @@ Three player-facing features. Win formula stays **land conquest or zero enemy pr
 |---|---------|-------------|
 | 1 | Outpost modes | Pump / Drain / Battery+Surge on a placed outpost |
 | 2 | Named theaters | Pangea / Archipelago / Earth as first-class map starts |
-| 3 | Unit paint | One rally pin: beachhead (soldiers) or strike (bombers) |
+| 3 | Unit paint | Click-drag a region; soldiers + bombers hunt unowned painted land |
 
 ---
 
@@ -76,46 +76,33 @@ New biomes, extra resource types, per-theater unique buildings.
 
 ---
 
-## 3. Beachhead + strike paint
+## 3. Area paint
 
 ### Why
 
-Soldiers and bombers already auto-hunt. Paint answers “go here” with **one pin**, not an RTS command card. Units still do not change the win formula (F5).
+Soldiers and bombers already auto-hunt. Paint answers “go here” with a **brushed region**, not an RTS command card. Units still do not change the win formula (F5).
 
-One rally at a time per side. Latest click wins. No queues, no waypoints. Pin clears when its job is done or the player cancels / paints elsewhere.
+One layer at a time per side. Latest stroke replaces the previous. No queues, no waypoints, no picking unit type in the HUD.
 
-### Beachhead paint (soldiers)
+### Stroke
 
-Uses existing ferry + `extend_beachhead_from_landing`.
+1. Arm **Paint**, then **click-drag** on the globe. A single click stamps a small blob; a drag stamps a patch.
+2. Land only. Water snaps to the nearest coast.
+3. Cap **108** land cells (`PAINT_CELL_CAP`). A click stamps a 2-ring blob; a drag grows the patch.
+4. Painted tiles **glow** (bright while unowned, dim once owned).
+5. Those tiles are **priority until owned**, not capture.
 
-1. Idle / eligible soldiers path toward the painted **coast** (water at `SOLDIER_FERRY_MOVE_MULT` 0.25×).
-2. First boots on that land open the contiguous landmass (existing beachhead flood). Claimable is shared — the door is not team-locked.
-3. **Hold the landing.** Do not immediately repath to another continent. Keep aura + erode on that mass so a puddle exists for an outpost.
-4. **Release** when: the player owns enough of the mass to place, they paint a new coast, or they cancel. Then resume normal front-hunt.
+### Mixed jobs
 
-Soldiers do not garrison forever. Five infantry cannot occupy a continent; that is the outpost. If the player never places, the puddle dies to upkeep or enemy cancel.
+Soldiers peel to unowned painted land (ferry if they must cross water). Bombers take inland / unopened painted cells. Hold only on painted unowned tiles; once a cell is owned, peel to the next unowned painted cell. Path miss: idle, do not fall through to a local front.
 
-Pressure still does not cross ocean. Opening claimable does not let the capital flood the island. Arrival is the door-kick; **Pump / Surge / a local outpost** is occupation.
+Ferry landings still run `extend_beachhead_from_landing`. Bombers still `open_claimable_for_air_strike` on the struck cell.
 
-### Strike paint (bombers)
+### Release
 
-Uses existing bomb: `open_claimable_for_air_strike` on the struck cell, enemy pressure `− bomb_power`, friendly splash `+ 0.35 × bomb_power`.
+Clear when **every painted cell is owned**. Also clear on Esc (in-progress stroke), or when the player paints a new stroke. Brushing land you already hold does not cancel remaining unowned cells.
 
-1. Bombers fly to the marked **cell** (not ferry-gated).
-2. Bomb on arrival (same numbers as now).
-3. Keep that cell as the goal until it flips to the painting team, or cancel / repaint. Extra bombers peel to **neighbors** of the pin (small crater, not a stack on one tile).
-4. **Release** when the painted cell and that tiny crater are owned. Resume auto-hunt. No CAP orbit.
-
-Air does not hold ground. Follow up with an outpost, soldiers, or a Surge into the hole, or the stain fades.
-
-### After units arrive (player’s next click)
-
-| You marked | Units arrive | You still need |
-|------------|--------------|----------------|
-| A coast | Door opens + a puddle | Outpost on that mass, or the puddle dies |
-| A pass / deposit / island tile | Hole + stain | Surge into the hole, soldiers onto the stain, or another outpost |
-
-Paint without follow-up is a spent ferry / bomb interval.
+Follow up with an outpost, or the puddle dies to upkeep / enemy cancel. Paint without follow-up is a spent ferry / bomb interval.
 
 ### Out of scope
 
@@ -138,7 +125,7 @@ Click-to-move armies, per-unit orders, hero units, paint that captures tiles by 
 ## Suggested implement order
 
 1. **Theaters** — criteria presets + menu; no sim change. Unlocks Archipelago as the paint testbed.
-2. **Paint** — rally pin + hold/release on existing soldier/bomber brains.
+2. **Paint** — area stroke + glow overlay on existing soldier/bomber brains.
 3. **Outpost modes** — Battery tank + Surge inject; Drain last (needs a clear cancel-vs-siphon rule in Rust inject).
 
 AI vs AI / `EnemyStrategy` should eventually pick modes and paint; not required for the first playable slice (player-only modes + paint is enough to feel the verbs).

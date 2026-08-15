@@ -21,33 +21,54 @@ const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend
 const PresentationApplyLib := preload("res://WorldConquestPresentationApply.gd")
 const Scd1DomainPullLib := preload("res://Scd1DomainPull.gd")
 
+const WorldPackLibScript := preload("res://WorldPackLib.gd")
+
 @onready var globe_map: EarthGlobeMapLib = $PlayArea/SubViewportContainer/SubViewport/GlobeMap
 @onready var sub_viewport: SubViewport = $PlayArea/SubViewportContainer/SubViewport
 @onready var sub_viewport_container: SubViewportContainer = $PlayArea/SubViewportContainer
 @onready var play_area: Control = $PlayArea
-@onready var summary_bar: PanelContainer = $SummaryBar
-@onready var blue_count_label: Label = $SummaryBar/SummaryHBox/BluePanel/BlueCount
-@onready var blue_sub_label: Label = $SummaryBar/SummaryHBox/BluePanel/BlueSub
-@onready var blue_resources_label: Label = $SummaryBar/SummaryHBox/BluePanel/BlueResources
-@onready var red_count_label: Label = $SummaryBar/SummaryHBox/RedPanel/RedCount
-@onready var red_sub_label: Label = $SummaryBar/SummaryHBox/RedPanel/RedSub
-@onready var red_resources_label: Label = $SummaryBar/SummaryHBox/RedPanel/RedResources
-@onready var time_label: Label = $SummaryBar/SummaryHBox/CenterPanel/TimeLabel
-@onready var supply_label: Label = $SummaryBar/SummaryHBox/CenterPanel/SupplyLabel
-@onready var status_label: Label = $HUD/HBox/StatusLabel
-@onready var pause_button: Button = $HUD/HBox/PauseButton
-@onready var speed_button: Button = $HUD/HBox/SpeedButton
-@onready var spawner_button: Button = $HUD/HBox/SpawnerButton
-@onready var barracks_button: Button = $HUD/HBox/BarracksButton
-@onready var hangar_button: Button = $HUD/HBox/HangarButton
-@onready var corridor_link_button: Button = $HUD/HBox/CorridorLinkButton
-@onready var inspect_button: Button = $HUD/HBox/InspectButton
-@onready var paint_button: Button = $HUD/HBox/PaintButton
-@onready var mode_button: Button = $HUD/HBox/ModeButton
-@onready var surge_button: Button = $HUD/HBox/SurgeButton
-@onready var tile_probe_label: Label = $HUD/TileProbeLabel
-@onready var back_button: Button = $TopBar/BackButton
-@onready var build_hint_label: Label = $HUD/BuildHintLabel
+@onready var summary_bar: PanelContainer = $MatchRibbon
+@onready var you_caption: Label = $MatchRibbon/RibbonHBox/TugWrap/YouCaption
+@onready var enemy_caption: Label = $MatchRibbon/RibbonHBox/TugWrap/EnemyCaption
+@onready var au_label: Label = $MatchRibbon/RibbonHBox/MineralsRow/AuLabel
+@onready var ve_label: Label = $MatchRibbon/RibbonHBox/MineralsRow/VeLabel
+@onready var em_label: Label = $MatchRibbon/RibbonHBox/MineralsRow/EmLabel
+@onready var time_label: Label = $MatchRibbon/RibbonHBox/TimeLabel
+@onready var supply_label: Label = $MatchRibbon/RibbonHBox/SupplyLabel
+@onready var status_label: Label = $BuildCluster/VBox/StatusLabel
+@onready var hover_label: Label = $BuildCluster/VBox/HoverLabel
+@onready var pause_button: Button = $SimCluster/HBox/PauseButton
+@onready var speed_button: Button = $SimCluster/HBox/SpeedButton
+@onready var spawner_button: Button = $BuildCluster/VBox/HBox/SpawnerButton
+@onready var barracks_button: Button = $BuildCluster/VBox/HBox/BarracksButton
+@onready var hangar_button: Button = $BuildCluster/VBox/HBox/HangarButton
+@onready var inspect_button: Button = $BuildCluster/VBox/HBox/InspectButton
+@onready var paint_button: Button = $BuildCluster/VBox/HBox/PaintButton
+@onready var mode_button: Button = $OutpostPinCard/VBox/ModeButton
+@onready var surge_button: Button = $OutpostPinCard/VBox/SurgeButton
+@onready var tile_probe_label: Label = $InspectCard/InspectVBox/InspectLabel
+@onready var inspect_claim_label: Label = $InspectCard/InspectVBox/ClaimLabel
+@onready var inspect_pressure_blue: ColorRect = $InspectCard/InspectVBox/PressureMeters/BlueFill
+@onready var inspect_pressure_red: ColorRect = $InspectCard/InspectVBox/PressureMeters/RedFill
+@onready var inspect_pressure_caption: Label = $InspectCard/InspectVBox/PressureCaption
+@onready var inspect_elev_bar: ProgressBar = $InspectCard/InspectVBox/ElevBar
+@onready var inspect_elev_caption: Label = $InspectCard/InspectVBox/ElevCaption
+@onready var inspect_card: PanelContainer = $InspectCard
+@onready var back_button: Button = $MatchRibbon/RibbonHBox/BackButton
+@onready var build_hint_label: Label = $BuildCluster/VBox/BuildHintLabel
+@onready var cancel_paint_button: Button = $BuildCluster/VBox/HBox/CancelPaintButton
+@onready var land_tug_blue: ColorRect = $MatchRibbon/RibbonHBox/TugWrap/LandTug/BlueFill
+@onready var land_tug_neutral: ColorRect = $MatchRibbon/RibbonHBox/TugWrap/LandTug/NeutralFill
+@onready var land_tug_red: ColorRect = $MatchRibbon/RibbonHBox/TugWrap/LandTug/RedFill
+@onready var deploy_timer_bar: ProgressBar = $LoadingOverlay/DeployBanner/DeployRow/DeployCommit/DeployTimer
+@onready var outpost_pin_card: PanelContainer = $OutpostPinCard
+@onready var build_cluster: PanelContainer = $BuildCluster
+@onready var sim_cluster: PanelContainer = $SimCluster
+@onready var loading_status_line: Label = $LoadingOverlay/StatusLine
+@onready var deploy_title_label: Label = $LoadingOverlay/DeployTitle
+@onready var end_details_button: Button = $EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/DetailsButton
+@onready var end_kpi_strip: HBoxContainer = $EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/KPIStrip
+@onready var end_compare_row: HBoxContainer = $EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/CompareRow
 @onready var perf_hud_label: Label = $PerfHudLabel
 @onready var end_overlay: Control = $EndOverlay
 @onready var end_dim: ColorRect = $EndOverlay/Dim
@@ -85,7 +106,7 @@ const Scd1DomainPullLib := preload("res://Scd1DomainPull.gd")
 @onready var loading_progress: ProgressBar = $LoadingOverlay/Center/LoadPanel/VBox/ProgressBar
 @onready var deploy_banner: PanelContainer = $LoadingOverlay/DeployBanner
 @onready var deploy_countdown_label: Label = $LoadingOverlay/DeployBanner/DeployRow/DeployCountdown
-@onready var deploy_button: Button = $LoadingOverlay/DeployBanner/DeployRow/DeployButton
+@onready var deploy_button: Button = $LoadingOverlay/DeployBanner/DeployRow/DeployCommit/DeployButton
 @onready var deploy_hint_label: Label = $LoadingOverlay/DeployHint
 
 var battle_data = null
@@ -119,6 +140,8 @@ var _depth_overlay_clock: float = 0.0
 var _battle_finished: bool = false
 var _build_mode: String = ""
 var _paint_armed: bool = false
+var _paint_stroke_active: bool = false
+var _paint_last_cell: Vector2i = Vector2i(-99999, -99999)
 var _selected_sid: int = -1
 var _last_overlay_step: int = -1
 var _next_structure_id: int = 1
@@ -227,11 +250,11 @@ const PERF_RECENT_ACTION_MAX := 64
 const CLARITY_BEAT_COUNT := 5
 const CLARITY_BEAT_DISMISS_SEC := 8.0
 const CLARITY_BEAT_TEXTS: Array[String] = [
-	"Blue pressure spreads from your capital like a fluid.\nIt pools in low ground and pushes across the front.",
-	"Build an Outpost on land you hold to pump pressure forward.\nSelect Outpost below — costs 400 Supply.",
-	"Au · Ve · Em in the bar fund soldiers and bombers.\nDeposits and baseline income refill your wallet over time.",
-	"Soldiers cross open water when your land front runs out.\nLand on a beach to open a new claimable shore.",
-	"Hangars launch bombers — they strike islands you can't ferry to.\nBomb a tile to make it claimable, then pressure takes it.",
+	"Blue pressure spreads from your capital like a fluid.",
+	"Build an Outpost on land you hold — 400 Supply — to pump the front forward.",
+	"Au · Ve · Em fund soldiers and bombers. Own deposits to refill faster.",
+	"Soldiers ferry open water when the land front runs out. Land to open a new shore.",
+	"Hangars launch bombers that can open islands you cannot ferry to.",
 ]
 var _clarity_beat_index: int = 0
 var _clarity_beat_showing: bool = false
@@ -260,6 +283,16 @@ var _run_peak_soldiers: int = 0
 var _run_peak_bombers: int = 0
 var _run_first_outpost_sec: float = -1.0
 var _conquest_nudge_shown: bool = false
+var _orbit_seen: bool = false
+var _end_details_open: bool = false
+var _load_pack_warm: bool = false
+var _clarity_pulse_tween: Tween
+var _last_agent_teams: PackedByteArray = PackedByteArray()
+var _last_agent_gx: PackedInt32Array = PackedInt32Array()
+var _last_agent_gy: PackedInt32Array = PackedInt32Array()
+var _last_bomber_teams: PackedByteArray = PackedByteArray()
+var _last_bomber_gx: PackedInt32Array = PackedInt32Array()
+var _last_bomber_gy: PackedInt32Array = PackedInt32Array()
 
 
 func _ready() -> void:
@@ -272,7 +305,7 @@ func _ready() -> void:
 	_style_loading_overlay()
 	_style_end_overlay()
 	loading_overlay.visible = true
-	_set_load_progress(0.0, "Starting…")
+	_set_load_progress(0.0, "Baking terrain…")
 	_load_started_msec = Time.get_ticks_msec()
 	back_button.pressed.connect(_on_back_pressed)
 	pause_button.pressed.connect(_on_pause_pressed)
@@ -282,24 +315,26 @@ func _ready() -> void:
 		barracks_button.toggled.connect(_on_barracks_toggled)
 	if hangar_button:
 		hangar_button.toggled.connect(_on_hangar_toggled)
-	# Design lock R1: land bridges are removed from the gameplay toolkit. Button stays in the
-	# scene (catalog/Rust still know the kind) but is never shown or wired.
-	if corridor_link_button:
-		corridor_link_button.button_pressed = false
-		corridor_link_button.disabled = true
-		corridor_link_button.visible = false
 	inspect_button.toggled.connect(_on_inspect_toggled)
 	if paint_button:
 		paint_button.toggled.connect(_on_paint_toggled)
-		paint_button.tooltip_text = "Paint a rally: coast = beachhead, inland = bomber strike. One pin."
+		paint_button.tooltip_text = "Paint a region: click-drag on the globe. Soldiers and bombers go there until you own it."
 	if mode_button:
 		mode_button.pressed.connect(_on_mode_pressed)
 		mode_button.tooltip_text = "Cycle selected outpost: Pump / Drain / Battery."
 	if surge_button:
 		surge_button.pressed.connect(_on_surge_pressed)
 		surge_button.tooltip_text = "Dump a Battery outpost's stored pressure as one wave."
-	if tile_probe_label:
-		tile_probe_label.visible = false
+	if cancel_paint_button:
+		cancel_paint_button.pressed.connect(_on_cancel_paint_pressed)
+		cancel_paint_button.tooltip_text = "Clear the painted region (Esc)."
+	if inspect_card:
+		inspect_card.add_theme_stylebox_override(
+			"panel", GameThemeLib.make_panel_style(Color(0.09, 0.11, 0.16, 0.78), GameThemeLib.BORDER, 6)
+		)
+		inspect_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pause_button.tooltip_text = "Pause / resume (Space)"
+	speed_button.tooltip_text = "Cycle sim speed x1 / x2 / x4"
 	end_overlay.visible = false
 	if end_play_again_button:
 		end_play_again_button.pressed.connect(_on_play_again_pressed)
@@ -308,14 +343,26 @@ func _ready() -> void:
 		end_same_map_button.tooltip_text = "Replay this map — pick a new capital."
 	if end_menu_button:
 		end_menu_button.pressed.connect(_on_end_menu_pressed)
+	if end_details_button:
+		end_details_button.pressed.connect(_on_end_details_pressed)
 	if spawner_button:
-		spawner_button.tooltip_text = "Pressure pump on owned land. Instant. 400 Supply."
+		spawner_button.tooltip_text = "Outpost · 400"
+		_bind_tool_hover(spawner_button, "Outpost · 400")
 	if barracks_button:
-		barracks_button.tooltip_text = "Spawns soldiers (Au+Ve). Ferry across water. 400 Supply."
+		barracks_button.tooltip_text = "Barracks · 400"
+		_bind_tool_hover(barracks_button, "Barracks · 400")
 	if hangar_button:
-		hangar_button.tooltip_text = "Spawns bombers (Au+Em). Strike any land. 400 Supply."
+		hangar_button.tooltip_text = "Hangar · 400"
+		_bind_tool_hover(hangar_button, "Hangar · 400")
+	if paint_button:
+		_bind_tool_hover(paint_button, "Paint")
+	if inspect_button:
+		_bind_tool_hover(inspect_button, "Inspect")
+	if cancel_paint_button:
+		_bind_tool_hover(cancel_paint_button, "Clear paint")
 	if deploy_button:
 		deploy_button.pressed.connect(_on_deploy_button_pressed)
+	_setup_tool_icons()
 	_supply = float(CFG.STARTING_SUPPLY)
 	_enemy_supply = float(CFG.STARTING_SUPPLY)
 	ResourceLib.reset()
@@ -326,11 +373,11 @@ func _ready() -> void:
 	if sub_viewport:
 		sub_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	if summary_bar:
-		summary_bar.z_index = 40
-	if has_node("TopBar"):
-		$TopBar.z_index = 41
-	if has_node("HUD"):
-		$HUD.z_index = 40
+		summary_bar.z_index = 41
+	if build_cluster:
+		build_cluster.z_index = 40
+	if sim_cluster:
+		sim_cluster.z_index = 40
 	if perf_hud_label:
 		perf_hud_label.visible = false
 		perf_hud_label.z_index = 42
@@ -338,7 +385,7 @@ func _ready() -> void:
 
 
 func _bootstrap_async() -> void:
-	_set_load_progress(0.08, "Generating Earth map…")
+	_set_load_progress(0.08, "Baking terrain…")
 	await get_tree().process_frame
 	EconomyLib.ensure_loaded(RunState.economy_pack_id)
 	_refresh_cached_structure_hud_labels()
@@ -347,23 +394,33 @@ func _bootstrap_async() -> void:
 	_map_id = WorldMapCatalogLib.resolve_map_id(RunState.world_map_id)
 	if RunState.ai_difficulty >= 0:
 		set_enemy_ai_difficulty(RunState.ai_difficulty)
+	# Probe cache before generate — generate writes the pack, so a post-bake check is always warm.
+	_load_pack_warm = _is_world_pack_warm(_map_id, seed_val)
 	battle_data = WorldConquestMapGeneratorLib.generate(
 		_map_id, seed_val, false, RunState.map_gen_criteria()
 	)
-	_set_load_progress(0.35, "Building globe…")
+	_set_load_progress(0.35, "Lighting atmosphere…")
 	await get_tree().process_frame
 	_setup_globe_terrain_early(_map_id)
-	_set_load_progress(0.55, "Almost ready…")
-	await _await_min_load_time()
 	if sub_viewport:
 		sub_viewport.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
+	if loading_center:
+		loading_center.visible = false
+	if loading_progress:
+		loading_progress.visible = false
+	if loading_status_line:
+		loading_status_line.visible = true
+	if loading_dim:
+		loading_dim.color = Color(loading_dim.color.r, loading_dim.color.g, loading_dim.color.b, 0.35)
+	_set_load_progress(0.55, "Seeding minerals…")
+	await _await_min_load_time()
 	_enter_deploy_phase()
 	if _should_skip_deploy_pick():
 		_skip_deploy_pick_fast()
 	while not _deploy_resolved:
 		await get_tree().process_frame
 	await _apply_deploy_spawns()
-	_set_load_progress(0.72, "Initializing territory simulation…")
+	_set_load_progress(0.72, "Opening the front…")
 	await get_tree().process_frame
 	territory_sim = BattleTerritorySimLib.new()
 	territory_sim.use_simple_water_model = true
@@ -373,13 +430,13 @@ func _bootstrap_async() -> void:
 	_player_home = battle_data.player_home_grid
 	_enemy_home = battle_data.enemy_home_grid
 	_sync_counts()
-	_set_load_progress(0.82, "Preparing simulation backend…")
+	_set_load_progress(0.82, "Waking the war room…")
 	await get_tree().process_frame
 	_setup_sim_after_spawns(_map_id)
-	_set_load_progress(0.88, "Preparing route planner…")
+	_set_load_progress(0.88, "Charting routes…")
 	await get_tree().process_frame
 	_warm_route_planner_at_load()
-	_set_load_progress(0.94, "Warming up globe…")
+	_set_load_progress(0.94, "Warming the globe…")
 	await get_tree().process_frame
 	_update_tile_overlay(true)
 	_update_hud()
@@ -394,6 +451,10 @@ func _bootstrap_async() -> void:
 		paint_button.visible = not RunState.is_ai_vs_ai()
 		paint_button.disabled = false
 	_clarity_on_match_live()
+	if globe_map != null and globe_map.has_method("frame_both_capitals"):
+		globe_map.frame_both_capitals(_player_home, _enemy_home)
+	if globe_map != null and globe_map.has_method("set_hemisphere_dim"):
+		globe_map.set_hemisphere_dim(0)
 	if _frame_profiler != null:
 		_frame_profiler.reset_samples()
 	RunLog.info(
@@ -403,15 +464,36 @@ func _bootstrap_async() -> void:
 			battle_data.grid_height,
 		]
 	)
-	if has_node("TopBar/Title"):
-		$TopBar/Title.text = "World Conquest — %s" % CFG.theater_display_name(RunState.theater_id)
 
 
 func _await_min_load_time() -> void:
+	if _load_pack_warm:
+		return
 	var elapsed_sec: float = float(Time.get_ticks_msec() - _load_started_msec) / 1000.0
 	var wait_sec: float = CFG.WORLD_CONQUEST_MIN_LOAD_SEC - elapsed_sec
 	if wait_sec > 0.0:
 		await get_tree().create_timer(wait_sec).timeout
+
+
+func _is_world_pack_warm(map_id: String, seed_val: int) -> bool:
+	var visual_tag: String = ""
+	if RunState.custom_world or CFG.normalize_theater_id(RunState.theater_id) != CFG.THEATER_EARTH:
+		visual_tag = "p_lb%d_mb%d" % [
+			int(round(RunState.land_bias * 100.0)),
+			int(round(RunState.mountain_bias * 100.0)),
+		]
+	var albedo: Image = WorldPackLibScript.try_load_albedo(
+		map_id, CFG.SPHERE_GRID_FREQUENCY, seed_val, visual_tag
+	)
+	if albedo == null or albedo.is_empty():
+		return false
+	if visual_tag != "":
+		return true
+	var cells: Dictionary = WorldPackLibScript.try_load_world_cells(map_id, CFG.SPHERE_GRID_FREQUENCY)
+	if cells.is_empty():
+		return false
+	var land_var: Variant = cells.get("cell_land", PackedByteArray())
+	return land_var is PackedByteArray and (land_var as PackedByteArray).size() > 0
 
 
 func _enter_deploy_phase() -> void:
@@ -427,29 +509,51 @@ func _enter_deploy_phase() -> void:
 		loading_center.visible = false
 	if loading_progress:
 		loading_progress.visible = false
+	if loading_status_line:
+		loading_status_line.visible = false
 	if loading_dim:
 		# Light vignette only — keep the globe readable for picking.
 		loading_dim.color = Color(0.02, 0.03, 0.05, 0.28)
 	if loading_overlay:
 		loading_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if deploy_title_label:
+		deploy_title_label.visible = true
 	if deploy_banner:
 		deploy_banner.visible = true
 		deploy_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		deploy_banner.add_theme_stylebox_override("panel", GameThemeLib.make_panel_style())
+		deploy_banner.add_theme_stylebox_override("panel", GameThemeLib.make_cluster_style())
 	if deploy_button:
 		deploy_button.mouse_filter = Control.MOUSE_FILTER_STOP
+		deploy_button.disabled = true
+		GameThemeLib.apply_ghost_button(deploy_button)
 	if deploy_hint_label:
 		deploy_hint_label.visible = true
+		var region_hint: String = ""
+		match RunState.start_region:
+			"west":
+				region_hint = "West hemisphere preferred. "
+			"east":
+				region_hint = "East hemisphere preferred. "
+			_:
+				region_hint = ""
 		deploy_hint_label.text = (
-			"Right-drag rotate · Scroll zoom · Enemy deploys furthest from you"
+			"%sRight-drag rotate · Scroll zoom · Enemy deploys furthest from you"
+			% region_hint
 		)
 	if summary_bar:
 		summary_bar.visible = false
-	if has_node("HUD"):
-		$HUD.visible = false
-	# Keep ← Menu; hide match title so it doesn't stack on the deploy bar.
-	if has_node("TopBar/Title"):
-		$TopBar/Title.visible = false
+	if build_cluster:
+		build_cluster.visible = false
+	if sim_cluster:
+		sim_cluster.visible = false
+	if globe_map != null and globe_map.has_method("set_hemisphere_dim"):
+		var hmode: int = 0
+		match RunState.start_region:
+			"west":
+				hmode = 1
+			"east":
+				hmode = 2
+		globe_map.set_hemisphere_dim(hmode)
 	_update_deploy_countdown_label()
 
 
@@ -457,16 +561,20 @@ func _exit_deploy_overlay() -> void:
 	_deploy_phase = false
 	if deploy_banner:
 		deploy_banner.visible = false
+	if deploy_title_label:
+		deploy_title_label.visible = false
 	if deploy_hint_label:
 		deploy_hint_label.visible = false
+	if loading_status_line:
+		loading_status_line.visible = false
 	if loading_dim:
 		loading_dim.color = Color(0.02, 0.03, 0.05, 0.92)
 	if summary_bar:
 		summary_bar.visible = true
-	if has_node("HUD"):
-		$HUD.visible = true
-	if has_node("TopBar/Title"):
-		$TopBar/Title.visible = true
+	if build_cluster:
+		build_cluster.visible = true
+	if sim_cluster:
+		sim_cluster.visible = true
 	_clear_placement_preview()
 
 
@@ -482,18 +590,26 @@ func _apply_deploy_spawns() -> void:
 	_refresh_markers()
 	if deploy_banner:
 		deploy_banner.visible = false
+	if deploy_title_label:
+		deploy_title_label.visible = false
 	if deploy_hint_label:
 		deploy_hint_label.visible = false
 	if loading_center:
-		loading_center.visible = true
+		loading_center.visible = false
 	if loading_progress:
-		loading_progress.visible = true
+		loading_progress.visible = false
+	if loading_status_line:
+		loading_status_line.visible = true
 	if loading_dim:
-		loading_dim.color = Color(0.02, 0.03, 0.05, 0.92)
+		loading_dim.color = Color(0.02, 0.03, 0.05, 0.28)
 	_set_load_progress(0.62, "Enemy deploying…")
 	await get_tree().process_frame
 	var reveal_sec: float = 0.0 if _deploy_skip_reveal else CFG.DEPLOY_ENEMY_REVEAL_SEC
 	if reveal_sec > 0.0:
+		if globe_map != null and globe_map.has_method("ease_look_at_grid"):
+			globe_map.ease_look_at_grid(_enemy_home, reveal_sec)
+		elif globe_map != null and globe_map.has_method("look_at_grid"):
+			globe_map.look_at_grid(_enemy_home)
 		await get_tree().create_timer(reveal_sec).timeout
 
 
@@ -565,6 +681,15 @@ func _update_deploy_countdown_label() -> void:
 	var mins: int = sec_left / 60
 	var secs: int = sec_left % 60
 	deploy_countdown_label.text = "%d:%02d" % [mins, secs]
+	if deploy_timer_bar:
+		var max_sec: float = maxf(0.001, CFG.DEPLOY_PICK_SEC)
+		deploy_timer_bar.value = clampf(_deploy_pick_remaining / max_sec, 0.0, 1.0) * 100.0
+	if deploy_button:
+		deploy_button.disabled = _deploy_locked_grid.x < 0
+		GameThemeLib.apply_ghost_button(deploy_button)
+		if not deploy_button.disabled:
+			deploy_button.add_theme_color_override("font_color", GameThemeLib.ACCENT)
+			deploy_button.add_theme_color_override("font_hover_color", GameThemeLib.TEXT_PRIMARY)
 
 
 func _show_deploy_status(msg: String) -> void:
@@ -601,11 +726,18 @@ func _update_deploy_hover() -> void:
 func _try_deploy_pick_click() -> void:
 	var grid: Vector2i = _mouse_to_grid()
 	if not _is_valid_deploy_land(grid):
-		_show_deploy_status("Capital must be on land.")
+		_show_deploy_status("Ocean — not claimable. Click land to plant your capital.")
 		return
 	_deploy_locked_grid = grid
 	_show_deploy_preview(grid)
-	_show_deploy_status("Capital locked — click Deploy or wait for timer.")
+	_show_deploy_status("Capital locked — press Deploy, or wait for the timer.")
+	if globe_map != null and globe_map.has_method("pulse_lock_marker"):
+		globe_map.pulse_lock_marker(grid)
+	if deploy_button:
+		deploy_button.disabled = false
+		GameThemeLib.apply_ghost_button(deploy_button)
+		deploy_button.add_theme_color_override("font_color", GameThemeLib.ACCENT)
+		deploy_button.add_theme_color_override("font_hover_color", GameThemeLib.TEXT_PRIMARY)
 
 
 func _on_deploy_gui_input(event: InputEvent) -> void:
@@ -650,6 +782,8 @@ func _on_deploy_button_pressed() -> void:
 func _set_load_progress(ratio: float, status: String) -> void:
 	if loading_status_label != null:
 		loading_status_label.text = status
+	if loading_status_line != null:
+		loading_status_line.text = status
 	if loading_progress != null:
 		loading_progress.value = clampf(ratio, 0.0, 1.0) * 100.0
 
@@ -660,11 +794,34 @@ func _style_loading_overlay() -> void:
 	var panel: PanelContainer = loading_overlay.get_node_or_null("Center/LoadPanel") as PanelContainer
 	if panel != null:
 		panel.add_theme_stylebox_override("panel", GameThemeLib.make_panel_style())
+	var pal: Dictionary = WorldConquestMapGeneratorLib.globe_colors_for_map(
+		WorldMapCatalogLib.resolve_map_id(RunState.world_map_id)
+	)
+	var ocean: Color = pal.get("ocean", Color(0.05, 0.18, 0.42))
+	if loading_dim:
+		loading_dim.color = Color(ocean.r * 0.35, ocean.g * 0.35, ocean.b * 0.4, 0.72)
+	if deploy_timer_bar:
+		deploy_timer_bar.add_theme_stylebox_override(
+			"fill", _make_bar_fill_style(Color(GameThemeLib.ACCENT.r, GameThemeLib.ACCENT.g, GameThemeLib.ACCENT.b, 0.55))
+		)
+		var bg := StyleBoxFlat.new()
+		bg.bg_color = Color(0.09, 0.11, 0.16, 0.35)
+		bg.set_corner_radius_all(6)
+		deploy_timer_bar.add_theme_stylebox_override("background", bg)
 
 
 func _style_end_overlay() -> void:
+	if end_overlay:
+		end_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sheet: PanelContainer = $EndOverlay/ScrollCenter as PanelContainer
+	if sheet != null:
+		var sheet_style := GameThemeLib.make_panel_style(Color(0.09, 0.11, 0.16, 0.86), GameThemeLib.BORDER, 8)
+		sheet_style.corner_radius_bottom_left = 0
+		sheet_style.corner_radius_bottom_right = 0
+		sheet.add_theme_stylebox_override("panel", sheet_style)
+		sheet.mouse_filter = Control.MOUSE_FILTER_STOP
 	if end_dash_panel != null:
-		end_dash_panel.add_theme_stylebox_override("panel", GameThemeLib.make_panel_style())
+		end_dash_panel.add_theme_stylebox_override("panel", GameThemeLib.make_panel_style(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 0))
 		var kpi_strip: HBoxContainer = end_dash_panel.get_node_or_null("EndVBox/KPIStrip") as HBoxContainer
 		if kpi_strip != null:
 			var kpi_panel_style := GameThemeLib.make_panel_style(
@@ -673,8 +830,18 @@ func _style_end_overlay() -> void:
 			for child in kpi_strip.get_children():
 				if child is PanelContainer:
 					child.add_theme_stylebox_override("panel", kpi_panel_style)
+		var vbox: VBoxContainer = end_dash_panel.get_node_or_null("EndVBox") as VBoxContainer
+		var buttons: HBoxContainer = end_dash_panel.get_node_or_null("EndVBox/EndButtons") as HBoxContainer
+		if vbox != null and buttons != null:
+			vbox.move_child(buttons, 2)
+			if end_details_button:
+				vbox.move_child(end_details_button, 3)
 	if end_scroll != null:
 		GameThemeLib.configure_scroll(end_scroll)
+	GameThemeLib.apply_primary_button(end_play_again_button)
+	GameThemeLib.apply_ghost_button(end_same_map_button)
+	GameThemeLib.apply_ghost_button(end_menu_button)
+	GameThemeLib.apply_ghost_button(end_details_button)
 	_end_style_land_bars()
 
 
@@ -806,6 +973,8 @@ func _warm_route_planner_at_load() -> void:
 
 
 func _process(delta: float) -> void:
+	if _paint_stroke_active and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_commit_paint_stroke()
 	if _deploy_phase:
 		_process_deploy_phase(delta)
 		return
@@ -976,6 +1145,8 @@ func _process(delta: float) -> void:
 	if _hud_clock >= 0.12:
 		_hud_clock = 0.0
 		_update_hud()
+	if outpost_pin_card != null and outpost_pin_card.visible:
+		_position_outpost_pin_card()
 	if not skip_heavy:
 		_tick_clarity_beats(delta)
 		if _tile_inspect_active:
@@ -1134,24 +1305,39 @@ func _on_play_area_gui_input(event: InputEvent) -> void:
 				globe_map.zoom_camera(false)
 			sub_viewport_container.accept_event()
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
+			if mb.pressed and _tile_inspect_active:
+				_on_inspect_toggled(false)
+				if inspect_button:
+					inspect_button.set_block_signals(true)
+					inspect_button.button_pressed = false
+					inspect_button.set_block_signals(false)
 			_orbit_drag = mb.pressed
+			if mb.pressed:
+				_orbit_seen = true
+				_refresh_idle_hint()
 			sub_viewport_container.accept_event()
 		elif (
 			mb.button_index == MOUSE_BUTTON_LEFT
-			and mb.pressed
 			and not RunState.is_ai_vs_ai()
 		):
-			if _paint_armed:
-				_try_set_paint()
-			elif _is_build_mode_active():
+			if _paint_stroke_active and not mb.pressed:
+				_commit_paint_stroke()
+			elif mb.pressed and _paint_armed:
+				_try_begin_paint_stroke()
+			elif mb.pressed and _is_build_mode_active():
 				_try_place_structure()
-			else:
+			elif mb.pressed:
 				_try_select_structure_at_cursor()
 			sub_viewport_container.accept_event()
-	elif event is InputEventMouseMotion and _orbit_drag and globe_map != null:
-		var mm := event as InputEventMouseMotion
-		globe_map.orbit_camera(0.0, mm.relative)
-		sub_viewport_container.accept_event()
+	elif event is InputEventMouseMotion:
+		if _paint_stroke_active and globe_map != null:
+			_stamp_paint_at_cursor()
+			sub_viewport_container.accept_event()
+		elif _orbit_drag and globe_map != null:
+			var mm := event as InputEventMouseMotion
+			globe_map.orbit_camera(0.0, mm.relative)
+			_orbit_seen = true
+			sub_viewport_container.accept_event()
 
 
 func _is_build_mode_active() -> bool:
@@ -1239,19 +1425,19 @@ func _build_mode_noun() -> String:
 
 func _try_place_structure() -> void:
 	if _corridor_kind_removed(_build_mode):
-		build_hint_label.text = "Land bridges removed."
+		_set_build_hint("Land bridges removed.")
 		_apply_build_mode("")
 		return
 	var grid: Vector2i = _mouse_to_grid()
 	if not _is_on_map_grid(grid.x, grid.y):
-		build_hint_label.text = "Click land on the globe to place a %s." % _build_mode_noun()
+		_set_build_hint("Click land on the globe to place a %s." % _build_mode_noun())
 		return
 	if not EconomyLib.can_afford_build(_supply, _friendly_resources, _build_mode):
-		build_hint_label.text = _placement_cost_hint(_build_mode)
+		_set_build_hint(_placement_cost_hint(_build_mode))
 		return
 	var reject: String = _placement_hover_reject(grid.x, grid.y)
 	if reject != "":
-		build_hint_label.text = reject
+		_set_build_hint(reject)
 		return
 	# R1: structures land instantly on the clicked cell — no supply route, no road, no planner.
 	call_deferred("_finish_place_structure", grid)
@@ -1261,28 +1447,28 @@ func _finish_place_structure(grid: Vector2i) -> void:
 	if battle_data == null or _build_mode == "":
 		return
 	if _corridor_kind_removed(_build_mode):
-		build_hint_label.text = "Land bridges removed."
+		_set_build_hint("Land bridges removed.")
 		_apply_build_mode("")
 		return
 	var placement: Dictionary = _resolve_placement(grid, true, _build_mode)
 	var reject: String = str(placement.get("reject", ""))
 	if reject != "":
-		build_hint_label.text = reject
+		_set_build_hint(reject)
 		return
 	if placement.get("path_packed", PackedInt32Array()).is_empty():
-		build_hint_label.text = "Could not place outpost here."
+		_set_build_hint("Could not place outpost here.")
 		return
 	if not EconomyLib.can_afford_build(_supply, _friendly_resources, _build_mode):
-		build_hint_label.text = _placement_cost_hint(_build_mode)
+		_set_build_hint(_placement_cost_hint(_build_mode))
 		return
 	if not _pay_placement_cost(_build_mode):
-		build_hint_label.text = _placement_cost_hint(_build_mode)
+		_set_build_hint(_placement_cost_hint(_build_mode))
 		return
 	var placed_sid: int = _commit_placed_structure(
 		placement, BattleTileControlLib.OWNER_FRIENDLY, _build_mode, grid
 	)
 	if placed_sid < 0:
-		build_hint_label.text = "Could not place outpost here."
+		_set_build_hint("Could not place outpost here.")
 		return
 	_run_structures_placed += 1
 	_track_player_structure_metrics(_build_mode)
@@ -2034,6 +2220,9 @@ func _apply_scd1_agents(batch: Dictionary) -> void:
 		teams[i] = int(r.get("team", 1))
 		gx[i] = int(r.get("gx", 0))
 		gy[i] = int(r.get("gy", 0))
+	_last_agent_teams = teams
+	_last_agent_gx = gx
+	_last_agent_gy = gy
 	globe_map.sync_soldiers(teams, gx, gy)
 
 
@@ -2060,6 +2249,9 @@ func _apply_scd1_bombers(batch: Dictionary) -> void:
 		gx[i] = int(r.get("gx", 0))
 		gy[i] = int(r.get("gy", 0))
 		scope[i] = int(r.get("search_scope", 0))
+	_last_bomber_teams = teams
+	_last_bomber_gx = gx
+	_last_bomber_gy = gy
 	globe_map.sync_bombers(teams, gx, gy, scope)
 	var bomb_teams: PackedByteArray = batch.get("bomb_teams", PackedByteArray())
 	var bomb_gx: PackedInt32Array = batch.get("bomb_gx", PackedInt32Array())
@@ -3028,12 +3220,11 @@ func _apply_ai_vs_ai_mode() -> void:
 		paint_button.button_pressed = false
 	if mode_button:
 		mode_button.disabled = true
+		mode_button.visible = false
 	if surge_button:
 		surge_button.disabled = true
-	if build_hint_label:
-		build_hint_label.text = "AI vs AI — orbit/zoom to watch (build input muted)"
-	if status_label:
-		status_label.text = "AI vs AI (test)"
+		surge_button.visible = false
+	_set_build_hint("AI vs AI — orbit/zoom to watch (build input muted)")
 	RunLog.info("AI vs AI mode enabled — both sides use multi-structure planner")
 
 
@@ -3811,50 +4002,68 @@ func _update_tile_probe() -> void:
 	var grid: Vector2i = _mouse_to_grid()
 	if not _is_on_map_grid(grid.x, grid.y):
 		tile_probe_label.text = "Move cursor over the globe."
+		if inspect_claim_label:
+			inspect_claim_label.text = ""
+		_clear_inspect_meters()
 		return
 	var probe: Dictionary = territory_sim.query_tile(grid.x, grid.y)
 	if not bool(probe.get("valid", false)):
 		tile_probe_label.text = "Invalid tile."
+		_clear_inspect_meters()
 		return
-	# R1: no bridge/corridor probe lines — claimable + pressure only.
-	tile_probe_label.text = (
-		(
-			"(%s,%s) %s · %s · claim=%s flow=%.2f\n"
-			+ "Blue %.2f · Red %.2f · elev=%.1f H_b=%.2f H_r=%.2f\n"
-			+ "reach F%s H%s"
-		)
-		% [
-			probe.get("gx", 0),
-			probe.get("gy", 0),
-			probe.get("terrain", "?"),
-			probe.get("owner", "?"),
-			probe.get("claimable", false),
-			float(probe.get("flow_mult", 0.0)),
-			float(probe.get("pf", 0.0)),
-			float(probe.get("ph", 0.0)),
-			float(probe.get("elev", 0.0)),
-			float(
-				probe.get(
-					"h_friendly",
-					float(probe.get("pf", 0.0)) + float(probe.get("elev", 0.0))
-				)
-			),
-			float(
-				probe.get(
-					"h_hostile",
-					float(probe.get("ph", 0.0)) + float(probe.get("elev", 0.0))
-				)
-			),
-			probe.get("f_reach", false),
-			probe.get("h_reach", false),
-		]
-	)
+	var claimable: bool = bool(probe.get("claimable", false))
+	var terrain: String = str(probe.get("terrain", "?"))
+	var owner_s: String = str(probe.get("owner", "?"))
+	var claim_line: String = "Claimable land"
+	if not claimable:
+		if terrain == "water":
+			claim_line = "Ocean — ferry or bomb to open a shore"
+		else:
+			claim_line = "Unopened land — bomb or ferry to claim"
+	var elev: float = float(probe.get("elev", 0.0))
+	var pf: float = float(probe.get("pf", 0.0))
+	var ph: float = float(probe.get("ph", 0.0))
+	var h_val: float = float(probe.get("h_friendly", pf + elev))
+	tile_probe_label.text = "%s · %s" % [
+		terrain.capitalize() if terrain.length() > 0 else "Tile",
+		owner_s,
+	]
+	if inspect_claim_label:
+		inspect_claim_label.text = claim_line
+	var total_p: float = maxf(0.001, pf + ph)
+	var meter_w: float = 244.0
+	if inspect_pressure_blue != null and inspect_pressure_blue.get_parent() is Control:
+		meter_w = maxf(8.0, (inspect_pressure_blue.get_parent() as Control).size.x)
+	if inspect_pressure_blue:
+		inspect_pressure_blue.offset_right = (pf / total_p) * meter_w
+	if inspect_pressure_red:
+		inspect_pressure_red.offset_left = -((ph / total_p) * meter_w)
+	if inspect_pressure_caption:
+		inspect_pressure_caption.text = "Blue %.2f   Red %.2f" % [pf, ph]
+	if inspect_elev_bar:
+		inspect_elev_bar.value = clampf(elev, 0.0, 100.0)
+	if inspect_elev_caption:
+		inspect_elev_caption.text = "Elev %.0f / 100   H %.1f" % [elev, h_val]
+
+
+func _clear_inspect_meters() -> void:
+	if inspect_pressure_blue:
+		inspect_pressure_blue.offset_right = 0.0
+	if inspect_pressure_red:
+		inspect_pressure_red.offset_left = 0.0
+	if inspect_elev_bar:
+		inspect_elev_bar.value = 0.0
 
 
 func _on_inspect_toggled(on: bool) -> void:
 	_tile_inspect_active = on
+	if inspect_card:
+		inspect_card.visible = on
 	if tile_probe_label:
 		tile_probe_label.visible = on
+	if globe_map != null and globe_map.has_method("set_inspect_boost"):
+		globe_map.set_inspect_boost(on)
+	_style_tool_buttons()
 	if on:
 		_update_tile_probe()
 	elif tile_probe_label:
@@ -3868,6 +4077,9 @@ func _rust_commands():
 
 
 func _set_paint_armed(on: bool) -> void:
+	if not on and _paint_stroke_active:
+		_commit_paint_stroke()
+		return
 	_paint_armed = on and not RunState.is_ai_vs_ai()
 	if paint_button:
 		paint_button.set_block_signals(true)
@@ -3886,49 +4098,111 @@ func _on_paint_toggled(on: bool) -> void:
 		_apply_build_mode("")
 		_paint_armed = true
 	else:
+		if _paint_stroke_active:
+			_commit_paint_stroke()
+			return
 		_paint_armed = false
 	_update_build_ui()
 
 
-func _paint_kind_for_grid(grid: Vector2i) -> int:
-	if battle_data == null:
-		return CFG.PAINT_NONE
-	var cid: int = battle_data.cell_index(grid.x, grid.y)
-	if cid < 0:
-		return CFG.PAINT_NONE
-	if not battle_data.is_land_cell_id(cid):
-		return CFG.PAINT_BEACHHEAD
-	for nbr in battle_data.get_neighbors(cid):
-		if int(nbr) >= 0 and not battle_data.is_land_cell_id(int(nbr)):
-			return CFG.PAINT_BEACHHEAD
-	return CFG.PAINT_STRIKE
-
-
-func _try_set_paint() -> void:
+func _try_begin_paint_stroke() -> void:
 	var grid: Vector2i = _mouse_to_grid()
 	if not _is_on_map_grid(grid.x, grid.y):
-		build_hint_label.text = "Click the globe to paint a rally."
-		return
-	var kind: int = _paint_kind_for_grid(grid)
-	if kind == CFG.PAINT_NONE:
-		build_hint_label.text = "Need a coast or a land tile."
+		_set_build_hint("Click-drag the globe to paint a region.")
 		return
 	var rust = _rust_commands()
-	if rust == null or not rust.has_method("set_team_paint"):
-		build_hint_label.text = "Paint needs the live Rust sim."
+	if rust == null or not rust.has_method("begin_team_paint_stroke"):
+		_set_build_hint("Paint needs the live Rust sim.")
 		return
-	if not rust.set_team_paint(BattleTileControlLib.OWNER_FRIENDLY, kind, grid.x, grid.y):
-		build_hint_label.text = "Could not pin that tile."
+	if not rust.begin_team_paint_stroke(BattleTileControlLib.OWNER_FRIENDLY):
+		_set_build_hint("Could not start a paint stroke.")
 		return
+	_paint_stroke_active = true
+	_paint_last_cell = Vector2i(-99999, -99999)
+	if not _stamp_paint_at_cursor():
+		rust.clear_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+		_paint_stroke_active = false
+		_set_build_hint("Need land — water snaps to the nearest coast.")
+		return
+	_set_build_hint("Drag to paint. Release to send units. Esc cancels.")
+
+
+func _stamp_paint_at_cursor() -> bool:
+	if not _paint_stroke_active:
+		return false
+	var grid: Vector2i = _mouse_to_grid()
+	if not _is_on_map_grid(grid.x, grid.y):
+		return false
+	if grid == _paint_last_cell:
+		return true
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("stamp_team_paint"):
+		return false
+	if not rust.stamp_team_paint(BattleTileControlLib.OWNER_FRIENDLY, grid.x, grid.y):
+		return false
+	_paint_last_cell = grid
 	_refresh_paint_pin()
-	_set_paint_armed(false)
 	var pin: Dictionary = rust.get_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
-	var noun: String = "beachhead" if int(pin.get("kind", kind)) == CFG.PAINT_BEACHHEAD else "strike"
-	build_hint_label.text = "Painted %s at (%d,%d). Units go there, then you still need an outpost." % [
-		noun,
-		int(pin.get("gx", grid.x)),
-		int(pin.get("gy", grid.y)),
-	]
+	var n: int = int(pin.get("count", 0))
+	if n >= CFG.PAINT_CELL_CAP:
+		_set_build_hint("Region full (%d). %s  Release to send units, or Clear paint." % [n, _paint_inbound_hint()])
+	else:
+		_set_build_hint(
+			"Painting %d / %d. %s  Release to commit."
+			% [n, CFG.PAINT_CELL_CAP, _paint_inbound_hint()]
+		)
+	return true
+
+
+func _commit_paint_stroke() -> void:
+	if not _paint_stroke_active:
+		return
+	_paint_stroke_active = false
+	_paint_armed = false
+	if paint_button:
+		paint_button.set_block_signals(true)
+		paint_button.button_pressed = false
+		paint_button.set_block_signals(false)
+	var rust = _rust_commands()
+	if rust != null and rust.has_method("commit_team_paint_stroke"):
+		rust.commit_team_paint_stroke(BattleTileControlLib.OWNER_FRIENDLY)
+	_refresh_paint_pin()
+	_update_build_ui()
+	if rust == null:
+		return
+	var pin: Dictionary = rust.get_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+	var n: int = int(pin.get("count", 0))
+	if n <= 0 or int(pin.get("kind", 0)) == CFG.PAINT_NONE:
+		_set_build_hint("Paint cleared.")
+		return
+	_set_build_hint(
+		"Painted %d tiles. %s  Soldiers ferry until you own ~80%% of it."
+		% [n, _paint_inbound_hint()]
+	)
+
+
+func _abort_paint_stroke() -> void:
+	if not _paint_stroke_active:
+		return
+	_paint_stroke_active = false
+	var rust = _rust_commands()
+	if rust != null and rust.has_method("clear_team_paint"):
+		rust.clear_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+	_refresh_paint_pin()
+	_set_build_hint("Paint cancelled.")
+
+
+func _on_cancel_paint_pressed() -> void:
+	if _paint_stroke_active:
+		_abort_paint_stroke()
+	else:
+		var rust = _rust_commands()
+		if rust != null and rust.has_method("clear_team_paint"):
+			rust.clear_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
+		_refresh_paint_pin()
+		_set_build_hint("Paint cleared.")
+	_set_paint_armed(false)
+	_refresh_command_hud()
 
 
 func _refresh_paint_pin() -> void:
@@ -3937,13 +4211,23 @@ func _refresh_paint_pin() -> void:
 	var rust = _rust_commands()
 	if rust == null or not rust.has_method("get_team_paint"):
 		globe_map.clear_command_pin()
+		if globe_map.has_method("clear_paint_overlay"):
+			globe_map.clear_paint_overlay()
 		return
 	var pin: Dictionary = rust.get_team_paint(BattleTileControlLib.OWNER_FRIENDLY)
 	var kind: int = int(pin.get("kind", 0))
 	if kind == CFG.PAINT_NONE:
 		globe_map.clear_command_pin()
+		if globe_map.has_method("clear_paint_overlay"):
+			globe_map.clear_paint_overlay()
 		return
 	globe_map.set_command_pin(Vector2i(int(pin.get("gx", -1)), int(pin.get("gy", -1))), kind)
+	if globe_map.has_method("set_paint_overlay") and rust.has_method("get_team_paint_cells"):
+		globe_map.set_paint_overlay(
+			rust.get_team_paint_cells(BattleTileControlLib.OWNER_FRIENDLY),
+			BattleTileControlLib.OWNER_FRIENDLY,
+			_ownership_overlay_source(),
+		)
 
 
 func _try_select_structure_at_cursor() -> void:
@@ -3986,13 +4270,34 @@ func _refresh_command_hud() -> void:
 			mode = int(q.get("spawner_mode", 0))
 			tank = float(q.get("battery_tank", 0.0))
 	if mode_button:
-		mode_button.visible = not RunState.is_ai_vs_ai()
 		mode_button.disabled = not has_outpost
-		mode_button.text = "Mode: %s" % CFG.spawner_mode_label(mode)
+		mode_button.text = CFG.spawner_mode_label(mode)
 	if surge_button:
-		surge_button.visible = not RunState.is_ai_vs_ai()
 		surge_button.disabled = not has_outpost or mode != CFG.SPAWNER_MODE_BATTERY or tank <= 0.01
 		surge_button.text = "Surge" if tank <= 0.01 else "Surge %.0f" % tank
+		if not surge_button.disabled:
+			GameThemeLib.apply_primary_button(surge_button)
+		else:
+			GameThemeLib.apply_ghost_button(surge_button)
+	if outpost_pin_card:
+		var show_card: bool = has_outpost and not RunState.is_ai_vs_ai()
+		outpost_pin_card.visible = show_card
+		if show_card:
+			_position_outpost_pin_card()
+	if cancel_paint_button:
+		var painted: bool = _paint_armed or _paint_stroke_active
+		cancel_paint_button.visible = painted and not RunState.is_ai_vs_ai()
+	if globe_map != null and globe_map.has_method("set_selected_structure_grid"):
+		var sel_grid := Vector2i(-1, -1)
+		if has_outpost and battle_data != null:
+			for st_var in battle_data.placed_structures:
+				if not (st_var is Dictionary):
+					continue
+				var st: Dictionary = st_var
+				if int(st.get("id", -1)) == _selected_sid:
+					sel_grid = Vector2i(int(st.get("gx", -1)), int(st.get("gy", -1)))
+					break
+		globe_map.set_selected_structure_grid(sel_grid)
 	_refresh_paint_pin()
 
 
@@ -4007,7 +4312,7 @@ func _on_mode_pressed() -> void:
 	var nxt: int = (cur + 1) % 3
 	rust.set_spawner_mode(_selected_sid, nxt)
 	_refresh_command_hud()
-	build_hint_label.text = "Outpost is now %s." % CFG.spawner_mode_label(nxt)
+	_set_build_hint("Outpost is now %s." % CFG.spawner_mode_label(nxt))
 
 
 func _on_surge_pressed() -> void:
@@ -4019,9 +4324,11 @@ func _on_surge_pressed() -> void:
 	var dumped: float = float(rust.surge_spawner(_selected_sid))
 	_refresh_command_hud()
 	if dumped <= 0.01:
-		build_hint_label.text = "Battery is empty — wait, then Surge."
+		_set_build_hint("Battery is empty — wait, then Surge.")
 	else:
-		build_hint_label.text = "Surged %.0f pressure from the outpost." % dumped
+		_set_build_hint("Surged %.0f pressure from the outpost." % dumped)
+		if globe_map != null and globe_map.has_method("flash_structure"):
+			globe_map.flash_structure(_selected_sid)
 
 
 func _sync_active_spawners_to_sim() -> void:
@@ -4115,11 +4422,11 @@ func _watch_fps_drops(fps: int) -> void:
 func _on_play_area_resized(_fit: bool = false) -> void:
 	if play_area == null or sub_viewport == null:
 		return
-	var top: float = summary_bar.size.y + 12.0 if summary_bar else 132.0
-	var bottom_h: float = $HUD.size.y + 12.0 if has_node("HUD") else 88.0
 	play_area.set_anchors_preset(Control.PRESET_FULL_RECT)
-	play_area.offset_top = top
-	play_area.offset_bottom = -bottom_h
+	play_area.offset_top = 0.0
+	play_area.offset_bottom = 0.0
+	play_area.offset_left = 0.0
+	play_area.offset_right = 0.0
 	var play_size: Vector2 = play_area.size
 	if play_size.x < 8.0 or play_size.y < 8.0:
 		return
@@ -4130,27 +4437,27 @@ func _on_play_area_resized(_fit: bool = false) -> void:
 		maxi(int(play_size.y * scale), 1),
 	)
 	if end_scroll != null:
-		end_scroll.custom_minimum_size.y = maxf(120.0, play_size.y * 0.8)
+		end_scroll.custom_minimum_size.y = 0.0
 
 
 func _update_hud() -> void:
-	var fp: float = 0.0
-	var ep: float = 0.0
-	if territory_sim != null:
-		var totals: Vector2 = territory_sim.power_totals()
-		fp = totals.x
-		ep = totals.y
-	blue_count_label.text = _format_supply(fp)
-	red_count_label.text = _format_supply(ep)
-	blue_sub_label.text = "Land %d%% · %d tiles" % [_pct(_friendly_tiles), _friendly_tiles]
-	red_sub_label.text = "Land %d%% · %d tiles" % [_pct(_hostile_tiles), _hostile_tiles]
-	if blue_resources_label:
-		blue_resources_label.text = _format_resources_line(_friendly_resources)
-	if red_resources_label:
-		red_resources_label.text = _format_resources_line(_hostile_resources)
+	if you_caption:
+		you_caption.text = "You %d%%" % _pct(_friendly_tiles)
+	if enemy_caption:
+		enemy_caption.text = "Enemy %d%%" % _pct(_hostile_tiles)
+	if au_label:
+		au_label.text = "Au %d" % int(floor(_friendly_resources[0] if _friendly_resources.size() > 0 else 0.0))
+	if ve_label:
+		ve_label.text = "Ve %d" % int(floor(_friendly_resources[1] if _friendly_resources.size() > 1 else 0.0))
+	if em_label:
+		em_label.text = "Em %d" % int(floor(_friendly_resources[2] if _friendly_resources.size() > 2 else 0.0))
+	_update_land_tug()
+	_pulse_upkeep_warning()
 	time_label.text = _format_sim_time(_sim_time)
 	var supply_income: int = int(round(float(_friendly_tiles) * CFG.INCOME_PER_TILE_PER_SEC))
-	supply_label.text = "Supply %s · +%d/s" % [_format_supply(_supply), supply_income]
+	supply_label.text = "Supply %s" % _format_supply(_supply)
+	if supply_income != 0:
+		supply_label.text = "Supply %s · +%d/s" % [_format_supply(_supply), supply_income]
 	var fps := Engine.get_frames_per_second()
 	_watch_fps_drops(int(fps))
 	if _show_perf_hud and perf_hud_label:
@@ -4162,50 +4469,95 @@ func _update_hud() -> void:
 	elif perf_hud_label:
 		perf_hud_label.visible = false
 	if _world_dataset_entry_failed:
+		status_label.visible = true
 		status_label.text = "WorldDataset FAIL CLOSED — fix Rust DLL / live flags"
 		return
-	status_label.text = (
-		"Own all land · Break enemy pressure  |  World Conquest  |  %s  |  x%.0f  |  soldiers %d/%d  |  FPS %d  |  drag globe · scroll zoom"
-		% [
-			"PAUSED" if _paused else "LIVE",
-			_speed_mult,
-			territory_sim.agent_living_count() if territory_sim != null else 0,
-			CFG.GLOBAL_SOLDIER_CAP,
-			int(fps),
-		]
-	)
+	if status_label:
+		status_label.visible = false
 	_maybe_show_conquest_nudge()
-	speed_button.text = "▶ x%.0f" % _speed_mult
+	speed_button.text = "x%.0f" % _speed_mult
 	_bump_run_force_peaks()
 	_refresh_command_hud()
-	spawner_button.text = str(
-		_cached_structure_hud_labels.get(OutpostBuildLib.KIND_SPAWNER, "Outpost")
-	)
-	if barracks_button:
-		barracks_button.text = str(
-			_cached_structure_hud_labels.get(OutpostBuildLib.KIND_BARRACKS, "Barracks")
-		)
-	if hangar_button:
-		hangar_button.text = str(
-			_cached_structure_hud_labels.get(OutpostBuildLib.KIND_HANGAR, "Hangar")
-		)
+	_refresh_build_affordances()
+	_style_tool_buttons()
+	if build_hint_label:
+		build_hint_label.visible = build_hint_label.text != ""
 
 
 func _style_summary_hud() -> void:
 	if supply_label:
 		supply_label.add_theme_color_override("font_color", Color(1.0, 0.96, 0.78, 1.0))
-		supply_label.add_theme_font_size_override("font_size", 18)
-	_setup_hud_micro_labels()
+		supply_label.add_theme_font_size_override("font_size", 13)
+	if summary_bar:
+		summary_bar.add_theme_stylebox_override("panel", GameThemeLib.make_ribbon_style())
+		summary_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if back_button:
+			back_button.mouse_filter = Control.MOUSE_FILTER_STOP
+			GameThemeLib.apply_ghost_button(back_button)
+	if build_cluster:
+		build_cluster.add_theme_stylebox_override("panel", GameThemeLib.make_cluster_style())
+	if sim_cluster:
+		sim_cluster.add_theme_stylebox_override("panel", GameThemeLib.make_cluster_style())
+	if outpost_pin_card:
+		outpost_pin_card.add_theme_stylebox_override(
+			"panel", GameThemeLib.make_panel_style(Color(0.09, 0.11, 0.16, 0.78), GameThemeLib.BORDER, 6)
+		)
+		outpost_pin_card.mouse_filter = Control.MOUSE_FILTER_STOP
+	GameThemeLib.apply_ghost_button(pause_button)
+	GameThemeLib.apply_ghost_button(speed_button)
+	GameThemeLib.apply_ghost_button(mode_button)
+	GameThemeLib.apply_ghost_button(surge_button)
+
+
+func _update_land_tug() -> void:
+	if land_tug_blue == null or land_tug_red == null or land_tug_neutral == null:
+		return
+	var claimable: float = maxf(1.0, float(_claimable_tiles))
+	var blue_r: float = maxf(0.02, float(_friendly_tiles) / claimable)
+	var red_r: float = maxf(0.02, float(_hostile_tiles) / claimable)
+	var rest: float = maxf(0.02, 1.0 - blue_r - red_r + 0.04)
+	land_tug_blue.size_flags_stretch_ratio = blue_r
+	land_tug_red.size_flags_stretch_ratio = red_r
+	land_tug_neutral.size_flags_stretch_ratio = rest
+
+
+func _pulse_upkeep_warning() -> void:
+	if au_label == null:
+		return
+	var deficit: bool = (
+		territory_sim != null and territory_sim.agent_deficit_dps.x > 0.02
+	)
+	if deficit:
+		var pulse: float = 0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.008)
+		au_label.add_theme_color_override(
+			"font_color", Color(1.0, 0.45 + pulse * 0.2, 0.22, 1.0)
+		)
+	else:
+		au_label.add_theme_color_override("font_color", CFG.RESOURCE_COLORS[0])
+
+
+func _refresh_build_affordances() -> void:
+	if RunState.is_ai_vs_ai():
+		return
+	var outpost_ok: bool = EconomyLib.can_afford_build(
+		_supply, _friendly_resources, OutpostBuildLib.KIND_SPAWNER
+	)
+	var barracks_ok: bool = EconomyLib.can_afford_build(
+		_supply, _friendly_resources, OutpostBuildLib.KIND_BARRACKS
+	)
+	var hangar_ok: bool = EconomyLib.can_afford_build(
+		_supply, _friendly_resources, OutpostBuildLib.KIND_HANGAR
+	)
+	if spawner_button:
+		spawner_button.disabled = not outpost_ok and _build_mode != OutpostBuildLib.KIND_SPAWNER
+	if barracks_button:
+		barracks_button.disabled = not barracks_ok and _build_mode != OutpostBuildLib.KIND_BARRACKS
+	if hangar_button:
+		hangar_button.disabled = not hangar_ok and _build_mode != OutpostBuildLib.KIND_HANGAR
 
 
 func _setup_hud_micro_labels() -> void:
-	var blue_panel: VBoxContainer = $SummaryBar/SummaryHBox/BluePanel
-	var center_panel: VBoxContainer = $SummaryBar/SummaryHBox/CenterPanel
-	var red_panel: VBoxContainer = $SummaryBar/SummaryHBox/RedPanel
-	_insert_hud_micro_label(blue_panel, "TERRITORY", HORIZONTAL_ALIGNMENT_LEFT, 0)
-	_insert_hud_micro_label(center_panel, "TIME", HORIZONTAL_ALIGNMENT_CENTER, 0)
-	_insert_hud_micro_label(center_panel, "SUPPLY", HORIZONTAL_ALIGNMENT_CENTER, 2)
-	_insert_hud_micro_label(red_panel, "TERRITORY", HORIZONTAL_ALIGNMENT_RIGHT, 0)
+	pass
 
 
 func _insert_hud_micro_label(panel: VBoxContainer, text: String, align: int, child_index: int) -> void:
@@ -4233,34 +4585,32 @@ func _update_build_ui() -> void:
 		hangar_button.button_pressed = _build_mode == OutpostBuildLib.KIND_HANGAR
 		hangar_button.set_block_signals(false)
 	if _build_mode == OutpostBuildLib.KIND_SPAWNER:
-		build_hint_label.text = (
+		_set_build_hint(
 			"Left-click any land you do not already hold (%s). Builds instantly. Esc cancel."
 			% _format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER))
 		)
 	elif _build_mode == OutpostBuildLib.KIND_BARRACKS:
-		build_hint_label.text = (
+		_set_build_hint(
 			"Left-click land (%s). Builds instantly. Soldiers cost Au+Ve. Esc cancel."
 			% _format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_BARRACKS))
 		)
 	elif _build_mode == OutpostBuildLib.KIND_HANGAR:
-		build_hint_label.text = (
+		_set_build_hint(
 			"Left-click land (%s). Builds instantly. Bombers cost Au+Em. Esc cancel."
 			% _format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR))
 		)
 	else:
+		if hover_label != null and (
+			hover_label.text.begins_with("(") or hover_label.text.begins_with("Move cursor")
+		):
+			hover_label.text = ""
+			hover_label.visible = false
 		if _paint_armed:
-			build_hint_label.text = "Click a coast for a beachhead, or inland land for a bomber strike. Esc cancel."
+			_set_build_hint("Click-drag land to paint a target region. %s  Esc cancel." % _paint_inbound_hint())
 		elif _selected_sid >= 0:
-			build_hint_label.text = "Outpost selected — Mode cycles Pump/Drain/Battery. Surge fires a Battery wave."
+			_set_build_hint("Outpost selected — Mode cycles Pump/Drain/Battery. Surge fires a Battery wave.")
 		else:
-			build_hint_label.text = (
-				"Outpost (%s) · Barracks (%s) · Hangar (%s) · Paint a rally"
-				% [
-					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_SPAWNER)),
-					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_BARRACKS)),
-					_format_supply(EconomyLib.supply_cost(OutpostBuildLib.KIND_HANGAR)),
-				]
-			)
+			_refresh_idle_hint()
 	_refresh_command_hud()
 
 
@@ -4272,17 +4622,25 @@ func _update_build_hover_hint() -> void:
 	if grid == _hover_hint_grid:
 		return
 	_hover_hint_grid = grid
+	if hover_label == null:
+		if _is_on_map_grid(grid.x, grid.y) and _placement_hover_reject(grid.x, grid.y) == "":
+			_show_landing_preview(grid)
+		else:
+			_clear_placement_preview()
+		return
 	if not _is_on_map_grid(grid.x, grid.y):
-		build_hint_label.text = "Move cursor over the globe."
+		hover_label.text = "Move cursor over the globe."
+		hover_label.visible = true
+		_clear_placement_preview()
 		return
 	var reject: String = _placement_hover_reject(grid.x, grid.y)
 	if reject != "":
-		build_hint_label.text = "(%d,%d) — %s" % [grid.x, grid.y, reject]
+		hover_label.text = "(%d,%d) — %s" % [grid.x, grid.y, reject]
+		hover_label.visible = true
 		_clear_placement_preview()
 		return
-	build_hint_label.text = "(%d,%d) Click to place — %s" % [
-		grid.x, grid.y, _placement_risk_hint(grid.x, grid.y),
-	]
+	hover_label.text = "(%d,%d) Click to place" % [grid.x, grid.y]
+	hover_label.visible = true
 	_show_landing_preview(grid)
 
 
@@ -4306,6 +4664,8 @@ func _apply_build_mode(mode: String) -> void:
 	if RunState.is_ai_vs_ai() and mode != "":
 		mode = ""
 	if mode != "":
+		if _paint_stroke_active:
+			_commit_paint_stroke()
 		_paint_armed = false
 		if paint_button:
 			paint_button.set_block_signals(true)
@@ -4313,7 +4673,7 @@ func _apply_build_mode(mode: String) -> void:
 			paint_button.set_block_signals(false)
 	if _corridor_kind_removed(mode):
 		# R1: land bridges removed — never enter corridor build mode.
-		build_hint_label.text = "Land bridges removed."
+		_set_build_hint("Land bridges removed.")
 		mode = ""
 	_build_mode = mode
 	_route_hover_clock = 0.0
@@ -4449,6 +4809,11 @@ func _try_start_clarity_beat() -> void:
 		return
 	if _clarity_beat_showing or _clarity_beat_index >= CLARITY_BEAT_COUNT:
 		return
+	while _clarity_beat_index < CLARITY_BEAT_COUNT and _clarity_beat_already_done(_clarity_beat_index):
+		_clarity_beat_index += 1
+	if _clarity_beat_index >= CLARITY_BEAT_COUNT:
+		_finish_clarity_beats()
+		return
 	if not _clarity_beat_trigger_met(_clarity_beat_index):
 		return
 	_show_clarity_beat(_clarity_beat_index)
@@ -4464,6 +4829,7 @@ func _show_clarity_beat(idx: int) -> void:
 	_clarity_click_dismiss = false
 	clarity_label.text = CLARITY_BEAT_TEXTS[idx]
 	clarity_banner.visible = true
+	_pulse_clarity_target(idx)
 
 
 func _hide_clarity_banner() -> void:
@@ -4472,6 +4838,7 @@ func _hide_clarity_banner() -> void:
 	_clarity_click_dismiss = false
 	if clarity_banner:
 		clarity_banner.visible = false
+	_stop_clarity_pulse()
 
 
 func _dismiss_current_clarity_beat() -> void:
@@ -4612,7 +4979,7 @@ func _maybe_show_conquest_nudge() -> void:
 	_conquest_nudge_shown = true
 	if _clarity_beat_showing:
 		return
-	build_hint_label.text = "Conquest in reach."
+	_set_build_hint("Conquest in reach.")
 
 
 func _on_battle_finished() -> void:
@@ -4634,18 +5001,35 @@ func _on_battle_finished() -> void:
 	_battle_finished = true
 	_populate_end_dashboard(res)
 	end_overlay.visible = true
+	end_overlay.z_index = 60
+	if end_dim:
+		end_dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if build_cluster:
+		build_cluster.visible = false
+	if sim_cluster:
+		sim_cluster.visible = false
+	if outpost_pin_card:
+		outpost_pin_card.visible = false
+	if inspect_card:
+		inspect_card.visible = false
+	if clarity_banner:
+		clarity_banner.visible = false
 
 
 func _populate_end_dashboard(res: Dictionary) -> void:
 	var won: bool = bool(res.get("player_won", false))
 	var reason: String = str(res.get("end_reason", ""))
-	var headline: String = "TOTAL CONQUEST" if won and reason == "total_conquest" else (
-		"ENEMY ROUTED" if won and reason == "enemy_zero_power" else (
-			"DEFEAT — ENEMY CONQUEST" if not won and reason == "total_conquest" else (
-				"VICTORY" if won else "DEFEAT"
-			)
-		)
-	)
+	var headline: String = "You hold Earth"
+	if won and reason == "enemy_zero_power":
+		headline = "The red tide collapsed"
+	elif won:
+		headline = "You hold Earth"
+	elif reason == "time_cap":
+		headline = "Time expired"
+	elif reason == "total_conquest":
+		headline = "The red tide won"
+	else:
+		headline = "Defeat"
 	var human_reason: String = _humanize_end_reason(reason)
 	if end_headline_label:
 		end_headline_label.text = headline
@@ -4717,19 +5101,17 @@ func _populate_end_dashboard(res: Dictionary) -> void:
 
 
 func _style_end_dashboard_result(won: bool) -> void:
-	if end_dash_panel == null:
-		return
 	var accent: Color = GameThemeLib.ACCENT if won else GameThemeLib.ACCENT_DANGER
-	end_dash_panel.add_theme_stylebox_override(
-		"panel", GameThemeLib.make_panel_style(GameThemeLib.BG_PANEL, accent, 8)
-	)
+	var sheet: PanelContainer = $EndOverlay/ScrollCenter as PanelContainer
+	if sheet != null:
+		var sheet_style := GameThemeLib.make_panel_style(Color(0.09, 0.11, 0.16, 0.86), accent, 8)
+		sheet_style.corner_radius_bottom_left = 0
+		sheet_style.corner_radius_bottom_right = 0
+		sheet.add_theme_stylebox_override("panel", sheet_style)
 	if end_dim != null:
-		var dim_color: Color = end_dim.color
-		if not won:
-			dim_color = Color(0.08, 0.02, 0.04, 0.82)
-		else:
-			dim_color = Color(0.02, 0.03, 0.05, 0.75)
-		end_dim.color = dim_color
+		end_dim.color = Color(0.02, 0.03, 0.05, 0.32) if won else Color(0.08, 0.02, 0.04, 0.38)
+	if end_headline_label:
+		end_headline_label.add_theme_color_override("font_color", accent)
 
 
 func _humanize_end_reason(reason: String) -> String:
@@ -4816,6 +5198,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				_show_deploy_status("Click land · Drag to rotate · Scroll to zoom")
 				get_viewport().set_input_as_handled()
 			else:
+				if _tile_inspect_active:
+					_on_inspect_toggled(false)
+					if inspect_button:
+						inspect_button.set_block_signals(true)
+						inspect_button.button_pressed = false
+						inspect_button.set_block_signals(false)
+				if _paint_stroke_active:
+					_abort_paint_stroke()
 				_apply_build_mode("")
 				_set_paint_armed(false)
 				_clear_structure_selection()
@@ -4866,6 +5256,217 @@ func _structure_too_close(a: Vector2i, bx: int, by: int, min_d: int = -1) -> boo
 
 func _format_supply(v: float) -> String:
 	return "%d" % int(round(v))
+
+
+func _set_build_hint(msg: String) -> void:
+	if build_hint_label == null:
+		return
+	build_hint_label.text = msg
+	build_hint_label.visible = msg != ""
+
+
+func _refresh_idle_hint() -> void:
+	if _is_build_mode_active() or _paint_armed or _selected_sid >= 0:
+		return
+	const IDLE := "Right-drag to orbit · scroll to zoom"
+	if _orbit_seen:
+		if build_hint_label != null and build_hint_label.text == IDLE:
+			_set_build_hint("")
+	else:
+		_set_build_hint(IDLE)
+
+
+func _bind_tool_hover(btn: Button, label: String) -> void:
+	if btn == null:
+		return
+	btn.mouse_entered.connect(func() -> void:
+		if hover_label:
+			hover_label.text = label
+			hover_label.visible = label != ""
+	)
+	btn.mouse_exited.connect(func() -> void:
+		if hover_label:
+			hover_label.text = ""
+			hover_label.visible = false
+	)
+
+
+func _setup_tool_icons() -> void:
+	if spawner_button:
+		spawner_button.icon = GameThemeLib.make_tool_icon("outpost")
+		spawner_button.expand_icon = false
+	if barracks_button:
+		barracks_button.icon = GameThemeLib.make_tool_icon("barracks")
+		barracks_button.expand_icon = false
+	if hangar_button:
+		hangar_button.icon = GameThemeLib.make_tool_icon("hangar")
+		hangar_button.expand_icon = false
+	if paint_button:
+		paint_button.icon = GameThemeLib.make_tool_icon("paint")
+		paint_button.expand_icon = false
+	if inspect_button:
+		inspect_button.icon = GameThemeLib.make_tool_icon("inspect")
+		inspect_button.expand_icon = false
+	if cancel_paint_button:
+		cancel_paint_button.icon = GameThemeLib.make_tool_icon("clear")
+		cancel_paint_button.expand_icon = false
+
+
+func _style_tool_buttons() -> void:
+	_style_one_tool(spawner_button, _build_mode == OutpostBuildLib.KIND_SPAWNER)
+	_style_one_tool(barracks_button, _build_mode == OutpostBuildLib.KIND_BARRACKS)
+	_style_one_tool(hangar_button, _build_mode == OutpostBuildLib.KIND_HANGAR)
+	_style_one_tool(paint_button, _paint_armed)
+	_style_one_tool(inspect_button, _tile_inspect_active)
+	if pause_button:
+		if _paused:
+			GameThemeLib.apply_latched_button(pause_button)
+		else:
+			GameThemeLib.apply_ghost_button(pause_button)
+			pause_button.modulate = Color.WHITE
+
+
+func _style_one_tool(btn: Button, latched: bool) -> void:
+	if btn == null:
+		return
+	if latched:
+		GameThemeLib.apply_latched_button(btn)
+	else:
+		GameThemeLib.apply_ghost_button(btn)
+
+
+func _paint_inbound_hint() -> String:
+	var counts: Vector2i = _count_paint_occupancy()
+	return "%d soldiers · %d bomber" % [counts.x, counts.y] if counts.y == 1 else "%d soldiers · %d bombers" % [counts.x, counts.y]
+
+
+func _count_paint_occupancy() -> Vector2i:
+	var rust = _rust_commands()
+	if rust == null or not rust.has_method("get_team_paint_cells") or battle_data == null:
+		return Vector2i.ZERO
+	var cells: PackedInt32Array = rust.get_team_paint_cells(BattleTileControlLib.OWNER_FRIENDLY)
+	if cells.is_empty():
+		return Vector2i.ZERO
+	var painted: Dictionary = {}
+	for cell in cells:
+		painted[int(cell)] = true
+	var soldiers: int = 0
+	var n_s: int = mini(_last_agent_teams.size(), mini(_last_agent_gx.size(), _last_agent_gy.size()))
+	for i in range(n_s):
+		if int(_last_agent_teams[i]) != BattleTileControlLib.OWNER_FRIENDLY:
+			continue
+		var cid: int = battle_data.cell_index(_last_agent_gx[i], _last_agent_gy[i])
+		if painted.has(cid):
+			soldiers += 1
+	var bombers: int = 0
+	var n_b: int = mini(_last_bomber_teams.size(), mini(_last_bomber_gx.size(), _last_bomber_gy.size()))
+	for i in range(n_b):
+		if int(_last_bomber_teams[i]) != BattleTileControlLib.OWNER_FRIENDLY:
+			continue
+		var cid: int = battle_data.cell_index(_last_bomber_gx[i], _last_bomber_gy[i])
+		if painted.has(cid):
+			bombers += 1
+	return Vector2i(soldiers, bombers)
+
+
+func _position_outpost_pin_card() -> void:
+	if outpost_pin_card == null or globe_map == null or globe_map.camera == null:
+		return
+	var sel_grid := Vector2i(-1, -1)
+	if _selected_sid >= 0 and battle_data != null:
+		for st_var in battle_data.placed_structures:
+			if not (st_var is Dictionary):
+				continue
+			var st: Dictionary = st_var
+			if int(st.get("id", -1)) == _selected_sid:
+				sel_grid = Vector2i(int(st.get("gx", -1)), int(st.get("gy", -1)))
+				break
+	if sel_grid.x < 0 or not globe_map.has_method("grid_world_pos"):
+		return
+	var world: Vector3 = globe_map.grid_world_pos(sel_grid)
+	var cam: Camera3D = globe_map.camera
+	if cam.is_position_behind(world):
+		outpost_pin_card.visible = false
+		return
+	var vp: Vector2 = cam.unproject_position(world)
+	if sub_viewport != null and play_area != null and sub_viewport.size.x > 0 and sub_viewport.size.y > 0:
+		vp.x *= play_area.size.x / float(sub_viewport.size.x)
+		vp.y *= play_area.size.y / float(sub_viewport.size.y)
+	vp += Vector2(14, -40)
+	var view: Vector2 = get_viewport_rect().size
+	vp.x = clampf(vp.x, 12.0, maxf(12.0, view.x - 188.0))
+	vp.y = clampf(vp.y, 56.0, maxf(56.0, view.y - 88.0))
+	outpost_pin_card.position = vp
+
+
+func _on_end_details_pressed() -> void:
+	_end_details_open = not _end_details_open
+	if end_kpi_strip:
+		end_kpi_strip.visible = _end_details_open
+	if end_compare_row:
+		end_compare_row.visible = _end_details_open
+	if end_forces_label:
+		end_forces_label.visible = _end_details_open
+	if end_meta_label:
+		end_meta_label.visible = _end_details_open
+	if end_details_button:
+		end_details_button.text = "Hide details" if _end_details_open else "Details"
+	var sheet: PanelContainer = $EndOverlay/ScrollCenter as PanelContainer
+	if sheet:
+		sheet.offset_top = -436.0 if _end_details_open else -196.0
+
+
+func _clarity_beat_already_done(idx: int) -> bool:
+	match idx:
+		1:
+			return _run_outposts_placed > 0 or _clarity_first_outpost_placed
+		4:
+			return _run_hangars_placed > 0
+		_:
+			return false
+
+
+func _pulse_clarity_target(idx: int) -> void:
+	_stop_clarity_pulse()
+	var target: Control = null
+	var scale_ok: bool = true
+	match idx:
+		1:
+			target = spawner_button
+		2:
+			target = au_label
+			scale_ok = false
+		4:
+			target = hangar_button
+		_:
+			target = null
+	if target == null:
+		return
+	target.pivot_offset = target.size * 0.5
+	_clarity_pulse_tween = create_tween()
+	_clarity_pulse_tween.set_loops()
+	if scale_ok:
+		_clarity_pulse_tween.tween_property(target, "scale", Vector2(1.07, 1.07), 0.425)
+		_clarity_pulse_tween.tween_property(target, "scale", Vector2.ONE, 0.425)
+	else:
+		_clarity_pulse_tween.tween_property(target, "modulate", Color(1.0, 0.92, 0.55, 1.0), 0.425)
+		_clarity_pulse_tween.tween_property(target, "modulate", Color.WHITE, 0.425)
+
+
+func _stop_clarity_pulse() -> void:
+	if _clarity_pulse_tween != null:
+		_clarity_pulse_tween.kill()
+		_clarity_pulse_tween = null
+	for btn in [spawner_button, hangar_button]:
+		if btn:
+			btn.modulate = Color.WHITE
+			btn.scale = Vector2.ONE
+	if au_label:
+		au_label.modulate = Color.WHITE
+	if ve_label:
+		ve_label.modulate = Color.WHITE
+	if em_label:
+		em_label.modulate = Color.WHITE
 
 
 func _format_resources_line(wallet: Array[float]) -> String:

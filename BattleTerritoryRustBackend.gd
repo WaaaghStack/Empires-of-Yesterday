@@ -1339,6 +1339,31 @@ func set_team_paint(team: int, kind: int, gx: int, gy: int) -> bool:
 	return bool(_sim.call("set_team_paint", team, kind, gx, gy))
 
 
+func begin_team_paint_stroke(team: int) -> bool:
+	if not ready or _sim == null or not _sim.has_method("begin_team_paint_stroke"):
+		return false
+	return bool(_sim.call("begin_team_paint_stroke", team))
+
+
+func stamp_team_paint(team: int, gx: int, gy: int) -> bool:
+	if not ready or _sim == null or not _sim.has_method("stamp_team_paint"):
+		return false
+	return bool(_sim.call("stamp_team_paint", team, gx, gy))
+
+
+func commit_team_paint_stroke(team: int) -> void:
+	if not ready or _sim == null or not _sim.has_method("commit_team_paint_stroke"):
+		return
+	_sim.call("commit_team_paint_stroke", team)
+
+
+func get_team_paint_cells(team: int) -> PackedInt32Array:
+	if not ready or _sim == null or not _sim.has_method("get_team_paint_cells"):
+		return PackedInt32Array()
+	var row = _sim.call("get_team_paint_cells", team)
+	return row if row is PackedInt32Array else PackedInt32Array()
+
+
 func clear_team_paint(team: int) -> void:
 	if not ready or _sim == null or not _sim.has_method("clear_team_paint"):
 		return

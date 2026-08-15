@@ -3,11 +3,12 @@
 use std::collections::HashMap;
 
 use crate::pathfind::battle_nav::{AgentNavMasks, BattleNavView};
-use crate::pathfind::kernel::{RouteContext, RoutePath, SearchKernel};
+use crate::pathfind::kernel::{RoutePath, SearchKernel};
 use crate::pathfind::nav_rules::{
     is_air_strike_target_at, rule_by_id, run_bomber_strike_rule, NAV_RULE_BOMBER_STRIKE,
+    PAINT_MAX_EXPAND,
 };
-use crate::sim::{TerritoryKernel, OWNER_FRIENDLY, PAINT_STRIKE};
+use crate::sim::{TerritoryKernel, OWNER_FRIENDLY};
 
 /// After free-goal BFS misses, skip free search for this many replan cycles (C1/C4 FPS).
 const FREE_GOAL_MISS_SKIP_TICKS: u8 = 8;
@@ -159,6 +160,26 @@ impl BomberLayer {
         self.free_miss_cd = [0; 3];
     }
 
+    /// Player paint committed or cleared — peel off the current strike this tick.
+    pub fn notify_paint_orders(&mut self, kernel: &TerritoryKernel, team: u8) {
+        self.nav_masks_epoch = self.nav_masks_epoch.wrapping_add(1);
+        if self.nav_masks_epoch == 0 {
+            self.nav_masks_epoch = 1;
+        }
+        let t = team as usize;
+        if t < self.free_miss_cd.len() {
+            self.free_miss_cd[t] = 0;
+        }
+        for i in 0..self.bombers.len() {
+            if self.bombers[i].team == team {
+                self.bombers[i].retarget_cd = 0;
+                self.bombers[i].search_expand_limit = PAINT_MAX_EXPAND;
+                self.bombers[i].plan_age_sec = 0.0;
+                self.steer_bomber_to_paint(kernel, i);
+            }
+        }
+    }
+
     pub fn living_count(&self) -> u32 {
         self.bombers.len() as u32
     }
@@ -243,6 +264,7 @@ impl BomberLayer {
             self.bombers[i].plan_age_sec += dt;
         }
 
+        kernel.rebuild_live_paint_flows();
         self.run_budgeted_replans(kernel);
 
         for i in 0..n {
@@ -251,6 +273,9 @@ impl BomberLayer {
             let move_rate = self.config.move_cells_per_sec;
             self.bombers[i].move_accum += move_rate * dt;
             while self.bombers[i].move_accum >= 1.0 {
+                if kernel.paint_orders_live(team) {
+                    self.steer_bomber_to_paint(kernel, i);
+                }
                 let sx = self.bombers[i].step_gx;
                 let sy = self.bombers[i].step_gy;
                 let id = self.bombers[i].id;
@@ -365,6 +390,9 @@ impl BomberLayer {
 
         for i in 0..n {
             let team = self.bombers[i].team;
+            if kernel.paint_orders_live(team) {
+                continue;
+            }
             let id = self.bombers[i].id;
             let holding = self.holding_at_goal(kernel, team, &self.bombers[i]);
             let stuck = self.bombers[i].step_gx < 0 && !holding;
@@ -538,57 +566,9 @@ impl BomberLayer {
             return;
         }
 
-        let paint_strike = (team as usize) < kernel.paint_kind.len()
-            && kernel.paint_kind[team as usize] == PAINT_STRIKE;
-        if paint_strike {
-            self.clear_goal_claim_for_bomber(except_id);
-            let start_ui = start_idx as usize;
-            let in_crater = kernel.paint_cell_marked(team, gx, gy);
-            let crater_enemy = in_crater
-                && start_ui < kernel.owners.len()
-                && kernel.owners[start_ui] != team
-                && kernel.is_land_idx(start_ui);
-            if crater_enemy && !prefer_alternate_goal {
-                self.bombers[bomber_i].goal_gx = gx;
-                self.bombers[bomber_i].goal_gy = gy;
-                self.claim_goal(gx, gy, except_id);
-                self.bombers[bomber_i].deploy_path = vec![start_idx];
-                self.bombers[bomber_i].deploy_path_pos = 0;
-                self.bombers[bomber_i].step_gx = -1;
-                self.bombers[bomber_i].step_gy = -1;
-                self.note_strike_search_result(bomber_i, kernel, true);
-                return;
-            }
-            self.nav_search.ensure_capacity(kernel.tile_count);
-            let max_expand = self.capped_search_expand(kernel, &self.bombers[bomber_i]);
-            if let Some(route) = Self::find_paint_strike_path(
-                &mut self.nav_search,
-                kernel,
-                start_idx,
-                team,
-                except_id,
-                &self.occupant_at,
-                &self.goal_claims,
-                max_expand,
-            ) {
-                if route.path.len() >= 2 {
-                    let w = kernel.grid_w;
-                    let goal_idx = *route.path.last().unwrap();
-                    let (goal_x, goal_y) = Self::grid_from_idx(goal_idx, w);
-                    self.bombers[bomber_i].goal_gx = goal_x;
-                    self.bombers[bomber_i].goal_gy = goal_y;
-                    self.claim_goal(goal_x, goal_y, except_id);
-                    self.bombers[bomber_i].deploy_path = route.path;
-                    self.bombers[bomber_i].deploy_path_pos = 0;
-                    self.sync_step_from_deploy_path(kernel, bomber_i);
-                    self.note_strike_search_result(bomber_i, kernel, true);
-                    return;
-                }
-            }
-            // Keep hunting the pin; don't peel to a random island while paint is live.
-            self.note_strike_search_result(bomber_i, kernel, false);
-            self.bombers[bomber_i].step_gx = -1;
-            self.bombers[bomber_i].step_gy = -1;
+        let paint_active = kernel.paint_orders_live(team);
+        if paint_active {
+            self.steer_bomber_to_paint(kernel, bomber_i);
             return;
         }
 
@@ -738,60 +718,50 @@ impl BomberLayer {
         self.goal_claims.retain(|_, &mut id| id != bomber_id);
     }
 
-    fn find_paint_strike_path(
-        nav_search: &mut SearchKernel,
-        kernel: &TerritoryKernel,
-        start_idx: i32,
-        team: u8,
-        except_id: u32,
-        occupant_at: &HashMap<CellKey, u32>,
-        goal_claims: &HashMap<CellKey, u32>,
-        max_expand: usize,
-    ) -> Option<RoutePath> {
-        let t = team as usize;
-        if t >= kernel.paint_land.len() {
-            return None;
+    fn steer_bomber_to_paint(&mut self, kernel: &TerritoryKernel, bomber_i: usize) {
+        let team = self.bombers[bomber_i].team;
+        let gx = self.bombers[bomber_i].gx;
+        let gy = self.bombers[bomber_i].gy;
+        let except_id = self.bombers[bomber_i].id;
+        let start_idx = kernel.cell_index(gx, gy);
+        if start_idx < 0 || !kernel.paint_orders_live(team) {
+            self.bombers[bomber_i].step_gx = -1;
+            self.bombers[bomber_i].step_gy = -1;
+            return;
         }
-        let masks = AgentNavMasks {
-            friendly_corridor: &[],
-            hostile_corridor: &[],
-            friendly_bridge: &[],
-            hostile_bridge: &[],
+        let start_ui = start_idx as usize;
+        self.clear_goal_claim_for_bomber(except_id);
+        let on_paint = kernel.paint_cell_marked(team, gx, gy)
+            && kernel.is_land_idx(start_ui)
+            && start_ui < kernel.owners.len()
+            && kernel.owners[start_ui] != team;
+        if on_paint {
+            self.bombers[bomber_i].goal_gx = gx;
+            self.bombers[bomber_i].goal_gy = gy;
+            self.claim_goal(gx, gy, except_id);
+            self.bombers[bomber_i].deploy_path = vec![start_idx];
+            self.bombers[bomber_i].deploy_path_pos = 0;
+            self.bombers[bomber_i].step_gx = -1;
+            self.bombers[bomber_i].step_gy = -1;
+            self.note_strike_search_result(bomber_i, kernel, true);
+            return;
+        }
+        let Some(next) = kernel.paint_flow_next_idx(team, start_ui) else {
+            self.note_strike_search_result(bomber_i, kernel, false);
+            self.bombers[bomber_i].step_gx = -1;
+            self.bombers[bomber_i].step_gy = -1;
+            self.bombers[bomber_i].deploy_path.clear();
+            self.bombers[bomber_i].deploy_path_pos = 0;
+            return;
         };
-        let view = BattleNavView::new(kernel, &masks, team);
-        let ctx = RouteContext {
-            allow_water: true,
-            infra_only: false,
-            use_astar: false,
-            land_step: 1,
-            water_step: 1,
-            max_expand,
-            corridor: None,
-            flight_mode: true,
-        };
-        let land = &kernel.paint_land[t];
-        let w = kernel.grid_w.max(1);
-        nav_search
-            .find_nearest_goal(&view, &[start_idx], ctx, |idx| {
-                if idx >= land.len() || land[idx] == 0 || !kernel.is_land_idx(idx) {
-                    return false;
-                }
-                if kernel.owners[idx] == team {
-                    return false;
-                }
-                let cx = (idx as i32) % w;
-                let cy = (idx as i32) / w;
-                let key = (cx, cy);
-                match occupant_at.get(&key) {
-                    Some(&oid) if oid != except_id => return false,
-                    _ => {}
-                }
-                match goal_claims.get(&key) {
-                    Some(&cid) if cid != except_id => false,
-                    _ => true,
-                }
-            })
-            .map(|(path, _)| path)
+        let (sx, sy) = kernel.grid_from_idx(next as i32);
+        self.bombers[bomber_i].goal_gx = sx;
+        self.bombers[bomber_i].goal_gy = sy;
+        self.bombers[bomber_i].step_gx = sx;
+        self.bombers[bomber_i].step_gy = sy;
+        self.bombers[bomber_i].deploy_path.clear();
+        self.bombers[bomber_i].deploy_path_pos = 0;
+        self.note_strike_search_result(bomber_i, kernel, true);
     }
 
     fn find_strike_path(
@@ -861,6 +831,17 @@ impl BomberLayer {
     }
 
     fn holding_at_goal(&self, kernel: &TerritoryKernel, team: u8, bomber: &Bomber) -> bool {
+        if kernel.paint_orders_live(team) {
+            let idx = kernel.cell_index(bomber.gx, bomber.gy);
+            if idx < 0 {
+                return false;
+            }
+            let ui = idx as usize;
+            return kernel.paint_cell_marked(team, bomber.gx, bomber.gy)
+                && kernel.is_land_idx(ui)
+                && ui < kernel.owners.len()
+                && kernel.owners[ui] != team;
+        }
         let masks = AgentNavMasks {
             friendly_corridor: &self.friendly_corridor,
             hostile_corridor: &self.hostile_corridor,

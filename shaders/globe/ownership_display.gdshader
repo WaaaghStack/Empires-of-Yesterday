@@ -7,8 +7,10 @@ uniform sampler2D border_map : filter_nearest, repeat_enable;
 uniform sampler2D depth_map : filter_nearest, repeat_enable;
 uniform sampler2D land_mask : filter_nearest, repeat_enable;
 uniform sampler2D road_map : filter_nearest, repeat_enable;
+uniform sampler2D paint_map : filter_nearest, repeat_enable;
 uniform float interior_alpha : hint_range(0.0, 1.0) = 0.58;
 uniform float border_alpha : hint_range(0.0, 1.0) = 1.0;
+uniform float inspect_boost : hint_range(0.0, 1.0) = 0.0;
 
 const vec3 COL_FRIENDLY = vec3(0.18, 0.55, 0.95);
 const vec3 COL_HOSTILE = vec3(0.95, 0.32, 0.22);
@@ -101,21 +103,49 @@ void fragment() {
 	}
 	float ow = texture(owner_map, UV).r;
 	float kind = owner_kind(ow);
-	if (kind < 0.5) {
+	float paint = texture(paint_map, UV).r;
+	bool painted = paint > 0.05;
+	if (kind < 0.5 && !painted) {
 		discard;
 	}
 
 	vec3 col = base_color(kind);
 	bool is_border = texture(border_map, UV).r > 0.5;
-	if (is_border) {
-		ALBEDO = border_color(kind, col);
-	} else {
-		float depth = texture(depth_map, UV).r;
-		if (depth < 0.01) {
-			depth = 0.7;
+	if (kind >= 0.5) {
+		if (is_border) {
+			ALBEDO = border_color(kind, col);
+		} else {
+			float depth = texture(depth_map, UV).r;
+			if (depth < 0.01) {
+				depth = 0.7;
+			}
+			float tint = mix(0.55, 1.15, depth);
+			float boost = mix(1.0, 1.38, inspect_boost);
+			ALBEDO = col * tint * boost;
 		}
-		float tint = mix(0.55, 1.15, depth);
-		ALBEDO = col * tint;
+	} else {
+		ALBEDO = vec3(0.0);
+	}
+	if (painted) {
+		vec2 px = vec2(1.0) / vec2(textureSize(paint_map, 0));
+		float n0 = texture(paint_map, UV + vec2(px.x, 0.0)).r;
+		float n1 = texture(paint_map, UV - vec2(px.x, 0.0)).r;
+		float n2 = texture(paint_map, UV + vec2(0.0, px.y)).r;
+		float n3 = texture(paint_map, UV - vec2(0.0, px.y)).r;
+		float edge = max(max(abs(paint - n0), abs(paint - n1)), max(abs(paint - n2), abs(paint - n3)));
+		float dash = step(0.42, fract(UV.x * 64.0 + UV.y * 32.0 + TIME * 0.45));
+		float pulse = 0.55 + 0.45 * sin(TIME * 3.2);
+		vec3 glow = mix(vec3(0.95, 0.92, 0.72), vec3(0.22, 0.95, 0.82), 0.4) * pulse;
+		glow = mix(glow, vec3(0.95, 0.95, 0.88), dash * 0.4);
+		float stroke = smoothstep(0.04, 0.18, edge);
+		if (kind < 0.5) {
+			if (stroke < 0.12) {
+				discard;
+			}
+			ALBEDO = glow * stroke;
+		} else {
+			ALBEDO = mix(ALBEDO, glow, stroke * 0.72);
+		}
 	}
 	ALPHA = 1.0;
 }

@@ -1720,10 +1720,46 @@ impl TerritorySim {
 
     #[func]
     fn set_team_paint(&mut self, team: i32, kind: i32, gx: i32, gy: i32) -> bool {
+        let ok = match self.kernel.as_mut() {
+            Some(kernel) => kernel.set_paint(team as u8, kind.max(0) as u8, gx, gy),
+            None => return false,
+        };
+        if ok {
+            self.notify_units_paint(team as u8);
+        }
+        ok
+    }
+
+    #[func]
+    fn begin_team_paint_stroke(&mut self, team: i32) -> bool {
         let Some(kernel) = self.kernel.as_mut() else {
             return false;
         };
-        kernel.set_paint(team as u8, kind.max(0) as u8, gx, gy)
+        kernel.begin_paint_stroke(team as u8)
+    }
+
+    #[func]
+    fn stamp_team_paint(&mut self, team: i32, gx: i32, gy: i32) -> bool {
+        let Some(kernel) = self.kernel.as_mut() else {
+            return false;
+        };
+        kernel.stamp_paint(team as u8, gx, gy)
+    }
+
+    #[func]
+    fn commit_team_paint_stroke(&mut self, team: i32) {
+        if let Some(kernel) = self.kernel.as_mut() {
+            kernel.commit_paint_stroke(team as u8);
+        }
+        self.notify_units_paint(team as u8);
+    }
+
+    #[func]
+    fn get_team_paint_cells(&self, team: i32) -> PackedInt32Array {
+        let Some(kernel) = self.kernel.as_ref() else {
+            return PackedInt32Array::new();
+        };
+        vec_to_packed_i32(&kernel.paint_cell_indices(team as u8))
     }
 
     #[func]
@@ -1731,6 +1767,7 @@ impl TerritorySim {
         if let Some(kernel) = self.kernel.as_mut() {
             kernel.clear_paint(team as u8);
         }
+        self.notify_units_paint(team as u8);
     }
 
     #[func]
@@ -1746,7 +1783,17 @@ impl TerritorySim {
         out.set("kind", kernel.paint_kind[t]);
         out.set("gx", kernel.paint_gx[t]);
         out.set("gy", kernel.paint_gy[t]);
+        out.set("count", kernel.paint_marked_count(team as u8));
         out
+    }
+
+    fn notify_units_paint(&mut self, team: u8) {
+        if let (Some(kernel), Some(agents)) = (self.kernel.as_ref(), self.agents.as_mut()) {
+            agents.notify_paint_orders(kernel, team);
+        }
+        if let (Some(kernel), Some(bombers)) = (self.kernel.as_ref(), self.bombers.as_mut()) {
+            bombers.notify_paint_orders(kernel, team);
+        }
     }
 
     #[func]

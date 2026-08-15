@@ -22,123 +22,156 @@ grow_vertical = 2
 mouse_filter = 2
 color = Color(0.02, 0.03, 0.05, 1)
 
-[node name="TopBar" type="HBoxContainer" parent="."]
+[node name="MatchRibbon" type="PanelContainer" parent="."]
 z_index = 41
 layout_mode = 1
 anchors_preset = 10
 anchor_right = 1.0
-offset_left = 8.0
+offset_left = 12.0
 offset_top = 8.0
-offset_right = -8.0
-offset_bottom = 44.0
+offset_right = -12.0
+offset_bottom = 48.0
 grow_horizontal = 2
+mouse_filter = 2
 
-[node name="BackButton" type="Button" parent="TopBar"]
+[node name="RibbonHBox" type="HBoxContainer" parent="MatchRibbon"]
 layout_mode = 2
-text = "← Menu"
+theme_override_constants/separation = 10
+alignment = 1
+mouse_filter = 2
 
-[node name="Title" type="Label" parent="TopBar"]
+[node name="BackButton" type="Button" parent="MatchRibbon/RibbonHBox"]
+custom_minimum_size = Vector2(64, 28)
+layout_mode = 2
+text = "Menu"
+
+[node name="TugWrap" type="Control" parent="MatchRibbon/RibbonHBox"]
+custom_minimum_size = Vector2(0, 32)
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_font_sizes/font_size = 18
-text = "World Conquest — Earth"
-horizontal_alignment = 1
+mouse_filter = 2
+
+[node name="LandTug" type="HBoxContainer" parent="MatchRibbon/RibbonHBox/TugWrap"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 0.0
+offset_top = 11.0
+offset_right = 0.0
+offset_bottom = 21.0
+theme_override_constants/separation = 0
+mouse_filter = 2
+
+[node name="BlueFill" type="ColorRect" parent="MatchRibbon/RibbonHBox/TugWrap/LandTug"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
+mouse_filter = 2
+color = Color(0.22, 0.55, 0.95, 0.92)
+
+[node name="NeutralFill" type="ColorRect" parent="MatchRibbon/RibbonHBox/TugWrap/LandTug"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 2.0
+mouse_filter = 2
+color = Color(0.18, 0.22, 0.28, 0.7)
+
+[node name="RedFill" type="ColorRect" parent="MatchRibbon/RibbonHBox/TugWrap/LandTug"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
+mouse_filter = 2
+color = Color(0.92, 0.32, 0.26, 0.92)
+
+[node name="YouCaption" type="Label" parent="MatchRibbon/RibbonHBox/TugWrap"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.7, 0.88, 1, 1)
+theme_override_colors/font_outline_color = Color(0.05, 0.06, 0.09, 0.9)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 11
+text = "You 0%"
+vertical_alignment = 1
+
+[node name="EnemyCaption" type="Label" parent="MatchRibbon/RibbonHBox/TugWrap"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_right = -8.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(1, 0.62, 0.58, 1)
+theme_override_colors/font_outline_color = Color(0.05, 0.06, 0.09, 0.9)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 11
+text = "Enemy 0%"
+horizontal_alignment = 2
+vertical_alignment = 1
+
+[node name="SupplyLabel" type="Label" parent="MatchRibbon/RibbonHBox"]
+custom_minimum_size = Vector2(96, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.96, 0.78, 1)
+theme_override_font_sizes/font_size = 13
+text = "Supply 800"
+
+[node name="TimeLabel" type="Label" parent="MatchRibbon/RibbonHBox"]
+custom_minimum_size = Vector2(100, 0)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 12
+text = "Day 1  00:00"
+
+[node name="MineralsRow" type="HBoxContainer" parent="MatchRibbon/RibbonHBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="AuLabel" type="Label" parent="MatchRibbon/RibbonHBox/MineralsRow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.98, 0.86, 0.22, 1)
+theme_override_font_sizes/font_size = 12
+text = "Au 0"
+
+[node name="VeLabel" type="Label" parent="MatchRibbon/RibbonHBox/MineralsRow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.28, 0.88, 0.42, 1)
+theme_override_font_sizes/font_size = 12
+text = "Ve 0"
+
+[node name="EmLabel" type="Label" parent="MatchRibbon/RibbonHBox/MineralsRow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.98, 0.52, 0.18, 1)
+theme_override_font_sizes/font_size = 12
+text = "Em 0"
 
 [node name="ClarityBanner" type="PanelContainer" parent="."]
 visible = false
 z_index = 46
 layout_mode = 1
-anchors_preset = 10
-anchor_right = 1.0
-offset_left = 64.0
-offset_top = 156.0
-offset_right = -64.0
-offset_bottom = 228.0
-grow_horizontal = 2
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = -216.0
+offset_right = 396.0
+offset_bottom = -156.0
+grow_vertical = 0
 mouse_filter = 2
 
 [node name="ClarityLabel" type="Label" parent="ClarityBanner"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 15
 text = ""
-horizontal_alignment = 1
+horizontal_alignment = 0
 autowrap_mode = 3
-
-[node name="SummaryBar" type="PanelContainer" parent="."]
-z_index = 40
-layout_mode = 1
-anchors_preset = 10
-anchor_right = 1.0
-offset_left = 8.0
-offset_top = 48.0
-offset_right = -8.0
-offset_bottom = 148.0
-grow_horizontal = 2
-
-[node name="SummaryHBox" type="HBoxContainer" parent="SummaryBar"]
-layout_mode = 2
-theme_override_constants/separation = 20
-
-[node name="BluePanel" type="VBoxContainer" parent="SummaryBar/SummaryHBox"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="BlueCount" type="Label" parent="SummaryBar/SummaryHBox/BluePanel"]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.35, 0.75, 1, 1)
-theme_override_font_sizes/font_size = 24
-text = "0"
-
-[node name="BlueSub" type="Label" parent="SummaryBar/SummaryHBox/BluePanel"]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.55, 0.65, 0.75, 1)
-text = "0%"
-
-[node name="BlueResources" type="Label" parent="SummaryBar/SummaryHBox/BluePanel"]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.75, 0.8, 0.88, 1)
-theme_override_font_sizes/font_size = 12
-text = "Au 0  Ve 0  Em 0"
-
-[node name="CenterPanel" type="VBoxContainer" parent="SummaryBar/SummaryHBox"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="TimeLabel" type="Label" parent="SummaryBar/SummaryHBox/CenterPanel"]
-layout_mode = 2
-horizontal_alignment = 1
-text = "Day 1  00:00"
-
-[node name="SupplyLabel" type="Label" parent="SummaryBar/SummaryHBox/CenterPanel"]
-layout_mode = 2
-horizontal_alignment = 1
-theme_override_colors/font_color = Color(1, 0.96, 0.78, 1)
-theme_override_font_sizes/font_size = 18
-text = "Supply 1200"
-
-[node name="RedPanel" type="VBoxContainer" parent="SummaryBar/SummaryHBox"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="RedCount" type="Label" parent="SummaryBar/SummaryHBox/RedPanel"]
-layout_mode = 2
-horizontal_alignment = 2
-theme_override_colors/font_color = Color(0.95, 0.35, 0.3, 1)
-theme_override_font_sizes/font_size = 24
-text = "0"
-
-[node name="RedSub" type="Label" parent="SummaryBar/SummaryHBox/RedPanel"]
-layout_mode = 2
-horizontal_alignment = 2
-theme_override_colors/font_color = Color(0.55, 0.65, 0.75, 1)
-text = "0%"
-
-[node name="RedResources" type="Label" parent="SummaryBar/SummaryHBox/RedPanel"]
-layout_mode = 2
-horizontal_alignment = 2
-theme_override_colors/font_color = Color(0.75, 0.8, 0.88, 1)
-theme_override_font_sizes/font_size = 12
-text = "Au 0  Ve 0  Em 0"
 
 [node name="PlayArea" type="Control" parent="."]
 z_index = 0
@@ -146,8 +179,8 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_top = 152.0
-offset_bottom = -88.0
+offset_top = 0.0
+offset_bottom = 0.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 1
@@ -178,82 +211,234 @@ script = ExtResource("2")
 transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 120, 80)
 current = true
 
-[node name="HUD" type="VBoxContainer" parent="."]
+[node name="BuildCluster" type="PanelContainer" parent="."]
 z_index = 40
 layout_mode = 1
-anchors_preset = 12
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = -148.0
+offset_right = 400.0
+offset_bottom = -16.0
+grow_vertical = 0
+
+[node name="VBox" type="VBoxContainer" parent="BuildCluster"]
+layout_mode = 2
+theme_override_constants/separation = 4
+mouse_filter = 2
+
+[node name="HoverLabel" type="Label" parent="BuildCluster/VBox"]
+visible = false
+layout_mode = 2
+mouse_filter = 2
+theme_override_font_sizes/font_size = 11
+text = ""
+
+[node name="BuildHintLabel" type="Label" parent="BuildCluster/VBox"]
+visible = false
+custom_minimum_size = Vector2(360, 0)
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 12
+text = "Right-drag to orbit · scroll to zoom"
+autowrap_mode = 3
+
+[node name="HBox" type="HBoxContainer" parent="BuildCluster/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 6
+mouse_filter = 2
+
+[node name="SpawnerButton" type="Button" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+toggle_mode = true
+text = ""
+
+[node name="BarracksButton" type="Button" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+toggle_mode = true
+text = ""
+
+[node name="HangarButton" type="Button" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+toggle_mode = true
+text = ""
+
+[node name="Divider" type="ColorRect" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(1, 28)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+color = Color(0.22, 0.28, 0.38, 1)
+
+[node name="PaintButton" type="Button" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+toggle_mode = true
+text = ""
+
+[node name="InspectButton" type="Button" parent="BuildCluster/VBox/HBox"]
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+toggle_mode = true
+text = ""
+
+[node name="CancelPaintButton" type="Button" parent="BuildCluster/VBox/HBox"]
+visible = false
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 2
+text = ""
+
+[node name="StatusLabel" type="Label" parent="BuildCluster/VBox"]
+visible = false
+layout_mode = 2
+mouse_filter = 2
+theme_override_font_sizes/font_size = 11
+text = "World Conquest"
+
+[node name="SimCluster" type="PanelContainer" parent="."]
+z_index = 40
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 8.0
-offset_top = -88.0
-offset_right = -8.0
-offset_bottom = -8.0
-grow_horizontal = 2
+offset_left = -160.0
+offset_top = -68.0
+offset_right = -16.0
+offset_bottom = -16.0
+grow_horizontal = 0
+grow_vertical = 0
 
-[node name="BuildHintLabel" type="Label" parent="HUD"]
+[node name="HBox" type="HBoxContainer" parent="SimCluster"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 12
-text = "Drag globe to rotate. Place outposts on blue territory."
+theme_override_constants/separation = 6
 
-[node name="HBox" type="HBoxContainer" parent="HUD"]
-layout_mode = 2
-
-[node name="StatusLabel" type="Label" parent="HUD/HBox"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "World Conquest"
-
-[node name="PauseButton" type="Button" parent="HUD/HBox"]
+[node name="PauseButton" type="Button" parent="SimCluster/HBox"]
+custom_minimum_size = Vector2(72, 36)
 layout_mode = 2
 text = "Pause"
 
-[node name="SpeedButton" type="Button" parent="HUD/HBox"]
+[node name="SpeedButton" type="Button" parent="SimCluster/HBox"]
+custom_minimum_size = Vector2(52, 36)
 layout_mode = 2
-text = "▶ x1"
+text = "x1"
 
-[node name="SpawnerButton" type="Button" parent="HUD/HBox"]
+[node name="OutpostPinCard" type="PanelContainer" parent="."]
+visible = false
+z_index = 45
+layout_mode = 0
+offset_left = 20.0
+offset_top = 80.0
+offset_right = 196.0
+offset_bottom = 156.0
+
+[node name="VBox" type="VBoxContainer" parent="OutpostPinCard"]
 layout_mode = 2
-toggle_mode = true
-text = "Outpost (400)"
+theme_override_constants/separation = 4
 
-[node name="BarracksButton" type="Button" parent="HUD/HBox"]
+[node name="ModeButton" type="Button" parent="OutpostPinCard/VBox"]
+custom_minimum_size = Vector2(160, 28)
 layout_mode = 2
-toggle_mode = true
-text = "Barracks (400)"
+text = "Pump"
 
-[node name="HangarButton" type="Button" parent="HUD/HBox"]
-layout_mode = 2
-toggle_mode = true
-text = "Hangar (400)"
-
-[node name="CorridorLinkButton" type="Button" parent="HUD/HBox"]
-layout_mode = 2
-toggle_mode = true
-text = "Land Bridge (250)"
-
-[node name="InspectButton" type="Button" parent="HUD/HBox"]
-layout_mode = 2
-toggle_mode = true
-text = "Inspect"
-
-[node name="PaintButton" type="Button" parent="HUD/HBox"]
-layout_mode = 2
-toggle_mode = true
-text = "Paint"
-
-[node name="ModeButton" type="Button" parent="HUD/HBox"]
-layout_mode = 2
-text = "Mode: Pump"
-
-[node name="SurgeButton" type="Button" parent="HUD/HBox"]
+[node name="SurgeButton" type="Button" parent="OutpostPinCard/VBox"]
+custom_minimum_size = Vector2(160, 28)
 layout_mode = 2
 text = "Surge"
 
-[node name="TileProbeLabel" type="Label" parent="HUD"]
+[node name="InspectCard" type="PanelContainer" parent="."]
+visible = false
+z_index = 44
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -280.0
+offset_top = 56.0
+offset_right = -12.0
+offset_bottom = 300.0
+grow_horizontal = 0
+mouse_filter = 2
+
+[node name="InspectVBox" type="VBoxContainer" parent="InspectCard"]
 layout_mode = 2
+theme_override_constants/separation = 6
+mouse_filter = 2
+
+[node name="InspectTitle" type="Label" parent="InspectCard/InspectVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
 theme_override_font_sizes/font_size = 11
+text = "Inspect"
+
+[node name="InspectLabel" type="Label" parent="InspectCard/InspectVBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
 text = ""
+autowrap_mode = 3
+
+[node name="ClaimLabel" type="Label" parent="InspectCard/InspectVBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = ""
+autowrap_mode = 3
+
+[node name="PressureMeters" type="Control" parent="InspectCard/InspectVBox"]
+custom_minimum_size = Vector2(244, 14)
+layout_mode = 2
+mouse_filter = 2
+
+[node name="Track" type="ColorRect" parent="InspectCard/InspectVBox/PressureMeters"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(0.18, 0.22, 0.28, 0.7)
+
+[node name="BlueFill" type="ColorRect" parent="InspectCard/InspectVBox/PressureMeters"]
+layout_mode = 1
+anchors_preset = 9
+anchor_bottom = 1.0
+offset_right = 0.0
+mouse_filter = 2
+color = Color(0.22, 0.55, 0.95, 0.92)
+
+[node name="RedFill" type="ColorRect" parent="InspectCard/InspectVBox/PressureMeters"]
+layout_mode = 1
+anchors_preset = 11
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 0.0
+grow_horizontal = 0
+mouse_filter = 2
+color = Color(0.92, 0.32, 0.26, 0.92)
+
+[node name="PressureCaption" type="Label" parent="InspectCard/InspectVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 11
+text = "Blue 0.00   Red 0.00"
+
+[node name="ElevBar" type="ProgressBar" parent="InspectCard/InspectVBox"]
+custom_minimum_size = Vector2(244, 5)
+layout_mode = 2
+max_value = 100.0
+show_percentage = false
+mouse_filter = 2
+
+[node name="ElevCaption" type="Label" parent="InspectCard/InspectVBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 11
+text = "Elev 0 / 100   H 0.0"
 
 [node name="PerfHudLabel" type="Label" parent="."]
 visible = false
@@ -273,13 +458,14 @@ text = ""
 
 [node name="EndOverlay" type="Control" parent="."]
 visible = false
+z_index = 60
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-mouse_filter = 0
+mouse_filter = 2
 
 [node name="Dim" type="ColorRect" parent="EndOverlay"]
 layout_mode = 1
@@ -289,19 +475,19 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-color = Color(0.02, 0.03, 0.05, 0.75)
+color = Color(0.02, 0.03, 0.05, 0.32)
 
-[node name="ScrollCenter" type="CenterContainer" parent="EndOverlay"]
+[node name="ScrollCenter" type="PanelContainer" parent="EndOverlay"]
 layout_mode = 1
-anchors_preset = 15
+anchors_preset = 12
+anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
+offset_top = -196.0
 grow_horizontal = 2
-grow_vertical = 2
-mouse_filter = 2
+grow_vertical = 0
 
 [node name="Scroll" type="ScrollContainer" parent="EndOverlay/ScrollCenter"]
-custom_minimum_size = Vector2(920, 0)
 layout_mode = 2
 horizontal_scroll_mode = 0
 vertical_scroll_mode = 2
@@ -317,7 +503,7 @@ theme_override_constants/separation = 16
 [node name="Headline" type="Label" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 26
-text = "Battle Over"
+text = "You hold Earth"
 horizontal_alignment = 1
 
 [node name="Reason" type="Label" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
@@ -328,7 +514,13 @@ text = ""
 horizontal_alignment = 1
 autowrap_mode = 2
 
+[node name="DetailsButton" type="Button" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+layout_mode = 2
+flat = true
+text = "Details"
+
 [node name="KPIStrip" type="HBoxContainer" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+visible = false
 layout_mode = 2
 theme_override_constants/separation = 10
 alignment = 1
@@ -466,6 +658,7 @@ text = "Bombers"
 horizontal_alignment = 1
 
 [node name="CompareRow" type="HBoxContainer" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+visible = false
 layout_mode = 2
 theme_override_constants/separation = 20
 
@@ -544,6 +737,7 @@ theme_override_font_sizes/font_size = 12
 text = "Minerals —"
 
 [node name="ForcesRow" type="Label" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+visible = false
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
 theme_override_font_sizes/font_size = 12
@@ -551,6 +745,7 @@ text = "Forces —"
 horizontal_alignment = 1
 
 [node name="MetaRow" type="Label" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+visible = false
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
 theme_override_font_sizes/font_size = 11
@@ -563,16 +758,28 @@ theme_override_constants/separation = 16
 alignment = 1
 
 [node name="PlayAgainButton" type="Button" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/EndButtons"]
+custom_minimum_size = Vector2(168, 44)
 layout_mode = 2
 text = "Play Again"
 
 [node name="SameMapButton" type="Button" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/EndButtons"]
+custom_minimum_size = Vector2(168, 44)
 layout_mode = 2
 text = "Same Map"
 
 [node name="MenuButton" type="Button" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox/EndButtons"]
+custom_minimum_size = Vector2(120, 44)
 layout_mode = 2
 text = "Menu"
+
+[node name="EndButtonHints" type="Label" parent="EndOverlay/ScrollCenter/Scroll/EndDashPanel/EndVBox"]
+visible = false
+layout_mode = 2
+theme_override_colors/font_color = Color(0.55, 0.6, 0.68, 1)
+theme_override_font_sizes/font_size = 11
+text = "Play Again — new seed, same theater    Same Map — new capital on this terrain    Menu — leave the war room"
+horizontal_alignment = 1
+autowrap_mode = 2
 
 [node name="LoadingOverlay" type="Control" parent="."]
 z_index = 50
@@ -620,13 +827,13 @@ horizontal_alignment = 1
 [node name="Subtitle" type="Label" parent="LoadingOverlay/Center/LoadPanel/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.55, 0.65, 0.75, 1)
-text = "Preparing Earth globe…"
+text = "Lighting the globe…"
 horizontal_alignment = 1
 
 [node name="StatusLabel" type="Label" parent="LoadingOverlay/Center/LoadPanel/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.75, 0.82, 0.9, 1)
-text = "Starting…"
+text = "Baking terrain…"
 horizontal_alignment = 1
 
 [node name="ProgressBar" type="ProgressBar" parent="LoadingOverlay/Center/LoadPanel/VBox"]
@@ -635,41 +842,90 @@ layout_mode = 2
 max_value = 100.0
 show_percentage = false
 
-[node name="DeployBanner" type="PanelContainer" parent="LoadingOverlay"]
+[node name="StatusLine" type="Label" parent="LoadingOverlay"]
+visible = false
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 24.0
+offset_top = -56.0
+offset_right = -24.0
+offset_bottom = -28.0
+grow_horizontal = 2
+grow_vertical = 0
+theme_override_font_sizes/font_size = 14
+text = "Baking terrain…"
+horizontal_alignment = 1
+mouse_filter = 2
+
+[node name="DeployTitle" type="Label" parent="LoadingOverlay"]
 visible = false
 layout_mode = 1
 anchors_preset = 10
 anchor_right = 1.0
-offset_left = 96.0
-offset_top = 52.0
-offset_right = -96.0
-offset_bottom = 108.0
+offset_top = 56.0
+offset_bottom = 84.0
 grow_horizontal = 2
+theme_override_font_sizes/font_size = 15
+text = "Choose your capital — click land"
+horizontal_alignment = 1
+mouse_filter = 2
+
+[node name="DeployBanner" type="PanelContainer" parent="LoadingOverlay"]
+visible = false
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -110.0
+offset_top = -88.0
+offset_right = 110.0
+offset_bottom = -40.0
+grow_horizontal = 0
+grow_vertical = 0
 mouse_filter = 2
 
 [node name="DeployRow" type="HBoxContainer" parent="LoadingOverlay/DeployBanner"]
 layout_mode = 2
-theme_override_constants/separation = 16
-alignment = 1
+theme_override_constants/separation = 0
 
-[node name="DeployTitle" type="Label" parent="LoadingOverlay/DeployBanner/DeployRow"]
+[node name="DeployCommit" type="Control" parent="LoadingOverlay/DeployBanner/DeployRow"]
+custom_minimum_size = Vector2(220, 48)
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_font_sizes/font_size = 18
-text = "Choose your capital — click land"
+
+[node name="DeployTimer" type="ProgressBar" parent="LoadingOverlay/DeployBanner/DeployRow/DeployCommit"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+max_value = 100.0
+value = 100.0
+show_percentage = false
 mouse_filter = 2
+
+[node name="DeployButton" type="Button" parent="LoadingOverlay/DeployBanner/DeployRow/DeployCommit"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+flat = true
+text = "Deploy"
 
 [node name="DeployCountdown" type="Label" parent="LoadingOverlay/DeployBanner/DeployRow"]
+visible = false
 layout_mode = 2
-theme_override_font_sizes/font_size = 20
-text = "0:05"
-horizontal_alignment = 1
+theme_override_font_sizes/font_size = 16
+text = "0:10"
 mouse_filter = 2
-
-[node name="DeployButton" type="Button" parent="LoadingOverlay/DeployBanner/DeployRow"]
-custom_minimum_size = Vector2(96, 0)
-layout_mode = 2
-text = "Deploy"
 
 [node name="DeployHint" type="Label" parent="LoadingOverlay"]
 visible = false
@@ -679,9 +935,9 @@ anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 24.0
-offset_top = -48.0
+offset_top = -36.0
 offset_right = -24.0
-offset_bottom = -16.0
+offset_bottom = -8.0
 grow_horizontal = 2
 grow_vertical = 0
 theme_override_colors/font_color = Color(0.78, 0.86, 0.94, 1)
