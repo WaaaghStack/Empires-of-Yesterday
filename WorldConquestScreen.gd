@@ -18,7 +18,7 @@ const EnemyStrategyLib := preload("res://EnemyStrategy.gd")
 const EconomyLib := preload("res://EconomyLib.gd")
 const WorldDatasetAssertLib := preload("res://WorldDatasetAssert.gd")
 const BattleTerritoryRustBackendLib := preload("res://BattleTerritoryRustBackend.gd")
-const PresentationApplyLib := preload("res://WorldConquestPresentationApply.gd")
+# PresentationApply / PresentationTxn: QA-only. Live paint is SCD1 (see Scd1DomainPullLib).
 const Scd1DomainPullLib := preload("res://Scd1DomainPull.gd")
 
 const WorldPackLibScript := preload("res://WorldPackLib.gd")
@@ -188,12 +188,14 @@ var _road_class_by_cell: Dictionary = {}
 var _road_shoulders_by_center: Dictionary = {}
 var _soldier_visual_dirty: bool = true
 var _soldier_visual_clock: float = 0.0
+var _wallet_visual_clock: float = 0.0
+var _structures_visual_clock: float = 0.0
 var _bomber_visual_dirty: bool = true
 var _bomber_visual_clock: float = 0.0
-## Structure render cache apply deferred into pull_presentation_delta (live Rust only).
+## Structure render cache merge for SCD1 structures pull (live Rust). PresentationTxn retired.
 var _presentation_structures_dirty: bool = false
 var _presentation_structure_merge: Dictionary = {}
-## Counts full structure snapshots requested via presentation pull (perf / QA instrumentation).
+## Counts full structure snapshots requested via SCD1 / legacy presentation pull (perf / QA).
 var _structure_snapshot_pull_count: int = 0
 var route_planner: RoutePlannerLib
 var _route_request_id: int = -1
@@ -447,6 +449,10 @@ func _bootstrap_async() -> void:
 	_loading = false
 	_reset_run_metrics()
 	_apply_ai_vs_ai_mode()
+	if ActivityTrace != null and ActivityTrace.has_method("begin_match"):
+		ActivityTrace.begin_match(
+			"ai_vs_ai" if RunState.is_ai_vs_ai() else "play"
+		)
 	if paint_button:
 		paint_button.visible = not RunState.is_ai_vs_ai()
 		paint_button.disabled = false
@@ -1025,7 +1031,10 @@ func _process(delta: float) -> void:
 		var spawner_t: int = 0
 		if _frame_profiler != null:
 			spawner_t = _frame_profiler.begin_phase("spawner_sync")
-		if territory_sim.tile_control != null:
+		if _live_rust_presentation() and territory_sim.rust_field != null:
+			# Authority: structure store → kernel spawners (no Godot _placed_spawners push).
+			territory_sim.rust_field.sync_spawners_from_structure_store()
+		elif territory_sim.tile_control != null:
 			territory_sim.tile_control.sync_placed_spawners_from_map(battle_data)
 			if territory_sim.rust_live_ready and territory_sim.rust_field != null:
 				territory_sim.rust_field.sync_spawners_from(territory_sim.tile_control)
@@ -1223,6 +1232,31 @@ func _apply_active_set_soft_cap(cap: int) -> void:
 func _end_process_profiler_frame(record_sample: bool = true) -> void:
 	if _frame_profiler != null:
 		_frame_profiler.end_frame(record_sample)
+		if (
+			not _loading
+			and ActivityTrace != null
+			and ActivityTrace.has_method("tick_fps")
+		):
+			var phases: Dictionary = {}
+			if _frame_profiler.has_method("last_phase_ms"):
+				phases = _frame_profiler.last_phase_ms()
+			ActivityTrace.tick_fps(
+				get_process_delta_time(),
+				_frame_profiler.prior_frame_ms(),
+				{
+					"sim_steps": _last_frame_sim_steps,
+					"structures": (
+						battle_data.placed_structures.size() if battle_data != null else 0
+					),
+					"bottleneck": (
+						_frame_profiler.likely_bottleneck()
+						if _frame_profiler.has_method("likely_bottleneck")
+						else ""
+					),
+					"phase_sim": snappedf(float(phases.get("sim", 0.0)), 0.01),
+					"phase_pres": snappedf(float(phases.get("presentation", 0.0)), 0.01),
+				}
+			)
 
 
 func request_outpost_visual_refresh(roads: bool, markers: bool, sid: int = -1) -> void:
@@ -1536,18 +1570,40 @@ func _commit_placed_structure(
 		st["click_gy"] = click_grid.y
 	var placed_sid: int = int(st.get("id", -1))
 	_next_structure_id += 1
-	if territory_sim != null and territory_sim.rust_field != null:
+	# One live path: GUI/AI intent → Rust structure_store upsert (txn) → SCD1 structures apply.
+	# Never append to placed_structures under live — cache is apply-only.
+	if _live_rust_presentation():
+		if (
+			territory_sim.rust_field == null
+			or not territory_sim.rust_field.structure_store_capable()
+		):
+			push_error("live place blocked: structure store not capable (sid=%d)" % placed_sid)
+			return -1
 		territory_sim.rust_field.structure_store_upsert(st)
-	if _structure_authority_active():
-		_pull_structure_render_cache({placed_sid: st})
+		_pull_structure_render_cache()
+		if _find_structure_by_sid(placed_sid).is_empty():
+			push_error(
+				"live place SCD1 miss: sid=%d not in placed_structures after structures pull"
+				% placed_sid
+			)
+			return -1
+	elif territory_sim != null and territory_sim.rust_field != null:
+		territory_sim.rust_field.structure_store_upsert(st)
+		if _structure_authority_active():
+			_pull_structure_render_cache()
+		else:
+			battle_data.placed_structures.append(st)
 	else:
 		battle_data.placed_structures.append(st)
 	# Every kind bumps the version: R1 haul hubs are "HQ + any ACTIVE structure", so the resource
 	# link cache must see barracks/hangar placements too.
 	_structure_sources_version += 1
 	if kind == OutpostBuildLib.KIND_SPAWNER:
-		# Instantly ACTIVE: let next frame's deferred sync light up the spawner aura.
-		_spawners_pending_sync = true
+		# Live: Rust sync_spawners_from_structures already ran on upsert. Non-live: defer Godot push.
+		if _live_rust_presentation():
+			_spawners_pending_sync = false
+		else:
+			_spawners_pending_sync = true
 	if team == BattleTileControlLib.OWNER_FRIENDLY and kind == OutpostBuildLib.KIND_SPAWNER:
 		_clarity_first_outpost_placed = true
 	_road_network_version += 1
@@ -1558,6 +1614,18 @@ func _commit_placed_structure(
 	# Bridge list is always empty under R1; this call still refreshes claimable + owner visual.
 	_sync_bridge_corridors_to_sim(false, true, true)
 	_refresh_outpost_visuals(false, true, [], [placed_sid])
+	if ActivityTrace != null and ActivityTrace.has_method("txn"):
+		ActivityTrace.txn(
+			"place",
+			{
+				"sid": placed_sid,
+				"kind": kind,
+				"team": team,
+				"gx": landing.x,
+				"gy": landing.y,
+				"live": 1 if _live_rust_presentation() else 0,
+			}
+		)
 	return placed_sid
 
 
@@ -1770,21 +1838,42 @@ func _warn_slow_owner_overlay_path(context: String) -> void:
 	RunLog.warn("WorldDataset: slow owner overlay path (%s) during Rust live play" % context)
 
 
+## Live owner paint must go through SCD1 territory pulls — never get_owner_display_r8 / overlay delta.
+func _scd1_repaint_territory(force_reason: String = "") -> void:
+	if not _live_rust_presentation():
+		return
+	if _scd1_pull == null:
+		_scd1_pull = Scd1DomainPullLib.new()
+	_apply_scd1_territory(_scd1_pull.pull_domain(territory_sim, "territory", force_reason))
+
+
+## Display-only depth tint (not authority). Keep off the SCD1 owner path.
+func _update_depth_tint_only() -> void:
+	if (
+		not CFG.OVERLAY_DEPTH_TINT
+		or territory_sim == null
+		or not territory_sim.rust_live_ready
+		or territory_sim.rust_field == null
+		or not territory_sim.rust_field.has_method("get_pressure_depth_r8")
+		or globe_map == null
+	):
+		return
+	var depth_bytes: PackedByteArray = territory_sim.rust_field.get_pressure_depth_r8(
+		CFG.PRESSURE_VIS_REF
+	)
+	if depth_bytes.size() > 0:
+		globe_map.apply_ownership_depth_bytes(depth_bytes)
+
+
 func _apply_owner_visual_from_backends(defer_gpu: bool = false) -> void:
 	if globe_map == null or not CFG.OVERLAY_OWNERS_ONLY:
 		return
-	if (
-		territory_sim != null
-		and territory_sim.rust_live_ready
-		and territory_sim.rust_field != null
-		and territory_sim.rust_field.has_method("get_owner_display_r8")
-	):
-		var bytes: PackedByteArray = territory_sim.rust_field.get_owner_display_r8()
-		if bytes.size() > 0:
-			globe_map.apply_ownership_display_bytes(bytes)
-			if defer_gpu and _outpost_construction_queue != null:
-				_outpost_construction_queue.request_gpu_upload()
-			return
+	# Live: authority→SCD1 only (txn_scd1_tech_debt). No parallel R8 snap.
+	if _live_rust_presentation():
+		_scd1_repaint_territory("")
+		if defer_gpu and _outpost_construction_queue != null:
+			_outpost_construction_queue.request_gpu_upload()
+		return
 	var owners: PackedByteArray = _ownership_overlay_source()
 	if not owners.is_empty():
 		_warn_slow_owner_overlay_path("apply_owner_visual_from_backends")
@@ -1797,33 +1886,20 @@ func _update_tile_overlay(force: bool) -> void:
 	if territory_sim == null or globe_map == null:
 		return
 	if CFG.OVERLAY_OWNERS_ONLY:
-		# Live SCD1 already paints ownership every frame — do not full-refresh owners
-		# here (that rebuilds the border mask and tanks FPS). Depth tint only.
-		var live_pres: bool = _live_rust_presentation()
-		if force or not live_pres:
-			var owners: PackedByteArray = _ownership_overlay_source()
-			if not owners.is_empty():
-				if (
-					territory_sim.rust_live_ready
-					and territory_sim.rust_field != null
-					and territory_sim.rust_field.has_method("get_owner_display_r8")
-				):
-					var bytes: PackedByteArray = territory_sim.rust_field.get_owner_display_r8()
-					if bytes.size() > 0:
-						globe_map.apply_ownership_display_bytes(bytes)
-					else:
-						_warn_slow_owner_overlay_path("update_tile_overlay")
-						globe_map.apply_ownership_overlay(owners)
-				else:
-					_warn_slow_owner_overlay_path("update_tile_overlay_cpu")
-					globe_map.apply_ownership_overlay(owners)
-		if CFG.OVERLAY_DEPTH_TINT and territory_sim.rust_live_ready and territory_sim.rust_field != null:
-			if territory_sim.rust_field.has_method("get_pressure_depth_r8"):
-				var depth_bytes: PackedByteArray = territory_sim.rust_field.get_pressure_depth_r8(
-					CFG.PRESSURE_VIS_REF
-				)
-				if depth_bytes.size() > 0:
-					globe_map.apply_ownership_depth_bytes(depth_bytes)
+		# Live: SCD1 owns owner paint. force → SCD1 territory pull; idle ticks → depth tint only.
+		if _live_rust_presentation():
+			if force:
+				var reason := ""
+				if _scd1_pull == null or not _scd1_pull._seeded:
+					reason = "start"
+				_scd1_repaint_territory(reason)
+			_update_depth_tint_only()
+			return
+		var owners: PackedByteArray = _ownership_overlay_source()
+		if not owners.is_empty():
+			_warn_slow_owner_overlay_path("update_tile_overlay_cpu")
+			globe_map.apply_ownership_overlay(owners)
+		_update_depth_tint_only()
 		return
 	if territory_sim.tile_control == null:
 		return
@@ -1849,6 +1925,9 @@ func _update_tile_overlay(force: bool) -> void:
 
 
 func _tick_overlay_owner_reconcile(_delta: float) -> void:
+	# Live SCD1 is the sole owner paint path — do not sample Rust owners into the globe cache.
+	if _live_rust_presentation():
+		return
 	if (
 		not CFG.OVERLAY_OWNERS_ONLY
 		or _battle_finished
@@ -1911,6 +1990,9 @@ func _live_rust_presentation() -> bool:
 
 
 func _enqueue_ownership_overlay_delta() -> void:
+	# Parallel owner feed — forbidden under live SCD1 (use _flush_live_presentation_delta).
+	if _live_rust_presentation():
+		return
 	if globe_map == null or territory_sim == null or _outpost_construction_queue == null:
 		return
 	if not CFG.OVERLAY_OWNERS_ONLY:
@@ -1951,23 +2033,38 @@ func _flush_live_presentation_delta(delta: float) -> void:
 	if _scd1_pull == null:
 		_scd1_pull = Scd1DomainPullLib.new()
 	var sim = territory_sim
-	# Non-unit domains every frame. Agents/bombers only when the visual rate is due —
-	# otherwise last_version advances on unused pulls and intermediate moves are dropped.
+	# Territory: every frame (owner paint). Wallet/structures: rate-limited (income ticks
+	# every sim step would otherwise SCD1-pull wallet every frame = txn spam).
+	# Agents/bombers: visual rate; dirty flags force immediate pull.
 	_apply_scd1_territory(_scd1_pull.pull_domain(sim, "territory", ""))
-	_apply_scd1_structures(_scd1_pull.pull_domain(sim, "structures", ""))
-	# R1: roads domain retired from live paint (empty stub in Rust; do not pull).
-	_apply_scd1_wallet(_scd1_pull.pull_domain(sim, "wallet", ""))
+	_structures_visual_clock += delta
+	_wallet_visual_clock += delta
 	_soldier_visual_clock += delta
 	_bomber_visual_clock += delta
-	# Under frame pressure, halve agent/bomber pull rates to cut SCD1 thrash.
 	var prior_ms: float = 0.0
 	if _frame_profiler != null:
 		prior_ms = _frame_profiler.prior_frame_ms()
+	var structures_hz: float = CFG.STRUCTURES_VISUAL_UPDATES_PER_SEC
+	var wallet_hz: float = CFG.WALLET_VISUAL_UPDATES_PER_SEC
 	var soldier_hz: float = CFG.SOLDIER_VISUAL_UPDATES_PER_SEC
 	var bomber_hz: float = CFG.BOMBER_VISUAL_UPDATES_PER_SEC
 	if prior_ms > CFG.FRAME_MS_SOFT_CAP_PREEMPT:
+		structures_hz *= 0.5
+		wallet_hz *= 0.5
 		soldier_hz *= 0.5
 		bomber_hz *= 0.5
+	# Place/destroy already same-frame pull via _pull_structure_render_cache; dirty covers the rest.
+	if (
+		_presentation_structures_dirty
+		or _structures_visual_clock >= 1.0 / maxf(0.5, structures_hz)
+	):
+		_structures_visual_clock = 0.0
+		_presentation_structures_dirty = false
+		_apply_scd1_structures(_scd1_pull.pull_domain(sim, "structures", ""))
+	if _wallet_visual_clock >= 1.0 / maxf(0.5, wallet_hz):
+		_wallet_visual_clock = 0.0
+		_apply_scd1_wallet(_scd1_pull.pull_domain(sim, "wallet", ""))
+	# R1: roads domain retired from live paint (empty stub in Rust; do not pull).
 	var soldier_due: bool = (
 		territory_sim.agents_ready()
 		and (
@@ -1990,7 +2087,6 @@ func _flush_live_presentation_delta(delta: float) -> void:
 		_bomber_visual_clock = 0.0
 		_bomber_visual_dirty = false
 		_apply_scd1_bombers(_scd1_pull.pull_domain(sim, "bombers", ""))
-	_presentation_structures_dirty = false
 	_presentation_structure_merge.clear()
 
 
@@ -2014,12 +2110,13 @@ func _apply_scd1_territory(batch: Dictionary) -> void:
 		bool(batch.get("full", false))
 		or idxs.size() >= CFG.OVERLAY_FULL_SEED_QUEUE_THRESHOLD
 	)
-	if one_shot and globe_map != null and territory_sim != null and territory_sim.rust_field != null:
+	# Apply from SCD1 payload only — do not bypass with get_owner_display_r8 (txn→SCD1 contract).
+	if one_shot and globe_map != null:
 		if _outpost_construction_queue != null:
 			_outpost_construction_queue.clear_overlay_queue()
-		var display_bytes: PackedByteArray = territory_sim.rust_field.get_owner_display_r8()
-		if not display_bytes.is_empty():
-			globe_map.apply_ownership_display_bytes(display_bytes)
+		if has_display_r8 and bool(batch.get("full", false)):
+			# Full pull ships display_r8 in cell order 0..n-1.
+			globe_map.apply_ownership_display_bytes(display_r8)
 			if _outpost_construction_queue != null:
 				_outpost_construction_queue.request_gpu_upload()
 			if globe_map.flush_pending_owner_gpu_upload(true):
@@ -2588,6 +2685,9 @@ func _sync_claimable_to_backends(
 ) -> void:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return
+	# Live + grid authority: claimable is Rust-owned — never push Godot mask as truth.
+	if _live_rust_presentation() and territory_sim.grid_authority_active():
+		rust_already_authoritative = true
 	var tc := territory_sim.tile_control
 	var live_claimable: int = territory_sim.claimable_tile_count_live()
 	if live_claimable > 0:
@@ -2675,8 +2775,12 @@ func _on_rust_builder_cell_arrival(ev_var: Variant) -> void:
 	var path_sid: int = int(ev.get("sid", -1))
 	var kind: String = str(ev.get("kind", ""))
 	var seg_from: int = int(ev.get("seg_from_idx", 0))
-	# SCD1: under live builder authority, path_built comes only from domain pulls — do not invent.
-	if _builder_authority_active() or _structure_authority_active():
+	# SCD1: under live presentation, path_built comes only from domain pulls — do not invent.
+	if (
+		_live_rust_presentation()
+		or _builder_authority_active()
+		or _structure_authority_active()
+	):
 		return
 	var st: Dictionary = _find_structure_by_sid(path_sid)
 	if not st.is_empty():
@@ -2702,7 +2806,11 @@ func _on_rust_builder_path_completed(ev_var: Variant) -> void:
 		_resource_links_dirty = true
 		_structure_sources_version += 1
 	# SCD1 live: do not invent path_built/state on Godot cache — domain pull applies Rust truth.
-	if _builder_authority_active() or _structure_authority_active():
+	if (
+		_live_rust_presentation()
+		or _builder_authority_active()
+		or _structure_authority_active()
+	):
 		if _outpost_construction_queue != null:
 			_outpost_construction_queue.on_path_completed(done_sid, gx, gy, team, is_corridor_link)
 		return
@@ -2730,28 +2838,26 @@ func _on_rust_builder_path_completed(ev_var: Variant) -> void:
 func _pull_structure_render_cache(merge_by_sid: Dictionary = {}) -> void:
 	## SCD1 live: never get_structure_snapshot dual-feed. All callers (place/destroy/world-edit/builder)
 	## hit this choke-point and are redirected to versioned domain pull (REQUEST lock).
-	if _live_rust_presentation() and _structure_authority_active():
-		# Same-frame paint: merge any local placement rows, then SCD1 structures pull.
-		for sid_k in merge_by_sid.keys():
-			var row = merge_by_sid[sid_k]
-			if row is Dictionary:
-				_scd1_merge_structure_row(row as Dictionary)
+	## Live apply-only: do not pre-merge Godot rows into placed_structures before the pull.
+	if _live_rust_presentation():
 		_presentation_structures_dirty = true
-		for sid_k2 in merge_by_sid.keys():
-			_presentation_structure_merge[sid_k2] = merge_by_sid[sid_k2]
+		_presentation_structure_merge.clear()
 		if _scd1_pull == null:
 			_scd1_pull = Scd1DomainPullLib.new()
 		if territory_sim != null:
 			var batch: Dictionary = _scd1_pull.pull_domain(territory_sim, "structures", "")
 			_apply_scd1_structures(batch)
 		return
-	# Non-live / CPU parity only.
+	# Non-live / CPU parity only (merge_by_sid allowed off the live path).
 	if territory_sim != null:
 		territory_sim.pull_structure_render_cache(merge_by_sid)
 
 
-## Upsert one structure dict into battle_data.placed_structures by id (SCD1 same-frame place).
+## Upsert one structure dict into battle_data.placed_structures by id.
+## Live SCD1 path must not call this for place — pull apply is the sole cache writer.
 func _scd1_merge_structure_row(row: Dictionary) -> void:
+	if _live_rust_presentation():
+		return
 	if battle_data == null:
 		return
 	var sid: int = int(row.get("id", -1))
@@ -2775,7 +2881,10 @@ func _request_structure_presentation_refresh(merge_by_sid: Dictionary = {}) -> v
 
 
 ## Apply structure field transactions from Rust change feed (no full table dump).
+## Live SCD1: forbidden — structures come only from domain pull apply.
 func _apply_structure_field_txn(pres: Dictionary) -> void:
+	if _live_rust_presentation():
+		return
 	if battle_data == null or pres.is_empty():
 		return
 	var sids: PackedInt32Array = pres.get("path_built_sids", PackedInt32Array())
@@ -3658,6 +3767,13 @@ func _apply_building_timer_result(result: Dictionary) -> void:
 
 
 func _emit_builder_cell_arrival(st: Dictionary, seg_from_idx: int) -> void:
+	# Live / builder / structure authority: path_built is Rust→SCD1 only — do not invent on Godot cache.
+	if (
+		_live_rust_presentation()
+		or _builder_authority_active()
+		or _structure_authority_active()
+	):
+		return
 	st["path_built"] = BuilderAgentLib.path_built_after_seg(seg_from_idx)
 	var kind: String = str(st.get("kind", ""))
 	var path_sid: int = int(st.get("id", -1))
@@ -3678,6 +3794,15 @@ func _emit_builder_path_completed(st: Dictionary, is_corridor_link: bool) -> voi
 	var gx: int = int(st.get("gx", 0))
 	var gy: int = int(st.get("gy", 0))
 	var team: int = int(st.get("team", BattleTileControlLib.OWNER_FRIENDLY))
+	# Live / authority: do not invent path_built/state on Godot — SCD1 apply after Rust command.
+	if (
+		_live_rust_presentation()
+		or _builder_authority_active()
+		or _structure_authority_active()
+	):
+		if _outpost_construction_queue != null:
+			_outpost_construction_queue.on_path_completed(done_sid, gx, gy, team, is_corridor_link)
+		return
 	if territory_sim != null and territory_sim.rust_field != null:
 		territory_sim.rust_field.structure_store_patch_path_built(
 			done_sid, float(st.get("path_built", -1.0))
@@ -3848,9 +3973,12 @@ func _complete_corridor_link_by_id(sid: int) -> void:
 	battle_data.placed_structures.remove_at(idx)
 	if territory_sim != null and territory_sim.rust_field != null:
 		territory_sim.rust_field.structure_store_remove(sid)
-		# Sync store from map (structures without this corridor + bridge_corridors list). Avoid full
-		# pull_structure_render_cache — it rewrites placed_structures and is expensive mid-game.
-		territory_sim.rust_field.sync_structure_store_from_map(battle_data)
+		# Live: store already authoritative after remove — do not push Godot map back into Rust.
+		# Non-live: rebuild store from map (structures without this corridor + bridge_corridors).
+		if not _live_rust_presentation():
+			territory_sim.rust_field.sync_structure_store_from_map(battle_data)
+		elif _structure_authority_active():
+			_pull_structure_render_cache()
 	# Claimable / beachhead: force once for this corridor (not every sim tick).
 	_sync_bridge_corridors_to_sim(false, true, true)
 	_extend_beachhead_at_landing(st, gx, gy)
@@ -4335,13 +4463,21 @@ func _sync_active_spawners_to_sim() -> void:
 	if territory_sim == null or territory_sim.tile_control == null:
 		return
 	var tc := territory_sim.tile_control
+	if _live_rust_presentation() and territory_sim.rust_field != null:
+		# Authority: structure store → kernel spawners. Do not push Godot _placed_spawners.
+		territory_sim.rust_field.sync_spawners_from_structure_store()
+		var live_claimable: int = territory_sim.claimable_tile_count_live()
+		if live_claimable > 0:
+			territory_sim.claimable_tiles = live_claimable
+			_claimable_tiles = live_claimable
+		return
 	tc.sync_placed_spawners_from_map(battle_data)
 	if not territory_sim.grid_authority_active():
 		tc.sync_bridge_corridors_from_map(battle_data, true)
-	var live_claimable: int = territory_sim.claimable_tile_count_live()
-	if live_claimable > 0:
-		territory_sim.claimable_tiles = live_claimable
-		_claimable_tiles = live_claimable
+	var live_claimable2: int = territory_sim.claimable_tile_count_live()
+	if live_claimable2 > 0:
+		territory_sim.claimable_tiles = live_claimable2
+		_claimable_tiles = live_claimable2
 	if territory_sim.rust_live_ready and territory_sim.rust_field != null:
 		if not territory_sim.grid_authority_active():
 			territory_sim.rust_field.sync_claimable_from(tc, battle_data, true)

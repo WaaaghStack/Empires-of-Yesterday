@@ -562,6 +562,8 @@ impl TerritorySim {
         let v = self.domain_book.touch(DomainId::Structures);
         record.version = v;
         self.structure_store.upsert(record);
+        // Keep inject points derived from structure store (txn → SCD1), not Godot push.
+        self.sync_spawners_from_structures();
         true
     }
 
@@ -570,6 +572,7 @@ impl TerritorySim {
         if self.structure_store.structures.contains_key(&sid) {
             let v = self.domain_book.touch(DomainId::Structures);
             self.structure_store.remove_with_tombstone(sid, v);
+            self.sync_spawners_from_structures();
         }
     }
 
@@ -1639,6 +1642,9 @@ impl TerritorySim {
         }
     }
 
+    /// Rebuild kernel spawners from the structure store (authority). Prefer this over
+    /// Godot pushing `_placed_spawners` under live WorldDataset.
+    #[func]
     fn sync_spawners_from_structures(&mut self) {
         let Some(kernel) = self.kernel.as_mut() else {
             return;

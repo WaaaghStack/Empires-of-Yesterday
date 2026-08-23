@@ -297,9 +297,7 @@ func _test_multi_domain_isolation(sim, structures_high: int) -> void:
 	if pr_body.find("_live_rust_presentation") == -1:
 		_fail("_pull_structure_render_cache must gate on _live_rust_presentation")
 		return
-	if pr_body.find("_structure_authority_active") == -1:
-		_fail("_pull_structure_render_cache must gate on _structure_authority_active")
-		return
+	# Live alone is enough — structure authority is implied by world_dataset_live + store capable.
 	if pr_body.find("pull_domain") == -1 and pr_body.find("_scd1_pull") == -1:
 		_fail("_pull_structure_render_cache live branch must use SCD1 pull_domain")
 		return

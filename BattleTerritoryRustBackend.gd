@@ -321,7 +321,29 @@ func scd1_note_full_pull(reason: String) -> void:
 
 
 ## LEGACY / QA only — not the live SCD1 paint path (PresentationTxn dual-feed removed for Play).
+## Refuses under WorldDataset live so Play cannot silently re-enter the dual-feed.
 func pull_presentation_delta(opts: Dictionary = {}) -> Dictionary:
+	if WorldConquestConfigLib.world_dataset_live():
+		push_error(
+			"pull_presentation_delta blocked under WorldDataset live — use SCD1 pull_domain_since"
+		)
+		return {
+			"owners": {},
+			"friendly_tiles": friendly_tiles,
+			"hostile_tiles": hostile_tiles,
+			"structures": {},
+			"agents": {},
+			"bombers": {},
+			"path_built_sids": PackedInt32Array(),
+			"path_built_vals": PackedFloat32Array(),
+			"state_sids": PackedInt32Array(),
+			"state_vals": PackedByteArray(),
+			"new_road_cells": PackedInt32Array(),
+			"completed_sids": PackedInt32Array(),
+			"marker_dirty_sids": PackedInt32Array(),
+			"structures_dirty": false,
+			"blocked_live": true,
+		}
 	# Defaults false: callers must opt in. Avoid accidental full structure/agent FFI every frame.
 	var include_structures: bool = bool(opts.get("structures", false))
 	var include_agents: bool = bool(opts.get("agents", false))
@@ -522,6 +544,15 @@ func sync_spawners_from(tile_control: BattleTileControlLib) -> void:
 		return
 	_spawner_stamp = -1
 	_maybe_update_spawners(tile_control._placed_spawners)
+
+
+## Live preferred: rebuild inject points from Rust structure store (not Godot _placed_spawners).
+func sync_spawners_from_structure_store() -> void:
+	if not ready or _sim == null:
+		return
+	if _sim.has_method("sync_spawners_from_structures"):
+		_sim.call("sync_spawners_from_structures")
+		_spawner_stamp = -1
 
 
 func sync_pressures_from(tile_control: BattleTileControlLib) -> void:

@@ -23,6 +23,7 @@ config/icon="res://icon.svg"
 
 RunLog="*res://RunLog.gd"
 RunState="*res://RunState.gd"
+ActivityTrace="*res://ActivityTrace.gd"
 
 [display]
 

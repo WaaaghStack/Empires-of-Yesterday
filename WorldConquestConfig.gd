@@ -49,13 +49,16 @@ const OVERLAY_DEPTH_UPDATES_PER_SEC := 0.25
 ## Full 360×180 pass ≈ 68 s at 16/frame @ 60 fps (halved when prior frame exceeded budget).
 const OVERLAY_RECONCILE_CELLS_PER_FRAME := 16
 ## Globe tint from tile ownership only — skips full pressure/R8 FFI every step (B10/I2/I3).
-## Live path uses pull_presentation_delta owner deltas; never reintroduce per-step full pressure pulls.
+## Live path uses SCD1 territory domain pulls; never reintroduce per-step full pressure pulls or PresentationTxn.
 const OVERLAY_OWNERS_ONLY := true
 ## Throttled pressure-depth tint on ownership shader (0.25 Hz; no per-step pressure FFI).
 const OVERLAY_DEPTH_TINT := true
 ## Display normalize for depth R8 bake (Rust get_pressure_depth_r8).
 const PRESSURE_VIS_REF := 48.0
 const SOLDIER_VISUAL_UPDATES_PER_SEC := 4.0
+## SCD1 wallet / structures presentation pull rate (HUD + markers). Territory stays per-frame.
+const WALLET_VISUAL_UPDATES_PER_SEC := 4.0
+const STRUCTURES_VISUAL_UPDATES_PER_SEC := 4.0
 ## Max soldier BFS replans per sim tick (global budget across all units).
 ## Kept low (6): late-game ferry thrash — free tiles shrink, stuck agents replan
 ## with water-allowed BFS; 20×/tick was a primary FPS collapse driver (not soft-cap).
@@ -239,11 +242,11 @@ const WORLD_DATASET_BUILDER_AUTHORITY := true
 const WORLD_DATASET_RESOURCE_WALLET := true
 ## QA: assert single-source WorldDataset invariants during validate runs (E8).
 const WORLD_DATASET_QA_ASSERTS := true
-## B11/I5: never full-structure-snap every frame; pull_presentation_delta structures only when dirty.
+## B11/I5: never full-structure-snap every frame; SCD1 structures pull only when dirty.
 const PRESENTATION_STRUCTURES_ONLY_WHEN_DIRTY := true
 
 
-## True when Play uses the single Rust live world (presentation is pull_presentation_delta).
+## True when Play uses the single Rust live world (presentation is SCD1 domain pulls).
 static func world_dataset_live() -> bool:
 	return (
 		WORLD_DATASET_GRID_AUTHORITY

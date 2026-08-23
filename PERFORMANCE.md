@@ -9,6 +9,8 @@ Live Play is **WorldDataset in Rust** (sim engine) + **SCD1 domain versioned pul
 | Concern | Live behavior | Where |
 |---------|---------------|--------|
 | **SCD1 domain pulls** | Per-domain `pull_domain_since` rows with `version > last`; full seed only at start / allow-listed gap; structure tombstones via `removed_ids`. Live domains: territory, structures, agents, bombers, wallet (**roads retired — R1**) | `domain_version.rs`, `Scd1DomainPull.gd`, `WorldConquestScreen._flush_live_presentation_delta` |
+| **Live owner paint** | Owners only via SCD1 `territory` apply — no live `get_owner_display_r8` / overlay-delta / owner-reconcile. Depth tint is display-only | `WorldConquestScreen._apply_scd1_territory`, `_scd1_repaint_territory` |
+| **Live structures** | Place/destroy = Rust `structure_store_*` command, then SCD1 `structures` pull. `placed_structures` is apply-only cache under live — no pre-merge / no Godot→Rust `sync_structure_store_from_map` / no `_placed_spawners` push | `_commit_placed_structure`, `_pull_structure_render_cache`, `sync_spawners_from_structure_store` |
 | **Roads MultiMesh** | **R1 retired** — `sync_roads` / `_setup_road_multimeshes` are no-ops (no ribbon paint) | `EarthGlobeMap.sync_roads` |
 | **Sim catch-up cap** | When prior frame > `FRAME_BUDGET_MS` (16 ms), cap catch-up to **1** sim step | `FrameBudgetProfiler.budget_allows_catchup`, `WorldConquestScreen._process` |
 | **End-game FPS ladder** | Soft-cap tighten at >20 ms (8k) / critical at >28 ms (5k); **sticky hysteresis** — once lowered, requires `SOFT_CAP_HEALTHY_FRAMES_TO_RAISE` (45) consecutive frames with prior ≤ `FRAME_BUDGET_MS` before raising to 24k; while soft-cap < DEFAULT, force `sim_max_steps ≤ 1` (no catch-up to 4); skip 1 sim frame at >28 ms (resume next); defer AI at >16 ms; skip markers/gpu/overlay/presentation on skip-sim frames | `WorldConquestConfig` `FRAME_MS_*` / `SOFT_CAP_*`, `WorldConquestScreen._process` / `_soft_cap_target_for_prior_ms` |
@@ -17,6 +19,8 @@ Live Play is **WorldDataset in Rust** (sim engine) + **SCD1 domain versioned pul
 | **Late FPS / ferry thrash** | Primary late-game collapse was pathfind ferry thrash as free tiles shrink (sim phase ~89→269 ms; ferry used `tile_count` ~64k; stuck set `retarget_cd=0`; `SOLDIER_REPLANS_PER_TICK=20`). Soft-cap tighten is secondary. Fixes: ferry expand 8k, replan budget 6, bomber expand max 12k, stuck backoff | `nav_rules.rs`, `WorldConquestConfig`, `agents.rs` |
 
 Do not reintroduce PresentationTxn as the live paint path, per-step full pressure/R8 pulls, full structure snapshots every frame, or uncapped multi-step catch-up on live.
+
+**Live owner paint (txn → SCD1):** under WorldDataset live, ownership visuals come only from SCD1 `territory` pulls (`_flush_live_presentation_delta` / `_scd1_repaint_territory`). Do not call `get_owner_display_r8`, `consume_owner_overlay_delta`, or overlay owner reconcile on the live path. Depth tint (`get_pressure_depth_r8`) is display-only and stays off the authority paint path.
 
 ---
 
@@ -161,6 +165,17 @@ Written to `logs/latest_run.txt` with the usual 0.25 s batch flush.
 ## RunLog I/O
 
 Session logs batch-flush every **0.25 s** (immediate on window close), max **10 000** lines per session. Engine `print()` capture only in verbose mode (`RunLog.set_verbose(true)`).
+
+## ActivityTrace — txn timeline ↔ FPS timeline
+
+For FPS drops, use the twin append-only files (shared `t_ms` clock):
+
+| File | Contents |
+|------|----------|
+| `logs/activity_txn_latest.txt` | Commands + SCD1 pulls (`kind=place`, `kind=scd1_pull`, …) |
+| `logs/activity_fps_latest.txt` | FPS / `frame_ms` samples (~4 Hz) + phase hints |
+
+Cross-ref: when FPS dips at `t_ms=T`, scan txn lines near the same `t_ms` for row spikes / `mode=full`. Disable with `EOY_ACTIVITY_TRACE=0`. Sample rate: `EOY_ACTIVITY_FPS_HZ` (default 4).
 
 ## Known costs to watch
 
