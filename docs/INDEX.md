@@ -45,3 +45,15 @@ See [DESIGN.md](../DESIGN.md) § Design locks for full text. IDs: **A13/F1** ene
 - Economy registry: `EconomyCatalog.gd` / `EconomyLib.gd`
 - Live asserts: `WorldDatasetAssert.gd`
 - Extension crate: `rust/empire_territory/`
+
+## Cursor AI agent suite
+
+Project agents, skills, and the always-on router live under `.cursor/` (committed with the repo). Canon docs above stay the product/engineering truth; skills link here instead of duplicating DESIGN.md.
+
+| Path | Role |
+|------|------|
+| `.cursor/rules/eoy-router.mdc` | Always-on map: docs → skills → agents → QA gate |
+| `.cursor/agents/` | `product-manager`, `coding-architect`, `exterminator`, `data-architect`, `ui-ux-designer` |
+| `.cursor/skills/` | `eoy-multi-agent-handoff`, `eoy-qa-lifecycle`, `eoy-rust-gdextension`, `eoy-scd1-presentation`, `eoy-design-lock-change`, `eoy-ui-theme` |
+
+Project agents override same-named stubs in `~/.cursor/agents/` while this workspace is open.

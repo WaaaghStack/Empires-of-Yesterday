@@ -1,0 +1,36 @@
+---
+description: Empires of Yesterday agent router — docs index, design locks, skill/agent handoffs, QA gate
+alwaysApply: true
+---
+
+# EOY agent router
+
+Before planning or coding in this repo:
+
+1. Skim [docs/INDEX.md](../../docs/INDEX.md) for the right canon doc.
+2. Treat [DESIGN.md](../../DESIGN.md) § Design locks as product law. Do not “fix” intentional asymmetry (R1, A13/F1, F5–F7, A14, R2) without an explicit design-lock change.
+3. Prefer project skills under `.cursor/skills/` for procedures; prefer project agents under `.cursor/agents/` for role handoffs.
+4. Before claiming done on sim, placement, routing, or Rust changes: follow `eoy-qa-lifecycle` (and rebuild DLL via `eoy-rust-gdextension` if `rust/empire_territory/src/` changed).
+
+## Skill map
+
+| Situation | Skill |
+|-----------|--------|
+| Multi-agent feature / review loop | `eoy-multi-agent-handoff` |
+| Headless QA / smoke / Godot path | `eoy-qa-lifecycle` |
+| Rust crate / GDExtension / DLL | `eoy-rust-gdextension` |
+| Live paint, domain pulls, WorldDataset | `eoy-scd1-presentation` |
+| Changing a design lock | `eoy-design-lock-change` |
+| Menu / HUD / GameTheme / globe chrome | `eoy-ui-theme` |
+
+## Agent map
+
+| Role | Agent |
+|------|--------|
+| Vision, stories, acceptance, final QA | `product-manager` |
+| Full-stack implement plan / code | `coding-architect` |
+| Bugs, dead code, evidence | `exterminator` |
+| SCD1 / WorldDataset / sim data truth | `data-architect` |
+| Look/feel, layouts, theme QA | `ui-ux-designer` |
+
+Canonical product truth stays in markdown docs — skills link to docs; do not duplicate DESIGN.md into prompts.
