@@ -202,6 +202,7 @@ static func _generate_rect(
 			var idx: int = data.cell_index(gx, gy)
 			var land: bool = land_bits[idx] > 0
 			var elev: float = elev_norm[idx]
+			# Land height is raw DEM. Grass/sand/mountain are paint + move cost only.
 			if not land:
 				data.terrain_cells[idx] = BattleMapDataLib.Terrain.WATER
 				data.tile_height[idx] = 0.0
@@ -210,10 +211,10 @@ static func _generate_rect(
 				data.tile_height[idx] = elev
 			elif elev < 0.22 and coast_bits[idx] > 0:
 				data.terrain_cells[idx] = BattleMapDataLib.Terrain.SAND
-				data.tile_height[idx] = elev * 0.5
+				data.tile_height[idx] = elev
 			else:
 				data.terrain_cells[idx] = BattleMapDataLib.Terrain.GRASS
-				data.tile_height[idx] = elev * 0.65
+				data.tile_height[idx] = elev
 	data.rebuild_terrain_arrays()
 	data.sync_blocked_from_terrain()
 	if place_spawns:
@@ -324,6 +325,7 @@ static func _generate_sphere(
 	for cid in range(cell_count):
 		var land: bool = cell_land[cid] > 0
 		var elev: float = cell_elev[cid]
+		# Land height is raw DEM. Grass/sand/mountain are paint + move cost only.
 		if not land:
 			data.terrain_cells[cid] = BattleMapDataLib.Terrain.WATER
 			data.tile_height[cid] = 0.0
@@ -332,10 +334,10 @@ static func _generate_sphere(
 			data.tile_height[cid] = elev
 		elif elev < 0.22 and cell_coast[cid] > 0:
 			data.terrain_cells[cid] = BattleMapDataLib.Terrain.SAND
-			data.tile_height[cid] = elev * 0.5
+			data.tile_height[cid] = elev
 		else:
 			data.terrain_cells[cid] = BattleMapDataLib.Terrain.GRASS
-			data.tile_height[cid] = elev * 0.65
+			data.tile_height[cid] = elev
 
 	data.rebuild_terrain_arrays()
 	data.sync_blocked_from_terrain()

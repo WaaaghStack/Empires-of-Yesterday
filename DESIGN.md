@@ -1,6 +1,6 @@
 # Empires of Yesterday — Design & Dictionary
 
-**Last updated:** August 14, 2026  
+**Last updated:** August 23, 2026  
 **The game:** World Conquest — a fluid territory-conquest sim (Creeper World style) on a 360×180 Earth globe, with multi-structure logistics and units. This is the only game mode; all legacy modes (galaxy campaign, tactical squads, planet runs, RTS World prototype) were removed.
 
 ---
@@ -75,7 +75,7 @@ Live play is tuned so a match **breathes**: pressure creeps instead of flooding,
 | **Claimable tile** | Land tile reachable (BFS over passable cells) from either side's spawn, or opened by a ferry **beachhead**. Only claimable tiles change ownership. | `BattleTileControl._is_claimable_index`, `extend_beachhead_from_landing` |
 | **Pressure** | Continuous per-tile influence (sim truth), one float array per side. Not capped by terrain height. | `BattleTileControl.pressure_friendly / pressure_hostile` |
 | **Owners** | Discrete per-tile ownership from **simple majority pressure**: `pf > ph` → friendly, `ph > pf` → hostile, equal (incl. 0/0) → neutral. Enum still reserves `3=contested` for legacy/UI. `4=unclaimable`. HQ homes force-owned. | `BattleTileControl.owners`, `sim::sync_ownership_tile` |
-| **Effective height** | `H = pressure + terrain_elevation` (elevation 0–100, `HEIGHT_MAX`). Gradient flow equalizes `H` across neighbors — fluid pools in basins and only tops mountains when deep enough. | `BattleTileControl.effective_height` |
+| **Effective height** | `H = pressure + terrain_elevation` (elevation 0–100, `HEIGHT_MAX`). Land elevation is the raw DEM (`tile_height = elev`); grass/sand/mountain do **not** rescale height. Gradient flow equalizes `H` across neighbors — excess head (`P` above a lower neighbor's `H`) drips downhill; fluid pools in basins and only tops ridges when deep enough. | `BattleTileControl.effective_height` |
 | **Gradient flow** | Per-round cardinal-neighbor flow: if `H_src − H_n > MIN_FLOW_DELTA`, move `∝ delta × FLOW_CONDUCTIVITY` (0.20) `× edge_flow`, capped at `MAX_OUTFLOW_FRAC` (0.38) of source per pass. | `BattleTileControl._gradient_flow_tile` |
 | **Cancellation** | Overlapping friendly/hostile pressure subtract (`min` of both removed). | `_propagate_simple_water` |
 | **Home pump** | Capital tile injects `HOME_START_POWER × (1 + force × 0.01)` × `PRESSURE_SOURCE_OUTPUT_MULT` (0.42) × `WORLD_CONQUEST_PRESSURE_SCALE` (1/2000) every `PRESSURE_INJECT_INTERVAL_ROUNDS` (14) sim rounds. | `BattleTileControl.home_spawn_rate_for_force`, `WorldConquestConfig` |
@@ -105,7 +105,7 @@ Live play is tuned so a match **breathes**: pressure creeps instead of flooding,
 
 - **Default Play (Earth):** `data/earth/land_mask_360x180.png` + `elevation_360x180.png` (procedural fallback if missing), via map catalog definitions.
 - **Custom World:** multi-octave continental noise on the unit sphere (`WorldConquestMapGenerator._procedural_continental_land`); elevation from ridged noise + `mountain_bias`. Continents must not match Earth silhouette.
-- **Terrain types:** grass, water (impassable for fluid), mountain (elev > 0.72, slow flow ×~0.45, claimable), sand (low coast), mud.
+- **Terrain types:** grass, water (impassable for fluid), mountain (elev > 0.72, slow flow ×~0.45, claimable), sand (low coast), mud. **Height for flow is raw land elevation** on every claimable tile; biome does not flatten grass/sand. Mountains still slow via move-cost `flow_mult` only.
 - **Longitude wraps**; latitude does not.
 - **Spawns:** player capital in the west third, enemy in the east third (seeded random land tile) for default Earth spawn mode.
 - **Primary generator:** `WorldConquestMapGenerator.generate(map_id, seed, place_spawns, criteria)` — real map gen (land bits, elevation, coasts, spawns, resource scatter).
