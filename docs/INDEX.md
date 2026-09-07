@@ -14,6 +14,7 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 | [REQUEST_SCD1_VERSIONED_PULL.md](REQUEST_SCD1_VERSIONED_PULL.md) | SCD1 main tables + domain monotonic pulls; full snaps only at start/gap |
 | [AUDIT_CELL_WORLD_BUGS_UX.md](AUDIT_CELL_WORLD_BUGS_UX.md) | Cell-world / SCD1 / pathing / build UX audit + implement status |
 | [REQUEST_SURGE_THEATERS_PAINT.md](REQUEST_SURGE_THEATERS_PAINT.md) | Outpost Pump/Drain/Surge, named theaters, area paint |
+| [REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md](REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md) | **Exploratory** — turn-based Total War × Dominions 6 reframe: two-worlds transaction engine, dominion tide, auto-resolved HD-2D battles |
 
 ## Architecture snapshot (live Play)
 
@@ -54,6 +55,6 @@ Project agents, skills, and the always-on router live under `.cursor/` (committe
 |------|------|
 | `.cursor/rules/eoy-router.mdc` | Always-on map: docs → skills → agents → QA gate |
 | `.cursor/agents/` | `product-manager`, `coding-architect`, `exterminator`, `data-architect`, `ui-ux-designer` |
-| `.cursor/skills/` | `eoy-multi-agent-handoff`, `eoy-qa-lifecycle`, `eoy-rust-gdextension`, `eoy-scd1-presentation`, `eoy-design-lock-change`, `eoy-ui-theme` |
+| `.cursor/skills/` | `eoy-multi-agent-handoff`, `eoy-qa-lifecycle`, `eoy-rust-gdextension`, `eoy-scd1-presentation`, `eoy-design-lock-change`, `eoy-ui-theme`, `eoy-sim-transaction-engine` (proposed), `eoy-battle-resolve` (proposed) |
 
 Project agents override same-named stubs in `~/.cursor/agents/` while this workspace is open.
