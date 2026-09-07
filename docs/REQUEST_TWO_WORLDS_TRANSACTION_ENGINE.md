@@ -7,6 +7,14 @@ signoff + a `DESIGN.md` edit before any implementation (see `eoy-design-lock-cha
 
 **Explored:** 2026-09-07
 
+**Implementation status (2026-09-07):** The **engine spine** is implemented and unit-tested as the
+godot-agnostic `rust/eon_engine` crate (25 passing tests: deterministic replay, double-entry
+reconciliation, dominion field, agents, squad+LOS battles to 1000 units, WEGO turns, win checks)
+and wired into the `empire_territory` GDExtension as the `TwoWorldsEngine` class (headless smoke
+passes; live World Conquest QA + Rust/CPU parity unaffected). The **presentation layer** (HD-2D
+battle viewer, globe turn-playback, campaign UI) is staged next per §12. Branch:
+`cursor/mvp-two-worlds-engine-0600`.
+
 ---
 
 ## 1. Vision
