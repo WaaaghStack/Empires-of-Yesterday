@@ -1,0 +1,4 @@
+{
+  "name": "Empires of Yesterday",
+  "install": "bash ./.cursor/install.sh"
+}
