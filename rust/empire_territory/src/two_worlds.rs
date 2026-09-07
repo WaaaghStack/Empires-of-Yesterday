@@ -1,58 +1,265 @@
 //! GDExtension surface for the proposed two-worlds transaction engine (`eon_engine`).
 //!
-//! This is the thin Godot wrapper over the godot-agnostic authority core. It lets Godot drive a
-//! headless campaign and read back the wide-row report string. The heavy lifting (ordered
-//! transactions, dominion field, deterministic battle resolve) lives in `eon_engine` and is
-//! unit-tested there; this class only marshals to/from Godot types.
+//! Thin Godot wrapper over the godot-agnostic authority core. Holds a persistent campaign
+//! (`World` + `Ledger`) so Godot can drive a turn-based match: start a campaign, end turns, read
+//! back the wide-row report (provinces / factions / armies), and pull baked battle-replay frames
+//! for the battle viewer. The heavy lifting lives in `eon_engine` and is unit-tested there.
 //!
-//! Status: exploratory MVP (see docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). It does not touch
-//! the live World Conquest path — it is an additive, opt-in class.
+//! Status: exploratory MVP (docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). Additive/opt-in — it
+//! does not touch the live World Conquest path.
 
-use eon_engine::{run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Outcome};
+use eon_engine::battle::{BATTLE_HEIGHT, BATTLE_WIDTH};
+use eon_engine::model::{FactionId, GemPath, UnitKind};
+use eon_engine::{
+    run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Ledger, Outcome, TurnReport,
+    World,
+};
 use godot::prelude::*;
 
-/// RefCounted entry point for the two-worlds engine. Reachable from GDScript as `TwoWorldsEngine`.
+type Dict = Dictionary<Variant, Variant>;
+
 #[derive(GodotClass)]
 #[class(base = RefCounted, init)]
 pub struct TwoWorldsEngine {
     base: Base<RefCounted>,
+    world: Option<World>,
+    ledger: Option<Ledger>,
+    last_report: Option<TurnReport>,
+    last_outcome: String,
 }
 
 #[godot_api]
 impl TwoWorldsEngine {
-    /// Run a headless demo campaign and return the wide-row report as text.
+    // ---- headless helpers (also used by tests / smoke) -------------------------------------
     #[func]
     fn run_demo(&self, seed: i64, turns: i64) -> GString {
-        let report = run_headless_demo(seed as u64, turns.max(0) as u32);
-        GString::from(report.as_str())
+        GString::from(run_headless_demo(seed as u64, turns.max(0) as u32).as_str())
     }
 
-    /// Self-check: prove determinism + per-turn reconciliation. Returns a one-line verdict plus
-    /// the report, so a Godot smoke test can assert on it.
     #[func]
     fn self_check(&self) -> GString {
         let a = run_headless_demo(1234, 30);
         let b = run_headless_demo(1234, 30);
-        let deterministic = a == b;
-        let reconciled = !a.contains("RECONCILE FAILURE");
         let text = format!(
-            "two_worlds self_check: deterministic={deterministic} reconciled={reconciled}\n{a}"
+            "two_worlds self_check: deterministic={} reconciled={}\n{a}",
+            a == b,
+            !a.contains("RECONCILE FAILURE"),
         );
         GString::from(text.as_str())
     }
 
-    /// Run `count` fully-autonomous AI-vs-AI campaigns (both factions AI-driven) and return a
-    /// validation report: winner distribution, decisiveness, reconciliation, and determinism.
     #[func]
     fn run_ai_vs_ai_batch(&self, count: i64, max_turns: i64) -> GString {
-        let report = run_ai_vs_ai_batch(count.max(0) as u32, max_turns.max(1) as u32);
-        GString::from(report.as_str())
+        GString::from(run_ai_vs_ai_batch(count.max(0) as u32, max_turns.max(1) as u32).as_str())
     }
 
-    /// Run `turns` and return a compact one-line-per-faction final summary as text.
+    // ---- persistent playable campaign ------------------------------------------------------
+
+    /// Start (or restart) a turn-based campaign from `seed`. Uses the seed-varied procedural ring.
+    #[func]
+    fn new_campaign(&mut self, seed: i64) {
+        let (w, l) = scenario::procedural_world(seed as u64);
+        self.world = Some(w);
+        self.ledger = Some(l);
+        self.last_report = None;
+        self.last_outcome = "Ongoing".into();
+    }
+
+    #[func]
+    fn is_active(&self) -> bool {
+        self.world.is_some()
+    }
+
+    #[func]
+    fn current_turn(&self) -> i64 {
+        self.world.as_ref().map(|w| w.turn as i64).unwrap_or(0)
+    }
+
+    #[func]
+    fn outcome(&self) -> GString {
+        GString::from(self.last_outcome.as_str())
+    }
+
+    /// Advance one turn. Returns a summary dict: { turn, outcome, done, battles: [ {..} ] }.
+    /// Battle frames are fetched separately via `get_last_battle_frames`.
+    #[func]
+    fn end_turn(&mut self) -> Dict {
+        let mut out = Dict::new();
+        let (world, ledger) = match (self.world.as_mut(), self.ledger.as_mut()) {
+            (Some(w), Some(l)) => (w, l),
+            _ => {
+                out.set("error", &GString::from("no active campaign"));
+                return out;
+            }
+        };
+        let report = run_turn(world, ledger);
+        self.last_outcome = format!("{:?}", report.outcome);
+        out.set("turn", report.turn as i64);
+        out.set("outcome", &GString::from(self.last_outcome.as_str()));
+        out.set("done", !matches!(report.outcome, Outcome::Ongoing));
+
+        let mut battles = Array::<Variant>::new();
+        for b in &report.battles {
+            let mut bd = Dict::new();
+            bd.set("province", b.province as i64);
+            bd.set("attacker", b.attacker as i64);
+            bd.set("defender", b.defender as i64);
+            bd.set("winner", b.winner.map(|w| w as i64).unwrap_or(-1));
+            bd.set("ticks", b.ticks as i64);
+            let mut cas = PackedInt32Array::new();
+            for (_, c) in &b.casualties {
+                cas.push(*c as i32);
+            }
+            bd.set("casualties", &cas);
+            battles.push(&bd.to_variant());
+        }
+        out.set("battles", &battles);
+        self.last_report = Some(report);
+        out
+    }
+
+    /// Provinces for rendering: id, owner (-1 none), dom per faction, unrest, throne, deposit
+    /// (-1 none else gem index), capital_of (-1 none), neighbors.
+    #[func]
+    fn get_provinces(&self) -> Array<Variant> {
+        let mut arr = Array::<Variant>::new();
+        let Some(world) = self.world.as_ref() else {
+            return arr;
+        };
+        for p in &world.provinces {
+            let mut d = Dict::new();
+            d.set("id", p.id as i64);
+            d.set("is_land", p.is_land);
+            d.set("elevation", p.elevation as i64);
+            d.set("unrest", p.unrest);
+            d.set("has_throne", p.has_throne);
+            d.set(
+                "owner",
+                p.owner(&world.cfg).map(|f| f as i64).unwrap_or(-1),
+            );
+            d.set(
+                "capital_of",
+                p.capital_of.map(|f| f as i64).unwrap_or(-1),
+            );
+            d.set(
+                "deposit",
+                p.deposit.map(|g| g as i64).unwrap_or(-1),
+            );
+            let mut dom = PackedFloat32Array::new();
+            for v in &p.dom {
+                dom.push(*v);
+            }
+            d.set("dom", &dom);
+            let mut nb = PackedInt32Array::new();
+            for n in &p.neighbors {
+                nb.push(*n as i32);
+            }
+            d.set("neighbors", &nb);
+            arr.push(&d.to_variant());
+        }
+        arr
+    }
+
+    /// Factions for the status panel.
+    #[func]
+    fn get_factions(&self) -> Array<Variant> {
+        let mut arr = Array::<Variant>::new();
+        let (Some(world), Some(ledger)) = (self.world.as_ref(), self.ledger.as_ref()) else {
+            return arr;
+        };
+        for (i, f) in world.factions.iter().enumerate() {
+            let fid = i as FactionId;
+            let mut d = Dict::new();
+            d.set("id", fid as i64);
+            d.set("name", &GString::from(f.name.as_str()));
+            d.set("dominion", world.total_dominion(fid));
+            d.set("land", world.owned_land(fid) as i64);
+            let units: i64 = world
+                .armies
+                .iter()
+                .filter(|a| a.faction == fid)
+                .map(|a| a.total_units() as i64)
+                .sum();
+            d.set("units", units);
+            d.set("thrones", world.owned_thrones(fid) as i64);
+            d.set("alive", f.alive);
+            let mut gems = PackedFloat32Array::new();
+            for path in GemPath::all() {
+                gems.push(ledger.balance(eon_engine::Account::Gems(fid, path)) as f32);
+            }
+            d.set("gems", &gems);
+            arr.push(&d.to_variant());
+        }
+        arr
+    }
+
+    /// Armies (for map troop markers): faction, province, units.
+    #[func]
+    fn get_armies(&self) -> Array<Variant> {
+        let mut arr = Array::<Variant>::new();
+        let Some(world) = self.world.as_ref() else {
+            return arr;
+        };
+        for a in &world.armies {
+            let mut d = Dict::new();
+            d.set("faction", a.faction as i64);
+            d.set("province", a.province as i64);
+            d.set("units", a.total_units() as i64);
+            arr.push(&d.to_variant());
+        }
+        arr
+    }
+
+    /// Baked replay frames for the Nth battle of the last resolved turn. Returns
+    /// { width, height, frames: [ { tick, fac:PackedByteArray, kind:PackedByteArray,
+    ///   x:PackedFloat32Array, y:PackedFloat32Array, alive:PackedByteArray } ] }.
+    #[func]
+    fn get_last_battle_frames(&self, index: i64) -> Dict {
+        let mut out = Dict::new();
+        out.set("width", BATTLE_WIDTH);
+        out.set("height", BATTLE_HEIGHT);
+        let frames_arr = Array::<Variant>::new();
+        out.set("frames", &frames_arr);
+        let Some(report) = self.last_report.as_ref() else {
+            return out;
+        };
+        let Some(battle) = report.battles.get(index.max(0) as usize) else {
+            return out;
+        };
+        let mut frames_arr = Array::<Variant>::new();
+        for frame in &battle.frames {
+            let mut fd = Dict::new();
+            fd.set("tick", frame.tick as i64);
+            let mut fac = PackedByteArray::new();
+            let mut kind = PackedByteArray::new();
+            let mut xs = PackedFloat32Array::new();
+            let mut ys = PackedFloat32Array::new();
+            let mut alive = PackedByteArray::new();
+            for u in &frame.units {
+                fac.push(u.faction as u8);
+                kind.push(match u.kind {
+                    UnitKind::Soldier => 0,
+                    UnitKind::Bomber => 1,
+                });
+                xs.push(u.x);
+                ys.push(u.y);
+                alive.push(if u.alive { 1 } else { 0 });
+            }
+            fd.set("fac", &fac);
+            fd.set("kind", &kind);
+            fd.set("x", &xs);
+            fd.set("y", &ys);
+            fd.set("alive", &alive);
+            frames_arr.push(&fd.to_variant());
+        }
+        out.set("frames", &frames_arr);
+        out
+    }
+
+    /// Compact one-line-per-faction summary for a headless run (kept for smoke tests).
     #[func]
     fn run_campaign_summary(&self, seed: i64, turns: i64) -> GString {
-        let (mut world, mut ledger) = scenario::demo_world(seed as u64);
+        let (mut world, mut ledger) = scenario::procedural_world(seed as u64);
         let mut outcome = Outcome::Ongoing;
         let mut last = None;
         for _ in 0..turns.max(0) {
@@ -74,12 +281,7 @@ impl TwoWorldsEngine {
             for fr in &r.factions {
                 text.push_str(&format!(
                     "F{} dominion={:.1} land={} units={} thrones={} alive={}\n",
-                    fr.faction,
-                    fr.total_dominion,
-                    fr.owned_land,
-                    fr.units_alive,
-                    fr.ascension,
-                    fr.alive
+                    fr.faction, fr.total_dominion, fr.owned_land, fr.units_alive, fr.ascension, fr.alive
                 ));
             }
         }

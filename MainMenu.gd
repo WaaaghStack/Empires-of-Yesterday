@@ -70,6 +70,7 @@ func _ready() -> void:
 	GameTheme.apply_ghost_button(copy_seed_button)
 	GameTheme.apply_ghost_button(reroll_seed_button)
 	play_button.pressed.connect(_on_play_pressed)
+	_add_two_worlds_button()
 	custom_world_button.pressed.connect(_on_custom_world_pressed)
 	quit_button.pressed.connect(_on_quit_pressed)
 	settings_button.pressed.connect(_on_settings_pressed)
@@ -426,6 +427,24 @@ func _on_play_pressed() -> void:
 	if RunState.run_seed == 0:
 		RunState.run_seed = randi() & 0x7FFFFFFF
 	get_tree().change_scene_to_file("res://WorldConquestScreen.tscn")
+
+
+func _add_two_worlds_button() -> void:
+	# Exploratory turn-based mode (docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). Added in code so
+	# we don't have to hand-edit MainMenu.tscn.
+	var tw_btn := Button.new()
+	tw_btn.name = "TwoWorldsButton"
+	tw_btn.text = "Two Worlds (Turn-Based) — MVP"
+	GameTheme.apply_ghost_button(tw_btn)
+	var parent := play_button.get_parent()
+	parent.add_child(tw_btn)
+	parent.move_child(tw_btn, play_button.get_index() + 1)
+	tw_btn.pressed.connect(_on_two_worlds_pressed)
+
+
+func _on_two_worlds_pressed() -> void:
+	RunLog.info("Launching Two Worlds (turn-based MVP)")
+	get_tree().change_scene_to_file("res://TwoWorldsScreen.tscn")
 
 
 func _on_custom_world_pressed() -> void:

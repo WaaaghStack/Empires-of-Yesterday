@@ -10,8 +10,8 @@ use crate::ledger::{Account, Ledger, Phase};
 use crate::model::{FactionId, ProvinceId, UnitKind, World};
 use crate::rng::Rng;
 
-const BATTLE_WIDTH: f32 = 120.0;
-const BATTLE_HEIGHT: f32 = 80.0;
+pub const BATTLE_WIDTH: f32 = 120.0;
+pub const BATTLE_HEIGHT: f32 = 80.0;
 const DT: f32 = 1.0;
 const MAX_TICKS: u32 = 400;
 const RECORD_STRIDE: u32 = 5;
