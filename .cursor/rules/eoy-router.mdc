@@ -22,6 +22,8 @@ Before planning or coding in this repo:
 | Live paint, domain pulls, WorldDataset | `eoy-scd1-presentation` |
 | Changing a design lock | `eoy-design-lock-change` |
 | Menu / HUD / GameTheme / globe chrome | `eoy-ui-theme` |
+| Turn-based sim spine / ordered transactions / narrow-vs-wide (proposed) | `eoy-sim-transaction-engine` |
+| Auto-resolved squad+LOS battles / HD-2D replay (proposed) | `eoy-battle-resolve` |
 
 ## Agent map
 

@@ -33,8 +33,17 @@ Roads domain retired under **R1** (Rust may keep ABI; Godot should not pull it f
 - [ ] Harness: `scd1_version_pull_harness.gd`, `WorldDatasetAssert.gd`
 - [ ] Rebuild DLL if Rust changed (`eoy-rust-gdextension`) then QA (`eoy-qa-lifecycle`)
 
+## Proposed: transaction-engine reporting
+
+Under the proposed turn-based reframe (`eoy-sim-transaction-engine`, `eoy-battle-resolve`), the
+wide-row SCD1 pull is the **finished report** derived from the authority **journal** (ordered
+transactions). Reporting discipline: the report is a **one-way projection** (never fed back into
+sim logic) and must **reconcile** with authority totals (trial-balance / checksum, extending
+`WorldDatasetAssert`). Same live rules below still hold; this only reframes wide rows as the report.
+
 ## Anti-patterns
 
 - Reintroducing PresentationTxn as the live path
 - Full snaps every frame
 - Mutating authoritative state only on the Godot side in live Play
+- Feeding a wide-row report back into sim logic, or shipping a report that does not reconcile with authority
