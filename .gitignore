@@ -9,6 +9,9 @@ logs/
 # Rust build artifacts
 rust/**/target/
 
+# Linux GDExtension binaries are produced by .cursor/install.sh (built locally)
+rust/empire_territory/bin/*.so
+
 # Local QA output captures
 qa_bench_out.txt
 qa_run_output.txt
