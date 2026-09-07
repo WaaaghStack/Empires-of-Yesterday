@@ -36,13 +36,8 @@ var _status_label: Label
 
 func _ready() -> void:
 	set_process(true)
-	var bg := ColorRect.new()
-	bg.color = Color(0.05, 0.06, 0.09, 1.0)
-	bg.anchor_right = 1.0
-	bg.anchor_bottom = 1.0
-	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(bg)
-
+	# Note: the background is painted in _draw() (not a ColorRect child) so it sits *below* the
+	# map/battle drawing — child nodes render above the parent's _draw() content.
 	_engine = _make_engine()
 	if _engine == null:
 		var err := Label.new()
@@ -213,6 +208,8 @@ func _province_pos(i: int, n: int, center: Vector2, radius: float) -> Vector2:
 
 
 func _draw() -> void:
+	# Background (painted here so it stays below the map/battle content).
+	draw_rect(Rect2(Vector2.ZERO, size), Color(0.05, 0.06, 0.09, 1.0))
 	# Header.
 	draw_string(_font, Vector2(160, 46), "Two Worlds — Turn-Based (MVP)", HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(0.9, 0.92, 1.0))
 	draw_string(_font, Vector2(size.x - 360, 46), "Turn %d   Outcome: %s" % [_turn, _outcome], HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.85, 0.88, 0.95))
@@ -299,7 +296,7 @@ func _draw_battle() -> void:
 	var h := float(_battle.get("height", 80.0))
 	# Battlefield rect.
 	var pad := 80.0
-	var rect := Rect2(pad, 120.0, size.x - pad * 2.0, size.y - 260.0)
+	var rect := Rect2(pad, 150.0, size.x - pad * 2.0, size.y - 290.0)
 	draw_rect(rect, Color(0.09, 0.12, 0.1, 1.0))
 	draw_rect(rect, Color(0.4, 0.5, 0.4, 0.6), false, 2.0)
 
@@ -311,7 +308,7 @@ func _draw_battle() -> void:
 		int(summary.get("defender", 1)),
 		("F%d" % winner) if winner >= 0 else "draw",
 	]
-	draw_string(_font, Vector2(pad, 104), header, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.95, 0.95, 0.8))
+	draw_string(_font, Vector2(pad, 134), header, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.95, 0.95, 0.8))
 	draw_string(_font, Vector2(pad, size.y - 120), "Frame %d / %d   (battle %d of %d)" % [_frame_idx + 1, _battle_frames.size(), _review_ptr + 1, _turn_battles.size()], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.8, 0.85, 0.9))
 
 	if _battle_frames.is_empty():
