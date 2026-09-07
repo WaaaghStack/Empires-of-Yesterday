@@ -16,8 +16,12 @@ func _init() -> void:
 	var ok := verdict.contains("deterministic=true") and verdict.contains("reconciled=true")
 	print("--- campaign summary (seed 2026) ---")
 	print(String(engine.run_campaign_summary(2026, 60)))
-	if ok:
+	print("--- AI vs AI batch (24 matches) ---")
+	var ai := String(engine.run_ai_vs_ai_batch(24, 400))
+	print(ai)
+	var ai_ok := ai.contains("all_reconciled=true") and ai.contains("deterministic=true")
+	if ok and ai_ok:
 		print("PASS two_worlds smoke")
 	else:
-		push_error("FAIL two_worlds smoke (determinism/reconcile)")
+		push_error("FAIL two_worlds smoke (determinism/reconcile/ai-vs-ai)")
 	quit()

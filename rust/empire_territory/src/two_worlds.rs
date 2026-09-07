@@ -8,7 +8,7 @@
 //! Status: exploratory MVP (see docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). It does not touch
 //! the live World Conquest path — it is an additive, opt-in class.
 
-use eon_engine::{run_headless_demo, scenario, turn::run_turn, Outcome};
+use eon_engine::{run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Outcome};
 use godot::prelude::*;
 
 /// RefCounted entry point for the two-worlds engine. Reachable from GDScript as `TwoWorldsEngine`.
@@ -39,6 +39,14 @@ impl TwoWorldsEngine {
             "two_worlds self_check: deterministic={deterministic} reconciled={reconciled}\n{a}"
         );
         GString::from(text.as_str())
+    }
+
+    /// Run `count` fully-autonomous AI-vs-AI campaigns (both factions AI-driven) and return a
+    /// validation report: winner distribution, decisiveness, reconciliation, and determinism.
+    #[func]
+    fn run_ai_vs_ai_batch(&self, count: i64, max_turns: i64) -> GString {
+        let report = run_ai_vs_ai_batch(count.max(0) as u32, max_turns.max(1) as u32);
+        GString::from(report.as_str())
     }
 
     /// Run `turns` and return a compact one-line-per-faction final summary as text.
