@@ -47,6 +47,18 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
   anim/facing; far = static billboard / density blobs + banners/dust).
 - **Prototype art scope: soldiers + bombers only** (existing pixel billboards). Expand roster later.
 
+## Reporting (accounting model)
+
+Battles follow the same **ledger → report** discipline as the world (see
+`eoy-sim-transaction-engine` § Accounting model):
+
+- Each tick **posts balanced transactions**: damage debits target HP, a death posts a removal, morale
+  shifts are posted — no side-channel mutation. Conserved quantities (roster counts, HP pools) balance.
+- The **wide EYTR replay is the report**: a one-way projection of the battle journal. Roster/casualty
+  totals in the replay must **reconcile** with the posted deaths (trial-balance the outcome).
+- The battle **outcome posts back to the World ledger as a single balanced result transaction**
+  (province flip + casualties + XP), with provenance linking to the battle log for drill-down/rewatch.
+
 ## Change checklist
 
 - [ ] Squad brain change vs individual-combat change — kept on the right tier?

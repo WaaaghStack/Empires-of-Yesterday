@@ -45,6 +45,33 @@ Two worlds — **the World (globe/campaign)** and **a Battle** — are the **sam
    sub-sim (own log + baked replay) and emits a **result transaction** back to the world log. Seeds
    thread World → Battle so the whole turn is reproducible from the world log.
 
+## Accounting model — simulation reporting best practices
+
+Treat the engine as a **double-entry ledger**: narrow ordered transactions are **journal entries**;
+the wide-row layer is the **finished report** (statement) derived from the ledger. Simulation
+reporting work must follow accounting discipline:
+
+- **Append-only journal.** Posted transactions are immutable. Correct with a **reversing/adjusting
+  transaction**, never by editing or deleting history — preserves the audit trail and replay.
+- **Everything is posted.** State is only ever the fold of posted transactions; no side-channel
+  mutation. If something changed, there is a transaction that explains it.
+- **Atomic postings.** A transaction applies fully or not at all — no half-applied state mid-phase.
+- **Conservation (debits == credits).** Moving a tracked quantity (dominion, gems, units, HP) debits
+  one place and credits another so totals net out. Creation/destruction are **explicit posts**, not
+  silent drift. Add a per-phase **balance invariant**: the books must balance every close.
+- **Deterministic close order.** Phases close in the fixed order-of-operations; intra-phase order is
+  deterministic (id/initiative) + seeded PRNG. Same journal + seed → same close.
+- **Reports are derived, one-way.** The wide-row report (SCD1 pull / EYTR frame) is a **projection**
+  of the journal at a reporting cut (the domain-version high-water) — read-only, never fed back.
+- **Reconciliation (trial balance).** The report must tie out to authority totals; keep a cheap
+  checksum/trial-balance assert (extends `WorldDatasetAssert` + the Rust↔CPU parity discipline). A
+  report that does not reconcile with the ledger is a bug.
+- **Provenance / drill-down.** Report rows should trace to the transaction(s)/version(s) that produced
+  them, so any figure in the finished report is auditable back to its journal entries.
+- **Period model.** A turn is an accounting period: SCD1 current-state tables are the **balance
+  sheet** (current balances); the transaction log is the **journal** (the flows). Closing a period
+  produces the report and (optionally) a snapshot.
+
 ## Not this
 
 - **Not** `presentation_txn.rs` — that is a legacy QA-only *presentation* change feed, not the
@@ -59,6 +86,11 @@ Two worlds — **the World (globe/campaign)** and **a Battle** — are the **sam
 - [ ] Field change → is it inside the scheduled field phase (stencil), not per-entity txns?
 - [ ] Presentation/replay updated as a projection only (no read-back into sim)?
 - [ ] Battle result surfaced back to the World log via a result transaction?
+- [ ] New effect **posted as a transaction** (not a side-channel mutation)?
+- [ ] Conserved quantity **balanced** (debit/credit nets out) and a balance invariant added?
+- [ ] Corrections via **reversing transaction**, not editing/deleting history?
+- [ ] Report **reconciles** with authority totals (trial-balance / checksum)?
+- [ ] Report rows carry **provenance** (transaction/version) for drill-down?
 - [ ] Design-lock impact (turn-based, effective_height, F5, F6)? → `eoy-design-lock-change`.
 - [ ] Rebuild DLL (`eoy-rust-gdextension`) + QA (`eoy-qa-lifecycle`) with deterministic goldens.
 
@@ -68,4 +100,8 @@ Two worlds — **the World (globe/campaign)** and **a Battle** — are the **sam
 - Ambient/unseeded RNG or order-dependent-but-unordered iteration (breaks replay).
 - Turning the field into per-tile transactions.
 - A second (GDScript) battle authority to keep in parity — resolve battles in Rust only.
+- Editing or deleting posted transactions (breaks the audit trail + replay) — post a reversing entry.
+- Silent creation/destruction of tracked quantities (unbalanced books / drift).
+- Deriving a report and then feeding it back into posting logic.
+- Shipping a report that does not reconcile with the ledger.
 - Editing `DESIGN.md` locks without PM signoff.
