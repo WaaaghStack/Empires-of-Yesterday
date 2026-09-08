@@ -9,7 +9,7 @@ extends Control
 const MapGen := preload("res://WorldConquestMapGenerator.gd")
 const GlobeMesh := preload("res://EarthGlobeMesh.gd")
 const CFG := preload("res://WorldConquestConfig.gd")
-const BattleOverlayScript := preload("res://TwoWorldsBattleOverlay.gd")
+const BattleViewScript := preload("res://BattleView.gd")
 const TEX_SOLDIER_F: Texture2D = preload("res://assets/units/soldier_friendly.png")
 const TEX_SOLDIER_H: Texture2D = preload("res://assets/units/soldier_hostile.png")
 
@@ -61,7 +61,7 @@ var _turn_label: Label
 var _victory_label: Label
 var _end_btn: Button
 var _menu_btn: Button
-var _overlay: Control
+var _battleview: Control
 
 # Battle review.
 var _state: String = "map"
@@ -382,10 +382,14 @@ func _build_hud() -> void:
 	_end_btn.pressed.connect(_on_end_turn)
 	add_child(_end_btn)
 
-	_overlay = Control.new()
-	_overlay.set_script(BattleOverlayScript)
-	add_child(_overlay)
-	_overlay.closed.connect(_advance_review)
+	# HD-2D battle viewer (GPU-instanced diorama) layered on top of the globe. Its own Back button
+	# advances the review (continue to next battle / return to map).
+	_battleview = Control.new()
+	_battleview.set_script(BattleViewScript)
+	_battleview.anchor_right = 1.0
+	_battleview.anchor_bottom = 1.0
+	add_child(_battleview)
+	_battleview.finished.connect(_advance_review)
 
 	_reposition_hud()
 
@@ -545,10 +549,9 @@ func _on_end_turn() -> void:
 
 
 func _start_review(i: int) -> void:
-	var b: Dictionary = _engine.get_last_battle_frames(i)
 	_state = "battle"
 	_end_btn.visible = false
-	_overlay.show_battle(b.get("frames", []), _turn_battles[i], float(b.get("width", 120.0)), float(b.get("height", 80.0)))
+	_battleview.play_engine_battle(_engine, i, _turn_battles[i])
 
 
 func _advance_review() -> void:
