@@ -53,10 +53,11 @@ var _buf3 := PackedFloat32Array()
 var _bkt := PackedByteArray()                # per-unit bucket id (0..3)
 var _off := PackedInt32Array()               # per-unit float offset (slot * 12) into its bucket buffer
 var _yaw := 0.7
-var _pitch := 0.62
+var _pitch := 0.92                # strategic near-overhead tilt keeps the whole field framed
 var _dist := 190.0
 var _orbit := false
 var _auto_rotate := true
+const AUTO_ROTATE_SPEED := 0.02   # gentle turntable so the action stays in view during playback
 
 # HUD.
 var _header: Label
@@ -161,9 +162,18 @@ func _build_hud() -> void:
 		_speed_btns.append(b)
 		x += 70.0
 
+	# Anchor Back to the bottom-right so it is correctly placed regardless of layout timing
+	# (manual positioning from size.x runs before the first layout pass and lands off-screen).
 	_back_btn = Button.new()
 	_back_btn.text = "Back"
-	_back_btn.size = Vector2(160, 48)
+	_back_btn.anchor_left = 1.0
+	_back_btn.anchor_top = 1.0
+	_back_btn.anchor_right = 1.0
+	_back_btn.anchor_bottom = 1.0
+	_back_btn.offset_left = -184.0
+	_back_btn.offset_top = -64.0
+	_back_btn.offset_right = -24.0
+	_back_btn.offset_bottom = -16.0
 	_back_btn.pressed.connect(_on_back)
 	add_child(_back_btn)
 
@@ -176,9 +186,8 @@ func _set_speed(v: float) -> void:
 		_speed = v
 
 
-func _notification(what: int) -> void:
-	if what == NOTIFICATION_RESIZED and _back_btn:
-		_back_btn.position = Vector2(size.x - 184.0, size.y - 64.0)
+func _notification(_what: int) -> void:
+	pass  # Back button is anchored to the bottom-right; no manual repositioning needed.
 
 
 func play_engine_battle(engine: Object, index: int, summary: Dictionary = {}) -> void:
@@ -216,7 +225,6 @@ func play_engine_battle(engine: Object, index: int, summary: Dictionary = {}) ->
 	_prepare_buckets()
 	_apply_camera()
 	visible = true
-	_reposition()
 	_render_frame()
 	_update_header()
 
@@ -255,11 +263,6 @@ func _make_buf(count: int, sz: float) -> PackedFloat32Array:
 	return buf
 
 
-func _reposition() -> void:
-	if _back_btn:
-		_back_btn.position = Vector2(size.x - 184.0, size.y - 64.0)
-
-
 func _frame(idx: int) -> Dictionary:
 	idx = clampi(idx, 0, maxi(_frame_count - 1, 0))
 	if _cache.has(idx):
@@ -275,7 +278,7 @@ func _process(delta: float) -> void:
 	if not visible:
 		return
 	if _auto_rotate and not _orbit:
-		_yaw += delta * 0.05
+		_yaw += delta * AUTO_ROTATE_SPEED
 		_apply_camera()
 	if _playing and not _done:
 		_frame_pos += _play_fps * _speed * delta
@@ -323,8 +326,11 @@ func _render_frame() -> void:
 				by = yb[i]
 			var px: float = lerpf(ax, bx, alpha)
 			var py: float = lerpf(ay, by, alpha)
-			wx = (px - hw) * SCALE
-			wz = (py - hh) * SCALE
+			# Routed survivors flee toward (and past) their baseline in the sim; clamp the rendered
+			# position to the battlefield so they visibly gather at the rear edge instead of
+			# streaming off the diorama. Presentational only — the sim positions are untouched.
+			wx = (clampf(px, 0.0, _w) - hw) * SCALE
+			wz = (clampf(py, 0.0, _h) - hh) * SCALE
 			yc = GROUND_Y + sz * 0.5
 		# Write the diagonal-scale + translation transform in place (o..o+11).
 		match id:
