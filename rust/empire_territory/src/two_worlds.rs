@@ -8,7 +8,11 @@
 //! Status: exploratory MVP (docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). Additive/opt-in — it
 //! does not touch the live World Conquest path.
 
-use eon_engine::battle::{resolve_battle_in_province, BattleReport, BATTLE_HEIGHT, BATTLE_WIDTH};
+use eon_engine::battle::{
+    resolve_battle_in_province, resolve_battle_with_plan, BattleOrder, BattlePlan, BattleReport,
+    FormationKind, SquadDeploy, BATTLE_HEIGHT, BATTLE_WIDTH, HILL_BLOCK_R, HILL_CX, HILL_CY, HILL_R,
+    MAX_BATTLE_UNITS, RUIN_CX, RUIN_CY, RUIN_R, RIVER_X,
+};
 use eon_engine::model::{FactionId, GemPath, Squad, UnitKind};
 use eon_engine::{
     run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Ledger, Outcome, TurnReport,
@@ -147,6 +151,9 @@ impl TwoWorldsEngine {
             bd.set("defender", b.defender as i64);
             bd.set("winner", b.winner.map(|w| w as i64).unwrap_or(-1));
             bd.set("ticks", b.ticks as i64);
+            bd.set("owner_before", b.owner_before.map(|w| w as i64).unwrap_or(-1));
+            bd.set("owner_after", b.owner_after.map(|w| w as i64).unwrap_or(-1));
+            bd.set("elevation", b.elevation as i64);
             let mut cas = PackedInt32Array::new();
             for (_, c) in &b.casualties {
                 cas.push(*c as i32);
@@ -186,14 +193,114 @@ impl TwoWorldsEngine {
         scenario::recruit_army(&mut w, &mut l, 0, 1, mk(f0_soldiers, f0_bombers));
         scenario::recruit_army(&mut w, &mut l, 1, 1, mk(f1_soldiers, f1_bombers));
         let report = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, s);
-        let mut out = Dict::new();
-        out.set("winner", report.winner.map(|x| x as i64).unwrap_or(-1));
-        out.set("ticks", report.ticks as i64);
-        out.set("frame_count", report.frames.len() as i64);
-        let unit_count: i64 = report.initial.iter().map(|(_, n)| *n as i64).sum();
-        out.set("unit_count", unit_count);
-        self.battles = vec![report];
-        out
+        self.store_custom_report(report)
+    }
+
+    /// Custom Battle with a roster of placed regiments and per-regiment march orders.
+    /// Packed arrays are parallel (one slot per regiment). `orders` is per regiment; if it is
+    /// empty or the wrong length, `order0` / `order1` fill in as that side's default.
+    #[func]
+    fn resolve_custom_battle_plan(
+        &mut self,
+        seed: i64,
+        order0: i64,
+        order1: i64,
+        fac: PackedByteArray,
+        kind: PackedByteArray,
+        count: PackedInt32Array,
+        x: PackedFloat32Array,
+        y: PackedFloat32Array,
+        facing: PackedFloat32Array,
+        formation: PackedByteArray,
+        orders: PackedByteArray,
+    ) -> Dict {
+        let n = fac.len();
+        if n == 0
+            || kind.len() != n
+            || count.len() != n
+            || x.len() != n
+            || y.len() != n
+            || facing.len() != n
+            || formation.len() != n
+        {
+            let mut out = Dict::new();
+            out.set("error", &GString::from("roster arrays misaligned"));
+            return out;
+        }
+        let (mut w, mut l) = scenario::duel_line(3, seed as u64);
+        let s = w.seed;
+        let fac_v = fac.to_vec();
+        let kind_v = kind.to_vec();
+        let count_v = count.to_vec();
+        let x_v = x.to_vec();
+        let y_v = y.to_vec();
+        let facing_v = facing.to_vec();
+        let form_v = formation.to_vec();
+        let order_v = orders.to_vec();
+        let side_default = |fac_i: u8| -> BattleOrder {
+            if fac_i == 0 {
+                BattleOrder::from_u8(order0.clamp(0, 3) as u8)
+            } else {
+                BattleOrder::from_u8(order1.max(0).clamp(0, 3) as u8)
+            }
+        };
+        let mut remaining = MAX_BATTLE_UNITS;
+        let mut s0: Vec<Squad> = Vec::new();
+        let mut d0: Vec<SquadDeploy> = Vec::new();
+        let mut s1: Vec<Squad> = Vec::new();
+        let mut d1: Vec<SquadDeploy> = Vec::new();
+        for i in 0..n {
+            let k = if kind_v[i] == 1 {
+                UnitKind::Bomber
+            } else {
+                UnitKind::Soldier
+            };
+            let c = (count_v[i].max(0) as u32).min(remaining);
+            if c == 0 {
+                continue;
+            }
+            let ord = if order_v.len() == n {
+                BattleOrder::from_u8(order_v[i])
+            } else {
+                side_default(fac_v[i])
+            };
+            let deploy = SquadDeploy {
+                x: x_v[i],
+                y: y_v[i],
+                facing: facing_v[i],
+                formation: FormationKind::from_u8(form_v[i]),
+                order: ord,
+            };
+            for part in (Squad { kind: k, count: c }).into_regiments() {
+                if remaining == 0 {
+                    break;
+                }
+                let npart = part.count.min(remaining);
+                remaining = remaining.saturating_sub(npart);
+                let sq = Squad {
+                    kind: part.kind,
+                    count: npart,
+                };
+                if fac_v[i] == 0 {
+                    s0.push(sq);
+                    d0.push(deploy);
+                } else {
+                    s1.push(sq);
+                    d1.push(deploy);
+                }
+            }
+        }
+        scenario::recruit_army(&mut w, &mut l, 0, 1, s0);
+        scenario::recruit_army(&mut w, &mut l, 1, 1, s1);
+        let mut deploys = d0;
+        deploys.extend(d1);
+        let plan = BattlePlan {
+            order_a: BattleOrder::from_u8(order0.clamp(0, 3) as u8),
+            order_d: BattleOrder::from_u8(order1.max(0).clamp(0, 3) as u8),
+            deploys,
+        };
+        let report = resolve_battle_with_plan(&mut w, &mut l, 1, 0, 1, s, Some(&plan));
+        self.store_custom_report(report)
     }
 
     /// Static per-unit data for a battle (constant across frames): counts + faction/kind arrays,
@@ -213,6 +320,17 @@ impl TwoWorldsEngine {
         out.set("attacker", b.attacker as i64);
         out.set("defender", b.defender as i64);
         out.set("winner", b.winner.map(|w| w as i64).unwrap_or(-1));
+        out.set("elevation", b.elevation as i64);
+        out.set("owner_before", b.owner_before.map(|w| w as i64).unwrap_or(-1));
+        out.set("owner_after", b.owner_after.map(|w| w as i64).unwrap_or(-1));
+        out.set("river_x", RIVER_X);
+        out.set("hill_x", HILL_CX);
+        out.set("hill_y", HILL_CY);
+        out.set("hill_r", HILL_R);
+        out.set("hill_block_r", HILL_BLOCK_R);
+        out.set("ruin_x", RUIN_CX);
+        out.set("ruin_y", RUIN_CY);
+        out.set("ruin_r", RUIN_R);
         let mut fac = PackedByteArray::new();
         let mut kind = PackedByteArray::new();
         if let Some(f0) = b.frames.first() {
@@ -231,7 +349,8 @@ impl TwoWorldsEngine {
     }
 
     /// Per-frame tracks: x/y/z, alive, facing (8-way octant),
-    /// state (idle/march/aim/fire/dead/rout/fled). Fled = escaped at the rim; still alive.
+    /// state (idle/march/aim/fire/dead/rout/fled/hit), aim_x/aim_y on fire.
+    /// Fled = escaped at the rim; still alive.
     #[func]
     fn get_last_battle_frame_xy(&self, index: i64, frame: i64) -> Dict {
         let mut out = Dict::new();
@@ -241,6 +360,8 @@ impl TwoWorldsEngine {
         let mut alive = PackedByteArray::new();
         let mut facing = PackedByteArray::new();
         let mut state = PackedByteArray::new();
+        let mut ax = PackedFloat32Array::new();
+        let mut ay = PackedFloat32Array::new();
         if let Some(b) = self.battles.get(index.max(0) as usize) {
             if let Some(f) = b.frames.get(frame.max(0) as usize) {
                 for u in &f.units {
@@ -250,6 +371,8 @@ impl TwoWorldsEngine {
                     alive.push(if u.alive { 1 } else { 0 });
                     facing.push(u.facing);
                     state.push(u.state);
+                    ax.push(u.aim_x);
+                    ay.push(u.aim_y);
                 }
             }
         }
@@ -259,6 +382,8 @@ impl TwoWorldsEngine {
         out.set("alive", &alive);
         out.set("facing", &facing);
         out.set("state", &state);
+        out.set("aim_x", &ax);
+        out.set("aim_y", &ay);
         out
     }
 
@@ -379,6 +504,8 @@ impl TwoWorldsEngine {
             let mut alive = PackedByteArray::new();
             let mut facing = PackedByteArray::new();
             let mut state = PackedByteArray::new();
+            let mut ax = PackedFloat32Array::new();
+            let mut ay = PackedFloat32Array::new();
             for u in &frame.units {
                 fac.push(u.faction as u8);
                 kind.push(match u.kind {
@@ -391,6 +518,8 @@ impl TwoWorldsEngine {
                 alive.push(if u.alive { 1 } else { 0 });
                 facing.push(u.facing);
                 state.push(u.state);
+                ax.push(u.aim_x);
+                ay.push(u.aim_y);
             }
             fd.set("fac", &fac);
             fd.set("kind", &kind);
@@ -400,6 +529,8 @@ impl TwoWorldsEngine {
             fd.set("alive", &alive);
             fd.set("facing", &facing);
             fd.set("state", &state);
+            fd.set("aim_x", &ax);
+            fd.set("aim_y", &ay);
             frames_arr.push(&fd.to_variant());
         }
         out.set("frames", &frames_arr);
@@ -436,5 +567,18 @@ impl TwoWorldsEngine {
             }
         }
         GString::from(text.as_str())
+    }
+}
+
+impl TwoWorldsEngine {
+    fn store_custom_report(&mut self, report: BattleReport) -> Dict {
+        let mut out = Dict::new();
+        out.set("winner", report.winner.map(|x| x as i64).unwrap_or(-1));
+        out.set("ticks", report.ticks as i64);
+        out.set("frame_count", report.frames.len() as i64);
+        let unit_count: i64 = report.initial.iter().map(|(_, n)| *n as i64).sum();
+        out.set("unit_count", unit_count);
+        self.battles = vec![report];
+        out
     }
 }

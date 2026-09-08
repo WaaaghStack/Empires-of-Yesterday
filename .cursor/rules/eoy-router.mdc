@@ -10,7 +10,8 @@ Before planning or coding in this repo:
 1. Skim [docs/INDEX.md](../../docs/INDEX.md) for the right canon doc.
 2. Treat [DESIGN.md](../../DESIGN.md) § Design locks as product law. Do not “fix” intentional asymmetry (R1, A13/F1, F5–F7, A14, R2) without an explicit design-lock change.
 3. Prefer project skills under `.cursor/skills/` for procedures; prefer project agents under `.cursor/agents/` for role handoffs.
-4. Before claiming done on sim, placement, routing, or Rust changes: follow `eoy-qa-lifecycle` (and rebuild DLL via `eoy-rust-gdextension` if `rust/empire_territory/src/` changed).
+4. **Asana first.** Create or find a matching task in the right project (Two Worlds battles, Two Worlds campaign, etc.) *before* writing code. Implement against that task; move To do → Doing while working; Done + Status On track when finished. Reference the task by name and permalink, never invent work that has no card.
+5. Before claiming done on sim, placement, routing, or Rust changes: follow `eoy-qa-lifecycle` (and rebuild DLL via `eoy-rust-gdextension` if `rust/empire_territory/src/` changed).
 
 ## Skill map
 

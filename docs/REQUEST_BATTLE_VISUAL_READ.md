@@ -1,6 +1,6 @@
 # Request: battle visual read (it has to look like a fight)
 
-**Status:** product-owner directed visual contract. **Resolver slice implemented** (formation guide + individual LOS, bake facing/state/z) on `cursor/mvp-two-worlds-engine-0600`. Viewer plays those tracks (facing flip, fire flash, corpses). Diorama dressing / 8-way art / sound still open.  
+**Status:** product-owner directed visual contract. **Resolver + viewer slice implemented** on `cursor/mvp-two-worlds-engine-0600`: formation guide + individual LOS, bake `facing/state/z/aim`, diorama + dust, Y-axis billboards, **8-frame soldier run/shoot sheets** from baked march/rout/fire, traveling shots, brief hit flashes, even 1× playback with 0.25×–8× controls, sparse audio. No per-unit banners. Live World Conquest locks unchanged.  
 **Branch:** `cursor/mvp-two-worlds-engine-0600`  
 **Depends on:** [REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md](REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md) §6, skill `eoy-battle-resolve`  
 **Does not change** live World Conquest locks (R1, F5, F6, A14, …). Two Worlds stays a separate mode.
@@ -44,7 +44,7 @@ Same loop for **everything that will ever show up**:
 
 Cohesion is a **number per kind**, not a different engine. Tanks hug the guide. Soldiers drift and fight. Zombies almost ignore the slot and swarm. Planes never share the infantry hash for “walk to file.” One resolver, many profiles.
 
-Bodies **do not share a spot**: same-domain units keep personal space (`spacing`). Infantry deploys as **regiments of 100**, bombers as **wings of 5** with looser files so the field reads as several units, not one blob.
+Bodies **do not share a spot**: same-domain units keep personal space (`spacing`, infantry **3.6** vs 3.2 billboards). Infantry deploys as **regiments of 100**, bombers as **wings of 5** with looser files so the field reads as several units, not one blob.
 
 Prototype art stays soldiers + bombers. The **data model** must not assume those are the only two kinds (kind id, domain, reach, cohesion, weapon).
 
@@ -95,10 +95,10 @@ Melee-only troops may close the last few meters as a **charge** (short, committe
 
 This is the meat. It must look busy **in place**.
 
-- A **kill zone** between the two fronts: muzzle flashes, tracers / puffs, occasional bomber pass.
+- A **kill zone** between the two fronts: muzzle flashes, **short traveling shots** (not a held beam), bomb puffs, occasional bomber pass.
 - Individuals **face the nearest threat** (or the enemy line if none in LOS).
-- Fire is **rhythmic**, not a continuous glow: volley or stutter, then recock.
-- Hits **stagger or drop** people in the line; neighbors do not instantly teleport.
+- Fire is **rhythmic**, not a continuous glow: volley or stutter, then recock. Shooter sprites stay their normal color; the muzzle burst is the tell.
+- Hits **flash** the sprite briefly, then return to normal — they do not stay lit for the whole volley. They stagger or drop; neighbors do not instantly teleport.
 - The line may **ripple** (dress ranks, step into a hole) but the **front stays a front**.
 
 ### Beat 5 — Attrition / local collapse
@@ -129,9 +129,9 @@ These are presentation truths. Mechanics can fake them (longer visual reach, sto
 
 ### 3.1 Body and facing
 
-- [ ] **8-way facing preferred, 4-way minimum** relative to the *battlefield*, not the camera (already in the two-worlds request). Spherical billboards that always face the lens are a prototype crutch.
-- [ ] Walk cycle while moving; idle / aim while halted; fire / recoil on shot; hit react; death fall; rout run.
-- [ ] The sprite’s **weapon points at the enemy**, not at the viewer.
+- [x] **8-way facing preferred, 4-way minimum** relative to the *battlefield*, not the camera (already in the two-worlds request). Spherical billboards that always face the lens are a prototype crutch.
+- [x] Walk cycle while moving; idle / aim while halted; fire / recoil on shot; hit react; death fall; rout run.
+- [x] The sprite’s **weapon points at the enemy**, not at the viewer.
 - [ ] Silhouette must read at 1000 units: hat / gun / color block. Tiny identical dots fail.
 
 ### 3.2 Positioning (the main bug)
@@ -147,8 +147,8 @@ These are presentation truths. Mechanics can fake them (longer visual reach, sto
 Soldiers in this fantasy are **armed troops**, not fists.
 
 - [ ] Engagement range must be **obviously longer than personal space**. If they have to touch to “attack,” it will always look like a brawl-jog. Visual musket / rifle range can be a presentation reach even if damage math stays simple.
-- [ ] **Muzzle flash** (1–2 frames) on the fire tick.
-- [ ] **Tracer, smoke puff, or impact spark** on the line between shooter and target — cheap instanced quads are enough. The brain fills in “bullets” if the rhythm is right.
+- [x] **Muzzle flash** (1–2 frames) on the fire tick.
+- [x] **Tracer, smoke puff, or impact spark** on the line between shooter and target — cheap instanced quads are enough. The brain fills in “bullets” if the rhythm is right.
 - [ ] Cadence: not everyone fires the same frame. Stagger within the rank (already have attack cooldown — **show it**).
 - [ ] Recoil / kick pose so the body is not a static stamp while “fighting.”
 
@@ -159,8 +159,8 @@ Soldiers in this fantasy are **armed troops**, not fists.
 
 ### 3.5 Death and wounds
 
-- [ ] Dead stay as **corpses or stains** for the rest of the replay (LOD: far = dark splat / decal; near = fallen sprite).
-- [ ] Dying is a **fall**, not a pop-out (`scale = 0`).
+- [x] Dead stay as **corpses or stains** for the rest of the replay (LOD: far = dark splat / decal; near = fallen sprite).
+- [x] Dying is a **fall**, not a pop-out (`scale = 0`).
 - [ ] A thinning rank with bodies in front reads as a fight; empty grass does not.
 
 ### 3.6 Morale
@@ -177,8 +177,8 @@ Borrowed from how Total War / historical films cheat:
 
 - [ ] **Rectangular ranks** at deploy (already started in layout). Keep them during the advance.
 - [ ] **Depth**: at least 2–4 ranks so the army is a block, not a single-pixel skirmish line.
-- [ ] **Banners / flags / officer dots** every N files — the eye tracks 6 landmarks, not 800 hats.
-- [ ] **Dust, kicked dirt, or a faint haze** on the contact band (GPU particles or a scrolling noise strip). Mass without dust looks like chess.
+- [x] **Banners / flags / officer dots** every N files — the eye tracks 6 landmarks, not 800 hats.
+- [x] **Dust, kicked dirt, or a faint haze** on the contact band (GPU particles or a scrolling noise strip). Mass without dust looks like chess.
 - [ ] **Color blocks** stay separated until contact. Friendly and hostile should not marble until the front actually meets.
 - [ ] Casualties create **ragged holes**; optional slow **dressing** (neighbors slide into gaps). Instant teleport-fill looks robotic.
 
@@ -190,12 +190,12 @@ Individual overlap is allowed (Dominions-ish) **until it destroys the silhouette
 
 A fight needs **ground that explains itself**.
 
-- [ ] Province-themed slab (biome, a hill, a road, a treeline, a ruin, a river edge) — already requested; still a flat green plane today.
-- [ ] **A visible no-man’s-land** at start: empty dirt between the two deployments.
-- [ ] High ground / chokepoint as **dressing** even if the first resolver ignores it. The camera should have something to orbit besides sprites.
-- [ ] Scale cues: a wagon, a wall fragment, a lone tree. Without them, 3.2-unit sprites on a 200×120 plane feel like stickers.
-- [ ] Light: a directional sun + slightly warm/cool sides so armies read left vs right. Unshaded identical lighting flattens everything.
-- [ ] Keep GameTheme HUD chrome **thin**; the diorama is the star (`eoy-ui-theme`).
+- [x] Province-themed slab (biome, a hill, a road, a treeline, a ruin, a river edge).
+- [x] **A visible no-man’s-land** at start: empty dirt between the two deployments.
+- [x] High ground / chokepoint as **dressing** even if the first resolver ignores it. The camera should have something to orbit besides sprites.
+- [x] Scale cues: a wagon, a wall fragment, a lone tree. Without them, 3.2-unit sprites on the slab feel like stickers. Custom Battle slab is **1000×600** (5× the original 200×120) so 10k-body stress tests have room.
+- [x] Light: a directional sun + slightly warm/cool sides so armies read left vs right. Unshaded identical lighting flattens everything.
+- [x] Keep GameTheme HUD chrome **thin**; the diorama is the star (`eoy-ui-theme`).
 
 ---
 
@@ -215,13 +215,13 @@ The camera is part of the lie that makes it look real.
 
 Mechanics can resolve in 1400 ticks. The **watch** should feel like a small action, not a commute.
 
-- [ ] Tableau is still.
-- [ ] Advance is the slow beat (most of the travel time lives here).
-- [ ] Exchange is longer than the approach once they have met — the current “walk forever because centroid moved” inverts this.
-- [ ] Break is fast.
-- [ ] Hold / occupy is a short button on the end, then UI can say resolved.
+- [x] Tableau is still.
+- [x] Advance is the slow beat (most of the travel time lives here).
+- [x] Exchange is longer than the approach once they have met — the current “walk forever because centroid moved” inverts this.
+- [x] Break is fast.
+- [x] Hold / occupy is a short button on the end, then UI can say resolved.
 
-Playback speed controls (1× / 2× / …) stay. **1× must already look like a fight**, not a corrected fast-forward of a broken sim.
+Playback speed controls (0.25× / 0.5× / 1× / 2× / 4× / 8×) stay. Default is **even 1×** — the viewer does not auto-slow the form-up or speed up the fight. **1× must already look like a fight**, not a corrected fast-forward of a broken sim.
 
 ---
 
@@ -229,9 +229,9 @@ Playback speed controls (1× / 2× / …) stay. **1× must already look like a f
 
 Do not put aircraft in the infantry brain. They share the resolver; they do not share files.
 
-- [ ] Altitude: clearly **above** the slab.
-- [ ] Paths: passes along the front or diving on a cluster, then out — not taxiing through the soldier blob.
-- [ ] Attacks: bomb puff / shock ring on the ground (F7-style visual cap is a live-game lock; Two Worlds can still keep FX sparse).
+- [x] Altitude: clearly **above** the slab.
+- [x] Paths: **overfly, drop, continue, turn, next pass** — not hovering gunships or taxiing through the soldier blob.
+- [x] Attacks: **ground blast** (bomb puff / shock ring). Infantry small-arms vs aircraft are weak (~50 soldiers to confidently kill one bomber). Blast **launches** land bodies; they take damage and land elsewhere — not a guaranteed kill.
 - [ ] If they “fight” other bombers, that is a high dogfight layer, not ground centroid-seek.
 
 ---
@@ -246,7 +246,7 @@ Rust owns:
 - Per-body: cohesion toward slot, local LOS target, attack if in that kind’s weapon range, HP, rout.
 - Kind profiles: domain (land/air/sea), cohesion, reach, speed, altitude.
 
-The bake is the report (`facing`, `state`, position, optional `z`). Godot interpolates it and may spawn **purely cosmetic** flashes/tracers on fire ticks. If a unit did not fire in Rust, the viewer does not pretend it did.
+The bake is the report (`facing`, `state`, position, optional `z`). Godot interpolates it and may spawn **purely cosmetic** muzzle flashes and **short traveling shot streaks** from fire ticks (not a shooter-to-target beam). Hit tint is a **brief flash**, not a held glow. If a unit did not fire in Rust, the viewer does not pretend it did.
 
 Not allowed:
 
@@ -316,7 +316,7 @@ Headless goldens should assert **phase geometry** (median X of living attackers 
 2. **Bake state + facing** — even with the current single sprite, a 4-way flip and a flash quad change the read.
 3. **Corpses stay.**
 4. **Camera default** that shows both lines; auto-rotate off.
-5. **Diorama dressing** + banners + dust.
-6. **Walk / fire frames** when art exists; 8-way when budget allows.
+5. **Diorama dressing** + dust.
+6. **Walk / fire frames** — 8-frame soldier sheets (`ST_MARCH`/`ST_ROUT` run, `ST_FIRE` shoot); 8-way unique art when budget allows.
 
 Items 1–4 are the difference between “RTS leak” and “a battle.” 5–6 make it handsome.

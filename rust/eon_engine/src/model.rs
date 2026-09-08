@@ -76,20 +76,34 @@ impl UnitKind {
     pub fn base_hp(self) -> f32 {
         match self {
             UnitKind::Soldier => 100.0,
-            UnitKind::Bomber => 60.0,
+            UnitKind::Bomber => 540.0,
         }
     }
     pub fn base_attack(self) -> f32 {
         match self {
             UnitKind::Soldier => 12.0,
-            UnitKind::Bomber => 22.0,
+            UnitKind::Bomber => 55.0,
         }
     }
     /// Weapon reach — must be long enough to shoot across the engagement gap.
     pub fn reach(self) -> f32 {
         match self {
             UnitKind::Soldier => 28.0,
-            UnitKind::Bomber => 26.0,
+            UnitKind::Bomber => 18.0,
+        }
+    }
+    /// Small-arms vs aircraft. ~50 infantry should bring one bomber down; a handful should not.
+    pub fn vs_air(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 0.08,
+            UnitKind::Bomber => 1.0,
+        }
+    }
+    /// Ground blast radius. Zero = single-target (rifle).
+    pub fn blast_radius(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 0.0,
+            UnitKind::Bomber => 12.0,
         }
     }
     pub fn move_speed(self) -> f32 {
@@ -111,11 +125,12 @@ impl UnitKind {
             UnitKind::Bomber => 5,
         }
     }
-    /// Center-to-center personal space. Bombers fly looser than infantry files.
+    /// Center-to-center personal space. A hair wider than the HD-2D billboard
+    /// (soldiers 3.2, bombers 5.2) so files don't sit in the same dirt.
     pub fn spacing(self) -> f32 {
         match self {
-            UnitKind::Soldier => 1.9,
-            UnitKind::Bomber => 5.2,
+            UnitKind::Soldier => 3.6,
+            UnitKind::Bomber => 6.4,
         }
     }
 }

@@ -293,6 +293,7 @@ fn battles_phase(world: &mut World, ledger: &mut Ledger) -> Vec<BattleReport> {
             .iter()
             .any(|a| a.province == pid as ProvinceId && a.faction == 1 && !a.is_empty());
         if f0 && f1 {
+            // Nested ResolveBattle: casualties + consecrate/claim post back to the World ledger.
             reports.push(battle::resolve_battle_in_province(
                 world,
                 ledger,

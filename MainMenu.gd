@@ -43,13 +43,9 @@ var _theater_id: String = CFG.THEATER_EARTH
 var _settings_open: bool = false
 var _start_region_id: int = 0
 
-# Custom Battle setup UI (built in code so we never hand-edit MainMenu.tscn).
-var _cb_panel: PanelContainer = null
-var _cb_size0_slider: HSlider
-var _cb_size1_slider: HSlider
-var _cb_size0_label: Label
-var _cb_size1_label: Label
-var _cb_seed_spin: SpinBox
+# Custom Battle setup overlay (built in code so we never hand-edit MainMenu.tscn).
+const CustomBattleSetupScript := preload("res://CustomBattleSetup.gd")
+var _cb_panel: Control = null
 
 
 func _ready() -> void:
@@ -467,10 +463,24 @@ func _add_two_worlds_button() -> void:
 	parent.move_child(dd_btn, cb_btn.get_index() + 1)
 	dd_btn.pressed.connect(_on_data_dictionary_pressed)
 
+	# Lore — in-game encyclopedia for the Hearthspan setting (exploratory; not a live lock).
+	var lore_btn := Button.new()
+	lore_btn.name = "LoreButton"
+	lore_btn.text = "Lore"
+	GameTheme.apply_ghost_button(lore_btn)
+	parent.add_child(lore_btn)
+	parent.move_child(lore_btn, dd_btn.get_index() + 1)
+	lore_btn.pressed.connect(_on_lore_pressed)
+
 
 func _on_data_dictionary_pressed() -> void:
 	RunLog.info("Opening Data Dictionary")
 	get_tree().change_scene_to_file("res://DataDictionary.tscn")
+
+
+func _on_lore_pressed() -> void:
+	RunLog.info("Opening Lore")
+	get_tree().change_scene_to_file("res://Lore.tscn")
 
 
 func _on_two_worlds_pressed() -> void:
@@ -480,149 +490,25 @@ func _on_two_worlds_pressed() -> void:
 
 func _on_custom_battle_pressed() -> void:
 	if _cb_panel == null:
-		_build_custom_battle_panel()
+		_cb_panel = Control.new()
+		_cb_panel.set_script(CustomBattleSetupScript)
+		_cb_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+		add_child(_cb_panel)
+		_cb_panel.cancelled.connect(func(): _cb_panel.visible = false)
+		_cb_panel.fight_requested.connect(_on_custom_battle_fight)
 	_cb_panel.visible = true
 	_cb_panel.move_to_front()
 
 
-func _build_custom_battle_panel() -> void:
-	_cb_panel = PanelContainer.new()
-	_cb_panel.name = "CustomBattlePanel"
-	_cb_panel.add_theme_stylebox_override(
-		"panel", GameTheme.make_panel_style(Color(0.09, 0.11, 0.16, 0.97))
-	)
-	_cb_panel.anchor_left = 0.5
-	_cb_panel.anchor_top = 0.5
-	_cb_panel.anchor_right = 0.5
-	_cb_panel.anchor_bottom = 0.5
-	_cb_panel.offset_left = -340.0
-	_cb_panel.offset_top = -220.0
-	_cb_panel.offset_right = 340.0
-	_cb_panel.offset_bottom = 220.0
-	add_child(_cb_panel)
-
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 22)
-	margin.add_theme_constant_override("margin_right", 22)
-	margin.add_theme_constant_override("margin_top", 18)
-	margin.add_theme_constant_override("margin_bottom", 18)
-	_cb_panel.add_child(margin)
-
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 14)
-	margin.add_child(vb)
-
-	var title := Label.new()
-	title.text = "Custom Battle"
-	title.add_theme_font_size_override("font_size", 26)
-	vb.add_child(title)
-
-	var blurb := Label.new()
-	blurb.text = "Mass two armies and watch the HD-2D battle resolve (85% soldiers, 15% bombers per side)."
-	blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	blurb.add_theme_color_override("font_color", GameTheme.TEXT_MUTED)
-	vb.add_child(blurb)
-
-	_cb_size0_slider = HSlider.new()
-	_cb_size0_label = Label.new()
-	vb.add_child(_make_size_row("Blue army", 400, _cb_size0_slider, _cb_size0_label))
-
-	_cb_size1_slider = HSlider.new()
-	_cb_size1_label = Label.new()
-	vb.add_child(_make_size_row("Red army", 400, _cb_size1_slider, _cb_size1_label))
-
-	var seed_row := HBoxContainer.new()
-	seed_row.add_theme_constant_override("separation", 10)
-	var seed_lbl := Label.new()
-	seed_lbl.text = "Seed"
-	seed_lbl.custom_minimum_size = Vector2(120, 0)
-	seed_row.add_child(seed_lbl)
-	_cb_seed_spin = SpinBox.new()
-	_cb_seed_spin.min_value = 0
-	_cb_seed_spin.max_value = 2147483647
-	_cb_seed_spin.step = 1
-	_cb_seed_spin.value = 1
-	_cb_seed_spin.rounded = true
-	_cb_seed_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	seed_row.add_child(_cb_seed_spin)
-	var reroll := Button.new()
-	reroll.text = "Reroll"
-	GameTheme.apply_ghost_button(reroll)
-	reroll.pressed.connect(func(): _cb_seed_spin.value = float(randi() & 0x7FFFFFFF))
-	seed_row.add_child(reroll)
-	vb.add_child(seed_row)
-
-	var spacer := Control.new()
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vb.add_child(spacer)
-
-	var btn_row := HBoxContainer.new()
-	btn_row.add_theme_constant_override("separation", 12)
-	btn_row.alignment = BoxContainer.ALIGNMENT_END
-	var back_btn := Button.new()
-	back_btn.text = "Back"
-	back_btn.custom_minimum_size = Vector2(120, 44)
-	GameTheme.apply_ghost_button(back_btn)
-	back_btn.pressed.connect(func(): _cb_panel.visible = false)
-	btn_row.add_child(back_btn)
-	var fight_btn := Button.new()
-	fight_btn.text = "Fight!"
-	fight_btn.custom_minimum_size = Vector2(160, 44)
-	GameTheme.apply_primary_button(fight_btn)
-	fight_btn.pressed.connect(_on_custom_battle_fight)
-	btn_row.add_child(fight_btn)
-	vb.add_child(btn_row)
-
-
-func _make_size_row(name_text: String, default_size: int, slider: HSlider, value_label: Label) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	var name_lbl := Label.new()
-	name_lbl.text = name_text
-	name_lbl.custom_minimum_size = Vector2(120, 0)
-	row.add_child(name_lbl)
-	slider.min_value = 100
-	slider.max_value = 1200
-	slider.step = 100
-	slider.value = default_size
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	slider.custom_minimum_size = Vector2(0, 30)
-	row.add_child(slider)
-	value_label.custom_minimum_size = Vector2(220, 0)
-	value_label.text = _cb_army_label(default_size)
-	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(value_label)
-	slider.value_changed.connect(func(v: float): value_label.text = _cb_army_label(int(v)))
-	return row
-
-
-func _cb_army_label(size: int) -> String:
-	var inf: int = maxi(1, size / 100)
-	var wings: int = maxi(0, inf / 2)
-	return "%d inf. units (%d) · %d bomber wings (%d)" % [inf, inf * 100, wings, wings * 5]
-
-
-func _on_custom_battle_fight() -> void:
-	var size0 := int(_cb_size0_slider.value)
-	var size1 := int(_cb_size1_slider.value)
-	var battle_seed := int(_cb_seed_spin.value)
-	if battle_seed <= 0:
-		battle_seed = 1
-	var inf0 := maxi(1, size0 / 100)
-	var inf1 := maxi(1, size1 / 100)
-	var wings0 := maxi(0, inf0 / 2)
-	var wings1 := maxi(0, inf1 / 2)
-	RunState.set_meta("custom_battle", {
-		"seed": battle_seed,
-		"f0_soldiers": inf0 * 100,
-		"f0_bombers": wings0 * 5,
-		"f1_soldiers": inf1 * 100,
-		"f1_bombers": wings1 * 5,
-	})
-	RunLog.info(
-		"Custom Battle: seed=%d blue=%d inf + %d wings vs red=%d inf + %d wings"
-		% [battle_seed, inf0, wings0, inf1, wings1]
-	)
+func _on_custom_battle_fight(params: Dictionary) -> void:
+	RunState.set_meta("custom_battle", params)
+	var roster: Array = params.get("roster", [])
+	RunLog.info("Custom Battle: seed=%d roster=%d order=%d/%d" % [
+		int(params.get("seed", 1)),
+		roster.size(),
+		int(params.get("order0", 0)),
+		int(params.get("order1", 0)),
+	])
 	get_tree().change_scene_to_file("res://TwoWorldsBattle.tscn")
 
 
