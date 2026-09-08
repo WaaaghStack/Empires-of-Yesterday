@@ -10,12 +10,17 @@ use crate::ledger::{Account, Ledger, Phase};
 use crate::model::{FactionId, ProvinceId, UnitKind, World};
 use crate::rng::Rng;
 
-pub const BATTLE_WIDTH: f32 = 120.0;
-pub const BATTLE_HEIGHT: f32 = 80.0;
+pub const BATTLE_WIDTH: f32 = 200.0;
+pub const BATTLE_HEIGHT: f32 = 120.0;
 const DT: f32 = 1.0;
-const MAX_TICKS: u32 = 400;
-const RECORD_STRIDE: u32 = 5;
-const ROUT_CASUALTY_FRAC: f32 = 0.55;
+const MAX_TICKS: u32 = 1400;
+const RECORD_STRIDE: u32 = 3;
+const ROUT_CASUALTY_FRAC: f32 = 0.6;
+/// Attack cadence: a unit strikes at most once every this many ticks. This stretches the melee
+/// grind over many ticks so a large battle plays out over minutes rather than a few seconds.
+const ATTACK_COOLDOWN: u32 = 3;
+/// Spatial-hash cell size (>= max unit reach) for O(n) target queries at scale.
+const GRID_CELL: f32 = 7.0;
 /// Faith the victor consecrates into the contested province.
 const CONSECRATE: f32 = 8.0;
 
@@ -28,6 +33,8 @@ struct Unit {
     y: f32,
     hp: f32,
     alive: bool,
+    /// Earliest tick this unit may attack again (attack cooldown).
+    next_attack: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +120,9 @@ pub fn resolve_battle_in_province(
     let mut next_sid = 0u32;
 
     for (side_idx, &fac) in sides.iter().enumerate() {
+        // Gather this side's units first, then lay them out as one rectangular formation so large
+        // armies (hundreds of units) pack neatly near their baseline without running off-field.
+        let mut side_units: Vec<usize> = Vec::new();
         for army in world.armies.iter().filter(|a| a.faction == fac && a.province == province) {
             for sq in &army.squads {
                 if sq.count == 0 {
@@ -120,29 +130,34 @@ pub fn resolve_battle_in_province(
                 }
                 let sid = next_sid;
                 next_sid += 1;
-                squads.push(SquadState {
-                    id: sid,
-                    initial: sq.count,
-                    routing: false,
-                });
-                // Formation: rows near this side's baseline.
-                let base_x = if side_idx == 0 { 15.0 } else { BATTLE_WIDTH - 15.0 };
-                for k in 0..sq.count {
-                    let row = (k / 10) as f32;
-                    let col = (k % 10) as f32;
-                    let x = if side_idx == 0 { base_x - row * 3.0 } else { base_x + row * 3.0 };
-                    let y = 10.0 + col * (BATTLE_HEIGHT - 20.0) / 10.0;
+                squads.push(SquadState { id: sid, initial: sq.count, routing: false });
+                for _ in 0..sq.count {
+                    side_units.push(units.len());
                     units.push(Unit {
                         faction: fac,
                         kind: sq.kind,
                         squad: sid,
-                        x,
-                        y,
+                        x: 0.0,
+                        y: 0.0,
                         hp: sq.kind.base_hp(),
                         alive: true,
+                        next_attack: 0,
                     });
                 }
             }
+        }
+        let n = side_units.len().max(1);
+        let cols = ((n as f32).sqrt() * 1.4).round().clamp(14.0, 44.0) as usize;
+        let sx = 2.0; // row depth spacing (receding toward own edge)
+        let sy = 1.9; // column spacing
+        let baseline = if side_idx == 0 { 35.0 } else { BATTLE_WIDTH - 35.0 };
+        let dir = if side_idx == 0 { 1.0 } else { -1.0 };
+        let y0 = BATTLE_HEIGHT * 0.5 - (cols as f32 - 1.0) * sy * 0.5;
+        for (m, &ui) in side_units.iter().enumerate() {
+            let row = (m / cols) as f32;
+            let col = (m % cols) as f32;
+            units[ui].x = baseline - dir * row * sx;
+            units[ui].y = y0 + col * sy;
         }
     }
 
@@ -157,10 +172,39 @@ pub fn resolve_battle_in_province(
 
     record_frame(&mut frames, tick, &units);
 
+    let grid_cols = (BATTLE_WIDTH / GRID_CELL).ceil() as i32 + 1;
+    let grid_rows = (BATTLE_HEIGHT / GRID_CELL).ceil() as i32 + 1;
     while tick < MAX_TICKS && both_sides_alive(&units, attacker, defender) {
         tick += 1;
         update_squad_morale(&mut squads, &units);
-        // Individual step in id order → deterministic. Damage applied immediately.
+
+        // Per-faction centroid of living units (used as the "advance to contact" target — O(n)).
+        let fc = world.faction_count();
+        let mut csum = vec![(0.0f32, 0.0f32, 0u32); fc];
+        for u in units.iter() {
+            if u.alive {
+                let e = &mut csum[u.faction as usize];
+                e.0 += u.x;
+                e.1 += u.y;
+                e.2 += 1;
+            }
+        }
+        let centroid = |f: usize| -> (f32, f32) {
+            let e = csum[f];
+            if e.2 == 0 { (BATTLE_WIDTH * 0.5, BATTLE_HEIGHT * 0.5) } else { (e.0 / e.2 as f32, e.1 / e.2 as f32) }
+        };
+
+        // Uniform-grid spatial hash of living units (O(n)); deterministic bucket order.
+        let cell_of = |x: f32, y: f32| -> (i32, i32) {
+            ((x / GRID_CELL) as i32, (y / GRID_CELL) as i32)
+        };
+        let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+        for (idx, u) in units.iter().enumerate() {
+            if u.alive {
+                grid.entry(cell_of(u.x, u.y)).or_default().push(idx);
+            }
+        }
+
         for i in 0..units.len() {
             if !units[i].alive {
                 continue;
@@ -170,22 +214,6 @@ pub fn resolve_battle_in_province(
                 (u.x, u.y, u.kind.reach(), u.kind, u.faction, u.squad)
             };
             let routing = squads.iter().find(|s| s.id == squad).map(|s| s.routing).unwrap_or(false);
-
-            // Nearest living enemy (id order breaks ties deterministically).
-            let mut target: Option<usize> = None;
-            let mut best_d2 = f32::MAX;
-            for j in 0..units.len() {
-                let e = &units[j];
-                if !e.alive || e.faction == fac {
-                    continue;
-                }
-                let d2 = (e.x - ux).powi(2) + (e.y - uy).powi(2);
-                if d2 < best_d2 {
-                    best_d2 = d2;
-                    target = Some(j);
-                }
-            }
-
             if routing {
                 // Flee toward own baseline; no attacks.
                 let dir = if fac == attacker { -1.0 } else { 1.0 };
@@ -193,24 +221,64 @@ pub fn resolve_battle_in_province(
                 continue;
             }
 
-            match target {
-                Some(j) if best_d2.sqrt() <= reach => {
-                    // In reach → attack (small seeded jitter on damage keeps it lively but fair).
-                    let jitter = 0.9 + 0.2 * rng.next_f32();
-                    let dmg = kind.base_attack() * jitter * DT;
-                    units[j].hp -= dmg;
-                    if units[j].hp <= 0.0 {
-                        units[j].alive = false;
+            // Nearest enemy within reach via the 3x3 neighborhood of cells (deterministic order).
+            let (cx, cy) = cell_of(ux, uy);
+            let reach2 = reach * reach;
+            let mut target: Option<usize> = None;
+            let mut best_d2 = f32::MAX;
+            for gy in (cy - 1)..=(cy + 1) {
+                for gx in (cx - 1)..=(cx + 1) {
+                    if gx < -1 || gy < -1 || gx > grid_cols || gy > grid_rows {
+                        continue;
+                    }
+                    if let Some(bucket) = grid.get(&(gx, gy)) {
+                        for &j in bucket {
+                            let e = &units[j];
+                            if !e.alive || e.faction == fac {
+                                continue;
+                            }
+                            let d2 = (e.x - ux).powi(2) + (e.y - uy).powi(2);
+                            if d2 <= reach2 && d2 < best_d2 {
+                                best_d2 = d2;
+                                target = Some(j);
+                            }
+                        }
                     }
                 }
+            }
+
+            match target {
                 Some(j) => {
-                    // Advance toward the target (squad brain: move to contact).
-                    let (tx, ty) = (units[j].x, units[j].y);
-                    let d = best_d2.sqrt().max(1e-3);
-                    units[i].x += (tx - ux) / d * kind.move_speed() * DT;
-                    units[i].y += (ty - uy) / d * kind.move_speed() * DT;
+                    // Enemy in reach: attack if off cooldown, else hold position.
+                    if tick >= units[i].next_attack {
+                        let jitter = 0.9 + 0.2 * rng.next_f32();
+                        let dmg = kind.base_attack() * jitter;
+                        units[j].hp -= dmg;
+                        if units[j].hp <= 0.0 {
+                            units[j].alive = false;
+                        }
+                        units[i].next_attack = tick + ATTACK_COOLDOWN;
+                    }
                 }
-                None => {}
+                None => {
+                    // Advance to contact toward the enemy faction centroid.
+                    let mut enemy = (BATTLE_WIDTH * 0.5, BATTLE_HEIGHT * 0.5);
+                    let mut best = -1.0f32;
+                    for f in 0..fc {
+                        if f as FactionId == fac {
+                            continue;
+                        }
+                        if csum[f].2 as f32 > best {
+                            best = csum[f].2 as f32;
+                            enemy = centroid(f);
+                        }
+                    }
+                    let dx = enemy.0 - ux;
+                    let dy = enemy.1 - uy;
+                    let d = (dx * dx + dy * dy).sqrt().max(1e-3);
+                    units[i].x += dx / d * kind.move_speed() * DT;
+                    units[i].y += dy / d * kind.move_speed() * DT;
+                }
             }
         }
 

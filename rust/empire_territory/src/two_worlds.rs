@@ -8,8 +8,8 @@
 //! Status: exploratory MVP (docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). Additive/opt-in — it
 //! does not touch the live World Conquest path.
 
-use eon_engine::battle::{BATTLE_HEIGHT, BATTLE_WIDTH};
-use eon_engine::model::{FactionId, GemPath, UnitKind};
+use eon_engine::battle::{resolve_battle_in_province, BattleReport, BATTLE_HEIGHT, BATTLE_WIDTH};
+use eon_engine::model::{FactionId, GemPath, Squad, UnitKind};
 use eon_engine::{
     run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Ledger, Outcome, TurnReport,
     World,
@@ -26,6 +26,8 @@ pub struct TwoWorldsEngine {
     ledger: Option<Ledger>,
     last_report: Option<TurnReport>,
     last_outcome: String,
+    /// Battles available for the viewer — set from the last turn or a custom battle.
+    battles: Vec<BattleReport>,
 }
 
 #[godot_api]
@@ -153,7 +155,101 @@ impl TwoWorldsEngine {
             battles.push(&bd.to_variant());
         }
         out.set("battles", &battles);
+        self.battles = report.battles.clone();
         self.last_report = Some(report);
+        out
+    }
+
+    /// Resolve a single standalone battle (Custom Battle testing tool). Stores it as the current
+    /// battle so the viewer can stream frames. Returns a summary dict.
+    #[func]
+    fn resolve_custom_battle(
+        &mut self,
+        seed: i64,
+        f0_soldiers: i64,
+        f0_bombers: i64,
+        f1_soldiers: i64,
+        f1_bombers: i64,
+    ) -> Dict {
+        let (mut w, mut l) = scenario::duel_line(3, seed as u64);
+        let s = w.seed;
+        let mk = |sol: i64, bom: i64| -> Vec<Squad> {
+            let mut v = Vec::new();
+            if sol > 0 {
+                v.push(Squad { kind: UnitKind::Soldier, count: sol as u32 });
+            }
+            if bom > 0 {
+                v.push(Squad { kind: UnitKind::Bomber, count: bom as u32 });
+            }
+            v
+        };
+        scenario::recruit_army(&mut w, &mut l, 0, 1, mk(f0_soldiers, f0_bombers));
+        scenario::recruit_army(&mut w, &mut l, 1, 1, mk(f1_soldiers, f1_bombers));
+        let report = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, s);
+        let mut out = Dict::new();
+        out.set("winner", report.winner.map(|x| x as i64).unwrap_or(-1));
+        out.set("ticks", report.ticks as i64);
+        out.set("frame_count", report.frames.len() as i64);
+        let unit_count: i64 = report.initial.iter().map(|(_, n)| *n as i64).sum();
+        out.set("unit_count", unit_count);
+        self.battles = vec![report];
+        out
+    }
+
+    /// Static per-unit data for a battle (constant across frames): counts + faction/kind arrays,
+    /// plus battlefield dims and frame count. Fetch once, then stream frames.
+    #[func]
+    fn get_last_battle_meta(&self, index: i64) -> Dict {
+        let mut out = Dict::new();
+        out.set("width", BATTLE_WIDTH);
+        out.set("height", BATTLE_HEIGHT);
+        out.set("frame_count", 0);
+        out.set("unit_count", 0);
+        let Some(b) = self.battles.get(index.max(0) as usize) else {
+            return out;
+        };
+        out.set("frame_count", b.frames.len() as i64);
+        out.set("province", b.province as i64);
+        out.set("attacker", b.attacker as i64);
+        out.set("defender", b.defender as i64);
+        out.set("winner", b.winner.map(|w| w as i64).unwrap_or(-1));
+        let mut fac = PackedByteArray::new();
+        let mut kind = PackedByteArray::new();
+        if let Some(f0) = b.frames.first() {
+            for u in &f0.units {
+                fac.push(u.faction as u8);
+                kind.push(match u.kind {
+                    UnitKind::Soldier => 0,
+                    UnitKind::Bomber => 1,
+                });
+            }
+        }
+        out.set("unit_count", fac.len() as i64);
+        out.set("fac", &fac);
+        out.set("kind", &kind);
+        out
+    }
+
+    /// Per-frame positions for a battle: { x:PackedFloat32Array, y:PackedFloat32Array,
+    /// alive:PackedByteArray }. Streamed on demand so large battles never marshal all at once.
+    #[func]
+    fn get_last_battle_frame_xy(&self, index: i64, frame: i64) -> Dict {
+        let mut out = Dict::new();
+        let mut xs = PackedFloat32Array::new();
+        let mut ys = PackedFloat32Array::new();
+        let mut alive = PackedByteArray::new();
+        if let Some(b) = self.battles.get(index.max(0) as usize) {
+            if let Some(f) = b.frames.get(frame.max(0) as usize) {
+                for u in &f.units {
+                    xs.push(u.x);
+                    ys.push(u.y);
+                    alive.push(if u.alive { 1 } else { 0 });
+                }
+            }
+        }
+        out.set("x", &xs);
+        out.set("y", &ys);
+        out.set("alive", &alive);
         out
     }
 
@@ -259,10 +355,7 @@ impl TwoWorldsEngine {
         out.set("height", BATTLE_HEIGHT);
         let frames_arr = Array::<Variant>::new();
         out.set("frames", &frames_arr);
-        let Some(report) = self.last_report.as_ref() else {
-            return out;
-        };
-        let Some(battle) = report.battles.get(index.max(0) as usize) else {
+        let Some(battle) = self.battles.get(index.max(0) as usize) else {
             return out;
         };
         let mut frames_arr = Array::<Variant>::new();
