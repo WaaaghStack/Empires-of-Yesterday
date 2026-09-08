@@ -458,6 +458,20 @@ func _add_two_worlds_button() -> void:
 	parent.move_child(cb_btn, tw_btn.get_index() + 1)
 	cb_btn.pressed.connect(_on_custom_battle_pressed)
 
+	# Data Dictionary — in-game reference for the tables that populate the game (Unity Catalog style).
+	var dd_btn := Button.new()
+	dd_btn.name = "DataDictionaryButton"
+	dd_btn.text = "Data Dictionary"
+	GameTheme.apply_ghost_button(dd_btn)
+	parent.add_child(dd_btn)
+	parent.move_child(dd_btn, cb_btn.get_index() + 1)
+	dd_btn.pressed.connect(_on_data_dictionary_pressed)
+
+
+func _on_data_dictionary_pressed() -> void:
+	RunLog.info("Opening Data Dictionary")
+	get_tree().change_scene_to_file("res://DataDictionary.tscn")
+
 
 func _on_two_worlds_pressed() -> void:
 	RunLog.info("Launching Two Worlds (turn-based globe MVP)")
