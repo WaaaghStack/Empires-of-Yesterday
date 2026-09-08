@@ -19,6 +19,7 @@ pub enum VictoryKind {
     Conquest,
     DominionKill,
     Ascension,
+    Score,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +343,21 @@ fn win_check(world: &World) -> Outcome {
     if alive_faith.len() == 1 {
         return Outcome::Victory(alive_faith[0], VictoryKind::DominionKill);
     }
+    // Turn-limit score victory: most owned land, tie-broken by total dominion. Guarantees a
+    // decisive outcome on large symmetric maps.
+    if world.turn >= cfg.turn_limit {
+        let mut best = 0u32;
+        let mut best_key = (-1i64, -1.0f32);
+        for f in 0..fc {
+            let fid = f as FactionId;
+            let key = (world.owned_land(fid) as i64, world.total_dominion(fid));
+            if key.0 > best_key.0 || (key.0 == best_key.0 && key.1 > best_key.1) {
+                best_key = key;
+                best = fid;
+            }
+        }
+        return Outcome::Victory(best, VictoryKind::Score);
+    }
     Outcome::Ongoing
 }
 
@@ -392,26 +408,40 @@ fn make_report(
 /// frontier; aim spies at adjacent enemy provinces. Enough to make turns evolve reproducibly.
 fn generate_ai_orders(world: &mut World) {
     let cfg = world.cfg.clone();
-    // Armies: attack into an adjacent enemy-held province if one exists (guarantees contact);
-    // otherwise expand toward the lowest-id neighbor not owned by self.
+    // Armies: (1) attack an adjacent enemy army, else (2) advance toward the neighbor with the most
+    // enemy faith (the frontier — drives armies to clash), else (3) expand into a non-owned
+    // neighbor. Frontier-seeking is what makes battles happen on large maps.
+    let fc = world.faction_count();
     for i in 0..world.armies.len() {
         let (fac, prov) = (world.armies[i].faction, world.armies[i].province);
         let mut neigh = world.provinces[prov as usize].neighbors.clone();
         neigh.sort_unstable();
-        // Prefer a neighbor that holds an enemy army.
         let attack = neigh.iter().copied().find(|&nb| {
             world
                 .armies
                 .iter()
                 .any(|a| a.province == nb && a.faction != fac && !a.is_empty())
         });
-        let order = attack.or_else(|| {
-            neigh
-                .iter()
-                .copied()
-                .find(|&nb| world.provinces[nb as usize].owner(&cfg) != Some(fac))
-        });
-        world.armies[i].move_to = order;
+        let frontier = {
+            let mut best: Option<u32> = None;
+            let mut best_enemy = 0.0f32;
+            for &nb in &neigh {
+                let enemy: f32 = (0..fc)
+                    .filter(|&f| f as FactionId != fac)
+                    .map(|f| world.provinces[nb as usize].dom[f])
+                    .sum();
+                if enemy > best_enemy {
+                    best_enemy = enemy;
+                    best = Some(nb);
+                }
+            }
+            best
+        };
+        let expand = neigh
+            .iter()
+            .copied()
+            .find(|&nb| world.provinces[nb as usize].owner(&cfg) != Some(fac));
+        world.armies[i].move_to = attack.or(frontier).or(expand);
     }
     // Prophets: move to the neighbor where our faith is weakest (spread frontier). Spies: target
     // an adjacent province owned by someone else.

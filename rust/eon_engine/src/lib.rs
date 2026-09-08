@@ -110,6 +110,7 @@ pub fn run_ai_vs_ai_batch(count: u32, max_turns: u32) -> String {
     let mut ascension = 0u32;
     let mut conquest = 0u32;
     let mut dominion_kill = 0u32;
+    let mut score = 0u32;
     let mut ongoing = 0u32;
     let mut battles_total = 0u32;
     let mut all_reconciled = true;
@@ -131,6 +132,7 @@ pub fn run_ai_vs_ai_batch(count: u32, max_turns: u32) -> String {
                     VictoryKind::Ascension => ascension += 1,
                     VictoryKind::Conquest => conquest += 1,
                     VictoryKind::DominionKill => dominion_kill += 1,
+                    VictoryKind::Score => score += 1,
                 }
             }
             Outcome::Ongoing => ongoing += 1,
@@ -147,7 +149,7 @@ pub fn run_ai_vs_ai_batch(count: u32, max_turns: u32) -> String {
     format!(
         "AI-vs-AI batch: {count} matches, max_turns={max_turns}\n\
          wins: F0={} F1={} | undecided={ongoing}\n\
-         by kind: ascension={ascension} conquest={conquest} dominion_kill={dominion_kill}\n\
+         by kind: ascension={ascension} conquest={conquest} dominion_kill={dominion_kill} score={score}\n\
          battles_total={battles_total} avg_turns={:.1}\n\
          all_reconciled={all_reconciled} deterministic={deterministic}\n",
         wins[0],

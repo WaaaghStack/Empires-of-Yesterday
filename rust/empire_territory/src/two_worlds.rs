@@ -65,6 +65,45 @@ impl TwoWorldsEngine {
         self.last_outcome = "Ongoing".into();
     }
 
+    /// Start a campaign from a province partition carved by the presentation (the 3D globe).
+    /// `neighbors` is an Array of PackedInt32Array (per-province adjacency). `capital_of` and
+    /// `deposit` are PackedInt32Array (-1 = none), `has_throne` a PackedByteArray (0/1).
+    #[func]
+    fn begin_campaign(
+        &mut self,
+        seed: i64,
+        faction_count: i64,
+        neighbors: Array<Variant>,
+        capital_of: PackedInt32Array,
+        has_throne: PackedByteArray,
+        deposit: PackedInt32Array,
+        army_soldiers: i64,
+        army_bombers: i64,
+    ) {
+        let mut nb: Vec<Vec<u32>> = Vec::new();
+        for v in neighbors.iter_shared() {
+            let list = v.try_to::<PackedInt32Array>().unwrap_or_default();
+            nb.push(list.to_vec().into_iter().map(|x| x.max(0) as u32).collect());
+        }
+        let caps: Vec<i32> = capital_of.to_vec();
+        let thr: Vec<bool> = has_throne.to_vec().into_iter().map(|b| b != 0).collect();
+        let dep: Vec<i32> = deposit.to_vec();
+        let (w, l) = scenario::from_partition(
+            seed as u64,
+            faction_count.max(2) as usize,
+            nb,
+            caps,
+            thr,
+            dep,
+            army_soldiers.max(0) as u32,
+            army_bombers.max(0) as u32,
+        );
+        self.world = Some(w);
+        self.ledger = Some(l);
+        self.last_report = None;
+        self.last_outcome = "Ongoing".into();
+    }
+
     #[func]
     fn is_active(&self) -> bool {
         self.world.is_some()

@@ -443,8 +443,8 @@ func _add_two_worlds_button() -> void:
 
 
 func _on_two_worlds_pressed() -> void:
-	RunLog.info("Launching Two Worlds (turn-based MVP)")
-	get_tree().change_scene_to_file("res://TwoWorldsScreen.tscn")
+	RunLog.info("Launching Two Worlds (turn-based globe MVP)")
+	get_tree().change_scene_to_file("res://TwoWorldsGlobe.tscn")
 
 
 func _on_custom_world_pressed() -> void:

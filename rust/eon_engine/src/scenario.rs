@@ -168,6 +168,97 @@ pub fn demo_world(seed: u64) -> (World, Ledger) {
     (world, ledger)
 }
 
+/// Build a World from an externally-supplied province partition (e.g. large provinces carved from
+/// the 3D Earth tiles by the Godot presentation). All provinces are land; the caller supplies
+/// adjacency, capital/throne/deposit assignments. Capitals are seeded with starting faith and one
+/// starting army each (soldiers + a few bombers). Two factions.
+pub fn from_partition(
+    seed: u64,
+    faction_count: usize,
+    neighbors: Vec<Vec<u32>>,
+    capital_of: Vec<i32>,
+    has_throne: Vec<bool>,
+    deposit: Vec<i32>,
+    army_soldiers: u32,
+    army_bombers: u32,
+) -> (World, Ledger) {
+    let n = neighbors.len();
+    let fc = faction_count.max(2);
+    let names = ["Azure", "Crimson", "Verdant", "Golden"];
+    let mut factions = Vec::with_capacity(fc);
+    for i in 0..fc {
+        factions.push(Faction {
+            id: i as FactionId,
+            name: names.get(i).copied().unwrap_or("Faction").to_string(),
+            is_ai: i != 0,
+            alive: true,
+            ascension_points: 0,
+        });
+    }
+    let mut provinces = Vec::with_capacity(n);
+    for i in 0..n {
+        let dep = deposit.get(i).copied().unwrap_or(-1);
+        let dep_path = match dep {
+            0 => Some(GemPath::Aurelium),
+            1 => Some(GemPath::Verdantite),
+            2 => Some(GemPath::Emberstone),
+            _ => None,
+        };
+        provinces.push(Province {
+            id: i as ProvinceId,
+            name: format!("P{i}"),
+            is_land: true,
+            elevation: 30,
+            neighbors: neighbors[i].clone(),
+            dom: vec![0.0; fc],
+            unrest: 0.0,
+            temple_owner: None,
+            capital_of: capital_of.get(i).and_then(|&c| if c >= 0 { Some(c as FactionId) } else { None }),
+            has_throne: has_throne.get(i).copied().unwrap_or(false),
+            deposit: dep_path,
+            revealed: false,
+        });
+    }
+    // On a large connected map, instant ascension ends things before armies clash. Keep thrones as
+    // map flavor but make ascension effectively unreachable so the campaign plays out and is
+    // decided by the turn-limit score victory (with battles happening along the contested frontier).
+    let mut cfg = Config::default();
+    cfg.thrones_to_win = 9999;
+    cfg.turn_limit = 15;
+    let mut world = World {
+        seed,
+        turn: 0,
+        cfg,
+        factions,
+        provinces,
+        armies: Vec::new(),
+        agents: Vec::new(),
+        relations: vec![vec![0; fc]; fc],
+        next_army_id: 0,
+        next_agent_id: 0,
+    };
+    let mut ledger = Ledger::new();
+    // Seed capitals: starting faith + a starting army + a prophet amplifier.
+    let caps: Vec<(usize, FactionId)> = (0..n)
+        .filter_map(|i| world.provinces[i].capital_of.map(|f| (i, f)))
+        .collect();
+    for (pid, f) in caps {
+        seed_dominion(&mut world, &mut ledger, pid as ProvinceId, f, 12.0);
+        let mut squads = Vec::new();
+        if army_soldiers > 0 {
+            squads.push(Squad { kind: UnitKind::Soldier, count: army_soldiers });
+        }
+        if army_bombers > 0 {
+            squads.push(Squad { kind: UnitKind::Bomber, count: army_bombers });
+        }
+        if !squads.is_empty() {
+            recruit_army(&mut world, &mut ledger, f, pid as ProvinceId, squads);
+        }
+        add_agent(&mut world, f, pid as ProvinceId, AgentKind::Prophet, 2);
+    }
+    (world, ledger)
+}
+
 /// A seed-varied two-faction ring world for AI-vs-AI validation: capitals sit opposite each other,
 /// while starting army sizes, throne placement, and deposits are randomized by seed so different
 /// seeds produce genuinely different (but deterministic) campaigns.

@@ -215,6 +215,9 @@ pub struct Config {
     pub gem_per_deposit: f32,
     pub thrones_to_win: u32,
     pub dominion_alive_eps: f32,
+    /// Hard turn cap; at this turn the leader (most land, then dominion) wins by score. Guarantees
+    /// a decisive outcome even on large, symmetric maps that would otherwise stalemate.
+    pub turn_limit: u32,
 }
 
 impl Default for Config {
@@ -237,6 +240,7 @@ impl Default for Config {
             gem_per_deposit: 2.0,
             thrones_to_win: 2,
             dominion_alive_eps: 0.5,
+            turn_limit: 120,
         }
     }
 }
