@@ -20,6 +20,11 @@ const SCALE := 1.0          # 1 battle unit = 1 world unit
 const SPRITE_SIZE := 3.2    # world-units tall per unit sprite
 const BOMBER_SIZE := 5.2    # bombers read larger
 const GROUND_Y := 0.0
+const BUF_STRIDE := 16      # 12 transform + 4 custom (flip, fire, dead, fade)
+const ST_FIRE := 3
+const ST_DEAD := 4
+const ST_ROUT := 5
+const ST_FLED := 6
 
 var _engine: Object
 var _index: int = 0
@@ -51,13 +56,11 @@ var _buf1 := PackedFloat32Array()
 var _buf2 := PackedFloat32Array()
 var _buf3 := PackedFloat32Array()
 var _bkt := PackedByteArray()                # per-unit bucket id (0..3)
-var _off := PackedInt32Array()               # per-unit float offset (slot * 12) into its bucket buffer
-var _yaw := 0.7
-var _pitch := 0.92                # strategic near-overhead tilt keeps the whole field framed
-var _dist := 190.0
+var _off := PackedInt32Array()               # per-unit float offset (slot * BUF_STRIDE)
+var _yaw := 0.42
+var _pitch := 0.52                # three-quarter: both armies + the contact band
+var _dist := 175.0
 var _orbit := false
-var _auto_rotate := true
-const AUTO_ROTATE_SPEED := 0.02   # gentle turntable so the action stays in view during playback
 
 # HUD.
 var _header: Label
@@ -108,7 +111,7 @@ func _build_3d() -> void:
 	pm.size = Vector2(_w * SCALE * 1.35, _h * SCALE * 1.7)
 	ground.mesh = pm
 	var gmat := StandardMaterial3D.new()
-	gmat.albedo_color = Color(0.17, 0.23, 0.14)
+	gmat.albedo_color = Color(0.20, 0.24, 0.16)
 	gmat.roughness = 1.0
 	gmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	ground.set_surface_override_material(0, gmat)
@@ -121,6 +124,7 @@ func _build_3d() -> void:
 		var mmi := MultiMeshInstance3D.new()
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_custom_data = true
 		var quad := QuadMesh.new()
 		quad.size = Vector2(1.0, 1.0)
 		mm.mesh = quad
@@ -242,7 +246,7 @@ func _prepare_buckets() -> void:
 		var knd := int(_kind[i]) if i < _kind.size() else 0
 		var id := (fac & 1) + (knd & 1) * 2
 		_bkt[i] = id
-		_off[i] = counts[id] * 12
+		_off[i] = counts[id] * BUF_STRIDE
 		counts[id] += 1
 	_buf0 = _make_buf(counts[0], SPRITE_SIZE)
 	_buf1 = _make_buf(counts[1], SPRITE_SIZE)
@@ -254,9 +258,9 @@ func _prepare_buckets() -> void:
 
 func _make_buf(count: int, sz: float) -> PackedFloat32Array:
 	var buf := PackedFloat32Array()
-	buf.resize(count * 12)
+	buf.resize(count * BUF_STRIDE)
 	for k in range(count):
-		var o := k * 12
+		var o := k * BUF_STRIDE
 		buf[o + 0] = sz
 		buf[o + 5] = sz
 		buf[o + 10] = sz
@@ -277,9 +281,6 @@ func _frame(idx: int) -> Dictionary:
 func _process(delta: float) -> void:
 	if not visible:
 		return
-	if _auto_rotate and not _orbit:
-		_yaw += delta * AUTO_ROTATE_SPEED
-		_apply_camera()
 	if _playing and not _done:
 		_frame_pos += _play_fps * _speed * delta
 		if _frame_pos >= float(_frame_count - 1):
@@ -299,10 +300,15 @@ func _render_frame() -> void:
 	var fb := _frame(b)
 	var xa: PackedFloat32Array = fa.get("x", PackedFloat32Array())
 	var ya: PackedFloat32Array = fa.get("y", PackedFloat32Array())
+	var za: PackedFloat32Array = fa.get("z", PackedFloat32Array())
 	var aa: PackedByteArray = fa.get("alive", PackedByteArray())
+	var fa_face: PackedByteArray = fa.get("facing", PackedByteArray())
+	var fa_st: PackedByteArray = fa.get("state", PackedByteArray())
 	var xb: PackedFloat32Array = fb.get("x", PackedFloat32Array())
 	var yb: PackedFloat32Array = fb.get("y", PackedFloat32Array())
+	var zb: PackedFloat32Array = fb.get("z", PackedFloat32Array())
 	var ab: PackedByteArray = fb.get("alive", PackedByteArray())
+	var fb_st: PackedByteArray = fb.get("state", PackedByteArray())
 
 	var n := mini(_unit_count, xa.size())
 	var hw := _w * 0.5
@@ -310,54 +316,94 @@ func _render_frame() -> void:
 	for i in range(n):
 		var id := _bkt[i]
 		var o := _off[i]
-		var alive := i < aa.size() and aa[i] != 0
-		var sz := 0.0
-		var wx := 0.0
-		var wz := 0.0
-		var yc := 0.0
-		if alive:
-			sz = BOMBER_SIZE if id >= 2 else SPRITE_SIZE
-			var ax := xa[i]
-			var ay := ya[i]
-			var bx := ax
-			var by := ay
-			if i < xb.size() and i < ab.size() and ab[i] != 0:
-				bx = xb[i]
-				by = yb[i]
-			var px: float = lerpf(ax, bx, alpha)
-			var py: float = lerpf(ay, by, alpha)
-			# Routed survivors flee toward (and past) their baseline in the sim; clamp the rendered
-			# position to the battlefield so they visibly gather at the rear edge instead of
-			# streaming off the diorama. Presentational only — the sim positions are untouched.
-			wx = (clampf(px, 0.0, _w) - hw) * SCALE
-			wz = (clampf(py, 0.0, _h) - hh) * SCALE
-			yc = GROUND_Y + sz * 0.5
-		# Write the diagonal-scale + translation transform in place (o..o+11).
-		match id:
-			0:
-				_buf0[o + 0] = sz; _buf0[o + 5] = sz; _buf0[o + 10] = sz
-				_buf0[o + 3] = wx; _buf0[o + 7] = yc; _buf0[o + 11] = wz
-			1:
-				_buf1[o + 0] = sz; _buf1[o + 5] = sz; _buf1[o + 10] = sz
-				_buf1[o + 3] = wx; _buf1[o + 7] = yc; _buf1[o + 11] = wz
-			2:
-				_buf2[o + 0] = sz; _buf2[o + 5] = sz; _buf2[o + 10] = sz
-				_buf2[o + 3] = wx; _buf2[o + 7] = yc; _buf2[o + 11] = wz
-			_:
-				_buf3[o + 0] = sz; _buf3[o + 5] = sz; _buf3[o + 10] = sz
-				_buf3[o + 3] = wx; _buf3[o + 7] = yc; _buf3[o + 11] = wz
-	var mm0: MultiMesh = _mmi[0].multimesh
-	var mm1: MultiMesh = _mmi[1].multimesh
-	var mm2: MultiMesh = _mmi[2].multimesh
-	var mm3: MultiMesh = _mmi[3].multimesh
-	if mm0.instance_count > 0:
-		mm0.buffer = _buf0
-	if mm1.instance_count > 0:
-		mm1.buffer = _buf1
-	if mm2.instance_count > 0:
-		mm2.buffer = _buf2
-	if mm3.instance_count > 0:
-		mm3.buffer = _buf3
+		var alive_a := i < aa.size() and aa[i] != 0
+		var st := int(fa_st[i]) if i < fa_st.size() else 0
+		var st_b := int(fb_st[i]) if i < fb_st.size() else st
+		var dead := (not alive_a) or st == ST_DEAD
+		var fled_a := st == ST_FLED
+		var fled_b := st_b == ST_FLED
+		var firing := (not dead) and (not fled_a) and (st == ST_FIRE or st_b == ST_FIRE)
+		var facing := int(fa_face[i]) if i < fa_face.size() else 0
+		# Octants 3,4,5 face -x (left). Side-view sprite is drawn facing +x.
+		var flip := 1.0 if (facing >= 3 and facing <= 5) else 0.0
+		var ax := xa[i]
+		var ay := ya[i]
+		var az := za[i] if i < za.size() else 0.0
+		var bx := ax
+		var by := ay
+		var bz := az
+		if i < xb.size():
+			bx = xb[i]
+			by = yb[i]
+			if i < zb.size():
+				bz = zb[i]
+		var px: float = lerpf(ax, bx, alpha)
+		var py: float = lerpf(ay, by, alpha)
+		var pz: float = lerpf(az, bz, alpha)
+		var wx := (clampf(px, 0.0, _w) - hw) * SCALE
+		var wz := (clampf(py, 0.0, _h) - hh) * SCALE
+		var base_sz := BOMBER_SIZE if id >= 2 else SPRITE_SIZE
+		var szx := base_sz
+		var szy := base_sz
+		var fade := 1.0
+		if fled_a and fled_b:
+			fade = 0.0
+			szx = 0.0
+			szy = 0.0
+		elif fled_b:
+			fade = 1.0 - alpha
+			szx = base_sz * (0.35 + 0.65 * fade)
+			szy = base_sz * (0.35 + 0.65 * fade)
+		elif fled_a:
+			fade = 0.0
+			szx = 0.0
+			szy = 0.0
+		elif dead:
+			szx = base_sz * 0.95
+			szy = base_sz * 0.28
+		elif firing:
+			szx = base_sz * 1.08
+			szy = base_sz * 1.08
+		var yc := GROUND_Y + szy * 0.5 + pz * SCALE
+		if dead:
+			yc = GROUND_Y + szy * 0.45
+		elif fled_b and not fled_a:
+			yc += (1.0 - fade) * 3.2
+		_write_instance(
+			id, o, szx, szy, wx, yc, wz,
+			flip, 1.0 if firing else 0.0, 1.0 if dead else 0.0, fade
+		)
+	if _mmi[0].multimesh.instance_count > 0:
+		_mmi[0].multimesh.buffer = _buf0
+	if _mmi[1].multimesh.instance_count > 0:
+		_mmi[1].multimesh.buffer = _buf1
+	if _mmi[2].multimesh.instance_count > 0:
+		_mmi[2].multimesh.buffer = _buf2
+	if _mmi[3].multimesh.instance_count > 0:
+		_mmi[3].multimesh.buffer = _buf3
+
+
+func _write_instance(
+	id: int, o: int, szx: float, szy: float, wx: float, yc: float, wz: float,
+	flip: float, fire: float, dead: float, fade: float
+) -> void:
+	match id:
+		0:
+			_buf0[o + 0] = szx; _buf0[o + 5] = szy; _buf0[o + 10] = szx
+			_buf0[o + 3] = wx; _buf0[o + 7] = yc; _buf0[o + 11] = wz
+			_buf0[o + 12] = flip; _buf0[o + 13] = fire; _buf0[o + 14] = dead; _buf0[o + 15] = fade
+		1:
+			_buf1[o + 0] = szx; _buf1[o + 5] = szy; _buf1[o + 10] = szx
+			_buf1[o + 3] = wx; _buf1[o + 7] = yc; _buf1[o + 11] = wz
+			_buf1[o + 12] = flip; _buf1[o + 13] = fire; _buf1[o + 14] = dead; _buf1[o + 15] = fade
+		2:
+			_buf2[o + 0] = szx; _buf2[o + 5] = szy; _buf2[o + 10] = szx
+			_buf2[o + 3] = wx; _buf2[o + 7] = yc; _buf2[o + 11] = wz
+			_buf2[o + 12] = flip; _buf2[o + 13] = fire; _buf2[o + 14] = dead; _buf2[o + 15] = fade
+		_:
+			_buf3[o + 0] = szx; _buf3[o + 5] = szy; _buf3[o + 10] = szx
+			_buf3[o + 3] = wx; _buf3[o + 7] = yc; _buf3[o + 11] = wz
+			_buf3[o + 12] = flip; _buf3[o + 13] = fire; _buf3[o + 14] = dead; _buf3[o + 15] = fade
 
 
 func _update_header() -> void:

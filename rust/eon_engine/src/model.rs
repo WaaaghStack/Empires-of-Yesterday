@@ -31,7 +31,15 @@ impl GemPath {
     }
 }
 
-/// Campaign unit kinds. MVP art scope is soldiers + bombers only (existing billboards).
+/// Locomotion domain. One battle loop; kinds pick a plane (ground / air / sea).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitDomain {
+    Land,
+    Air,
+    Naval,
+}
+
+/// Campaign unit kinds. Prototype art is soldiers + bombers; extra kinds drop in as profiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitKind {
     Soldier,
@@ -45,7 +53,26 @@ impl UnitKind {
             UnitKind::Bomber => "bomber",
         }
     }
-    /// Base per-unit combat stats used to seed battles.
+    pub fn domain(self) -> UnitDomain {
+        match self {
+            UnitKind::Soldier => UnitDomain::Land,
+            UnitKind::Bomber => UnitDomain::Air,
+        }
+    }
+    /// 0 = ignore the formation guide (swarm); 1 = glued to slot (armor).
+    pub fn cohesion(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 0.42,
+            UnitKind::Bomber => 0.22,
+        }
+    }
+    /// How far a body looks for someone to fight (guide does not pick this target).
+    pub fn perception(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 38.0,
+            UnitKind::Bomber => 48.0,
+        }
+    }
     pub fn base_hp(self) -> f32 {
         match self {
             UnitKind::Soldier => 100.0,
@@ -58,17 +85,37 @@ impl UnitKind {
             UnitKind::Bomber => 22.0,
         }
     }
-    /// Attack reach in battlefield units (LOS radius).
+    /// Weapon reach — must be long enough to shoot across the engagement gap.
     pub fn reach(self) -> f32 {
         match self {
-            UnitKind::Soldier => 2.0,
-            UnitKind::Bomber => 6.0,
+            UnitKind::Soldier => 28.0,
+            UnitKind::Bomber => 26.0,
         }
     }
     pub fn move_speed(self) -> f32 {
         match self {
-            UnitKind::Soldier => 3.0,
-            UnitKind::Bomber => 5.0,
+            UnitKind::Soldier => 2.4,
+            UnitKind::Bomber => 4.2,
+        }
+    }
+    pub fn cruise_z(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 0.0,
+            UnitKind::Bomber => 14.0,
+        }
+    }
+    /// Total War-style regiment size (bodies per distinct unit on the field).
+    pub fn regiment_size(self) -> u32 {
+        match self {
+            UnitKind::Soldier => 100,
+            UnitKind::Bomber => 5,
+        }
+    }
+    /// Center-to-center personal space. Bombers fly looser than infantry files.
+    pub fn spacing(self) -> f32 {
+        match self {
+            UnitKind::Soldier => 1.9,
+            UnitKind::Bomber => 5.2,
         }
     }
 }
@@ -111,6 +158,21 @@ pub struct Faction {
 pub struct Squad {
     pub kind: UnitKind,
     pub count: u32,
+}
+
+impl Squad {
+    /// Split a blob count into Total War-style units (100 infantry, 5 bombers, remainder last).
+    pub fn into_regiments(self) -> Vec<Squad> {
+        let size = self.kind.regiment_size().max(1);
+        let mut left = self.count;
+        let mut out = Vec::new();
+        while left > 0 {
+            let n = left.min(size);
+            out.push(Squad { kind: self.kind, count: n });
+            left -= n;
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug)]

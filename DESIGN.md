@@ -217,7 +217,7 @@ A heavy-deviation prototype (see [docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md]
 | **F6** | 5/structure, 100 global caps | army-scale counts (**1000+** units per battle) |
 | **A14** | bombers no continuous upkeep | **preserved** (bombers stay upkeep-free) |
 
-Authority is the godot-agnostic **`eon_engine`** crate: an ordered **transaction ledger** (double-entry, deterministic) projected to **wide-row reports** for presentation/replay. Both the World (per turn) and a Battle (per tick) use the same pattern; a battle is nested under a `ResolveBattle` world transaction. Skills: `eoy-sim-transaction-engine`, `eoy-battle-resolve`. Status: engine spine implemented + unit-tested (`rust/eon_engine`, 25 tests) and wired into the GDExtension as `TwoWorldsEngine`; the HD-2D battle viewer + campaign UI are staged next.
+Authority is the godot-agnostic **`eon_engine`** crate: an ordered **transaction ledger** (double-entry, deterministic) projected to **wide-row reports** for presentation/replay. Both the World (per turn) and a Battle (per tick) use the same pattern; a battle is nested under a `ResolveBattle` world transaction. Skills: `eoy-sim-transaction-engine`, `eoy-battle-resolve`. Status: engine spine + globe/campaign UI + a first HD-2D viewer exist on `cursor/mvp-two-worlds-engine-0600`; battles do **not** yet meet the visual-read contract ([docs/REQUEST_BATTLE_VISUAL_READ.md](docs/REQUEST_BATTLE_VISUAL_READ.md)) — form up, halt, fire, hold the field.
 
 ### Direction — roads & bridges removed (locked 2026-07-24)
 

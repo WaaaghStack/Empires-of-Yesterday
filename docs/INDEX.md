@@ -15,6 +15,7 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 | [AUDIT_CELL_WORLD_BUGS_UX.md](AUDIT_CELL_WORLD_BUGS_UX.md) | Cell-world / SCD1 / pathing / build UX audit + implement status |
 | [REQUEST_SURGE_THEATERS_PAINT.md](REQUEST_SURGE_THEATERS_PAINT.md) | Outpost Pump/Drain/Surge, named theaters, area paint |
 | [REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md](REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md) | **Exploratory** — turn-based Total War × Dominions 6 reframe: two-worlds transaction engine, dominion tide, auto-resolved HD-2D battles |
+| [REQUEST_BATTLE_VISUAL_READ.md](REQUEST_BATTLE_VISUAL_READ.md) | Two Worlds HD-2D battles must **look like a fight** (form up, halt, fire, hold the field) — visual realism, not sim perfection |
 
 ## Architecture snapshot (live Play)
 

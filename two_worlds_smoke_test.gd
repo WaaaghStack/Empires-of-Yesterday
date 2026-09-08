@@ -58,6 +58,23 @@ func _check_custom_battle(engine) -> bool:
 		print("  frame %d: x=%d y=%d alive=%d (living=%d)" % [f, xs.size(), ys.size(), alive.size(), n_alive])
 		if xs.size() != unit_count or ys.size() != unit_count or alive.size() != unit_count:
 			frames_ok = false
+		var facing: PackedByteArray = fr.get("facing", PackedByteArray())
+		var state: PackedByteArray = fr.get("state", PackedByteArray())
+		var zs: PackedFloat32Array = fr.get("z", PackedFloat32Array())
+		if facing.size() != unit_count or state.size() != unit_count or zs.size() != unit_count:
+			push_error("battle frame %d missing facing/state/z tracks" % f)
+			frames_ok = false
+	# Contact: some aim/fire, living soldiers not piled on the far edge.
+	var mid: Dictionary = engine.get_last_battle_frame_xy(0, frame_count / 3)
+	var mid_st: PackedByteArray = mid.get("state", PackedByteArray())
+	var saw_fight := false
+	for s in mid_st:
+		if int(s) == 2 or int(s) == 3:
+			saw_fight = true
+			break
+	if not saw_fight:
+		push_error("expected aim/fire states during the fight")
+		frames_ok = false
 	# 200 soldiers + 40 bombers per side, two sides => 480 units.
 	var count_ok := unit_count == 480 and fac.size() == 480 and kind.size() == 480
 	var frame_ok := frame_count > 0

@@ -17,11 +17,16 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
 
 ## Model: resolve coarse, fight fine
 
-- **Squad/regiment brain** owns *orders*: where the body moves and who it engages (advance to X,
-  charge squad B, hold, flank, rout), plus **cohesion** and **morale** (break → whole squad flees).
-- **Individual soldier** moves toward its formation slot in the squad's target area, and within a
-  local **perception/LOS radius** picks the nearest valid enemy and attacks; has its own HP + death.
-  → "They all head to X, but each one fights whoever is in front of them."
+- **Rust is the only combat authority.** The HD-2D viewer interpolates the bake. It does not target,
+  damage, or path.
+- **Squad/regiment brain** owns *guides*: formation field, facing, engagement line, who to engage,
+  **cohesion**, **morale** (break → whole squad flees). Formation is an attractor, not a rail.
+- **Each body fights individually.** Bias toward its slot; in local **perception/LOS** pick a valid
+  enemy and attack (own HP + death). Local fight beats dressing ranks.
+  → "The line is the intent; the soldier is the fight."
+- **One loop, many kinds.** Kind profile = domain (land/air/sea) + cohesion + reach + speed +
+  altitude. Same tick/hash for soldiers, tanks, zombies, aliens, planes; naval later. Prototype art
+  is soldiers + bombers only.
 
 ## Resolution rules (authority)
 
@@ -39,10 +44,14 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
 
 ## Presentation (HD-2D × Dominions free-cam)
 
+Visual contract: [docs/REQUEST_BATTLE_VISUAL_READ.md](../../../docs/REQUEST_BATTLE_VISUAL_READ.md)
+(form up → halt → fire → hold; no centroid-jog to the far edge). Realism is the picture, not the ballistics.
+
 - **Diorama slab** themed from the province biome/elevation (`WorldConquestMapGenerator`).
 - **Free orbit/pan/zoom camera** (Dominions 6 style) — reuse the globe orbit camera on a flat slab.
+  Default framing shows both armies; auto-rotate off during the fight.
 - **Billboard sprites**, **directional facing frames** (4-way min, **8-way** preferred for a free
-  camera), rendered via **MultiMesh / GPU instancing**.
+  camera), rendered via **MultiMesh / GPU instancing**. Bake `facing` + anim state, not just `x,y,alive`.
 - **1000+ units minimum:** feasible because it is baked-replay playback; add **LOD** (near = full
   anim/facing; far = static billboard / density blobs + banners/dust).
 - **Prototype art scope: soldiers + bombers only** (existing pixel billboards). Expand roster later.
@@ -61,7 +70,8 @@ Battles follow the same **ledger → report** discipline as the world (see
 
 ## Change checklist
 
-- [ ] Squad brain change vs individual-combat change — kept on the right tier?
+- [ ] Squad brain change vs individual-combat change — kept on the right tier? Formation still a guide (cohesion), not a rail?
+- [ ] New unit kind is a **profile** (domain/cohesion/reach), not a new resolver?
 - [ ] Deterministic (fixed order + seeded PRNG)? Spatial-hash queries, not O(n²)?
 - [ ] Replay tracks (per-unit transform + state) updated as a projection only?
 - [ ] Result transaction surfaced to the World log (`eoy-sim-transaction-engine`)?

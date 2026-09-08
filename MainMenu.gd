@@ -495,9 +495,9 @@ func _build_custom_battle_panel() -> void:
 	_cb_panel.anchor_top = 0.5
 	_cb_panel.anchor_right = 0.5
 	_cb_panel.anchor_bottom = 0.5
-	_cb_panel.offset_left = -280.0
+	_cb_panel.offset_left = -340.0
 	_cb_panel.offset_top = -220.0
-	_cb_panel.offset_right = 280.0
+	_cb_panel.offset_right = 340.0
 	_cb_panel.offset_bottom = 220.0
 	add_child(_cb_panel)
 
@@ -525,11 +525,11 @@ func _build_custom_battle_panel() -> void:
 
 	_cb_size0_slider = HSlider.new()
 	_cb_size0_label = Label.new()
-	vb.add_child(_make_size_row("Blue army", 320, _cb_size0_slider, _cb_size0_label))
+	vb.add_child(_make_size_row("Blue army", 400, _cb_size0_slider, _cb_size0_label))
 
 	_cb_size1_slider = HSlider.new()
 	_cb_size1_label = Label.new()
-	vb.add_child(_make_size_row("Red army", 320, _cb_size1_slider, _cb_size1_label))
+	vb.add_child(_make_size_row("Red army", 400, _cb_size1_slider, _cb_size1_label))
 
 	var seed_row := HBoxContainer.new()
 	seed_row.add_theme_constant_override("separation", 10)
@@ -581,19 +581,25 @@ func _make_size_row(name_text: String, default_size: int, slider: HSlider, value
 	name_lbl.text = name_text
 	name_lbl.custom_minimum_size = Vector2(120, 0)
 	row.add_child(name_lbl)
-	slider.min_value = 50
+	slider.min_value = 100
 	slider.max_value = 1200
-	slider.step = 10
+	slider.step = 100
 	slider.value = default_size
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.custom_minimum_size = Vector2(0, 30)
 	row.add_child(slider)
-	value_label.custom_minimum_size = Vector2(64, 0)
-	value_label.text = str(default_size)
+	value_label.custom_minimum_size = Vector2(220, 0)
+	value_label.text = _cb_army_label(default_size)
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	row.add_child(value_label)
-	slider.value_changed.connect(func(v: float): value_label.text = str(int(v)))
+	slider.value_changed.connect(func(v: float): value_label.text = _cb_army_label(int(v)))
 	return row
+
+
+func _cb_army_label(size: int) -> String:
+	var inf: int = maxi(1, size / 100)
+	var wings: int = maxi(0, inf / 2)
+	return "%d inf. units (%d) · %d bomber wings (%d)" % [inf, inf * 100, wings, wings * 5]
 
 
 func _on_custom_battle_fight() -> void:
@@ -602,15 +608,20 @@ func _on_custom_battle_fight() -> void:
 	var battle_seed := int(_cb_seed_spin.value)
 	if battle_seed <= 0:
 		battle_seed = 1
+	var inf0 := maxi(1, size0 / 100)
+	var inf1 := maxi(1, size1 / 100)
+	var wings0 := maxi(0, inf0 / 2)
+	var wings1 := maxi(0, inf1 / 2)
 	RunState.set_meta("custom_battle", {
 		"seed": battle_seed,
-		"f0_soldiers": int(size0 * 0.85),
-		"f0_bombers": int(size0 * 0.15),
-		"f1_soldiers": int(size1 * 0.85),
-		"f1_bombers": int(size1 * 0.15),
+		"f0_soldiers": inf0 * 100,
+		"f0_bombers": wings0 * 5,
+		"f1_soldiers": inf1 * 100,
+		"f1_bombers": wings1 * 5,
 	})
 	RunLog.info(
-		"Custom Battle: seed=%d blue=%d red=%d" % [battle_seed, size0, size1]
+		"Custom Battle: seed=%d blue=%d inf + %d wings vs red=%d inf + %d wings"
+		% [battle_seed, inf0, wings0, inf1, wings1]
 	)
 	get_tree().change_scene_to_file("res://TwoWorldsBattle.tscn")
 

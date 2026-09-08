@@ -26,10 +26,10 @@ func _ready() -> void:
 
 	_engine.resolve_custom_battle(
 		int(params.get("seed", 1)),
-		int(params.get("f0_soldiers", 187)),
-		int(params.get("f0_bombers", 33)),
-		int(params.get("f1_soldiers", 187)),
-		int(params.get("f1_bombers", 33)),
+		int(params.get("f0_soldiers", 400)),
+		int(params.get("f0_bombers", 10)),
+		int(params.get("f1_soldiers", 400)),
+		int(params.get("f1_bombers", 10)),
 	)
 
 	_view = Control.new()
@@ -54,7 +54,7 @@ func _read_params() -> Dictionary:
 		var m: Variant = rs.get_meta("custom_battle")
 		if m is Dictionary and not (m as Dictionary).is_empty():
 			return m
-	return {"seed": 1, "f0_soldiers": 187, "f0_bombers": 33, "f1_soldiers": 187, "f1_bombers": 33}
+	return {"seed": 1, "f0_soldiers": 400, "f0_bombers": 10, "f1_soldiers": 400, "f1_bombers": 10}
 
 
 func _on_finished() -> void:

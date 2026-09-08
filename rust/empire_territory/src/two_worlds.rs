@@ -176,10 +176,10 @@ impl TwoWorldsEngine {
         let mk = |sol: i64, bom: i64| -> Vec<Squad> {
             let mut v = Vec::new();
             if sol > 0 {
-                v.push(Squad { kind: UnitKind::Soldier, count: sol as u32 });
+                v.extend(Squad { kind: UnitKind::Soldier, count: sol as u32 }.into_regiments());
             }
             if bom > 0 {
-                v.push(Squad { kind: UnitKind::Bomber, count: bom as u32 });
+                v.extend(Squad { kind: UnitKind::Bomber, count: bom as u32 }.into_regiments());
             }
             v
         };
@@ -230,26 +230,35 @@ impl TwoWorldsEngine {
         out
     }
 
-    /// Per-frame positions for a battle: { x:PackedFloat32Array, y:PackedFloat32Array,
-    /// alive:PackedByteArray }. Streamed on demand so large battles never marshal all at once.
+    /// Per-frame tracks: x/y/z, alive, facing (8-way octant),
+    /// state (idle/march/aim/fire/dead/rout/fled). Fled = escaped at the rim; still alive.
     #[func]
     fn get_last_battle_frame_xy(&self, index: i64, frame: i64) -> Dict {
         let mut out = Dict::new();
         let mut xs = PackedFloat32Array::new();
         let mut ys = PackedFloat32Array::new();
+        let mut zs = PackedFloat32Array::new();
         let mut alive = PackedByteArray::new();
+        let mut facing = PackedByteArray::new();
+        let mut state = PackedByteArray::new();
         if let Some(b) = self.battles.get(index.max(0) as usize) {
             if let Some(f) = b.frames.get(frame.max(0) as usize) {
                 for u in &f.units {
                     xs.push(u.x);
                     ys.push(u.y);
+                    zs.push(u.z);
                     alive.push(if u.alive { 1 } else { 0 });
+                    facing.push(u.facing);
+                    state.push(u.state);
                 }
             }
         }
         out.set("x", &xs);
         out.set("y", &ys);
+        out.set("z", &zs);
         out.set("alive", &alive);
+        out.set("facing", &facing);
+        out.set("state", &state);
         out
     }
 
@@ -366,7 +375,10 @@ impl TwoWorldsEngine {
             let mut kind = PackedByteArray::new();
             let mut xs = PackedFloat32Array::new();
             let mut ys = PackedFloat32Array::new();
+            let mut zs = PackedFloat32Array::new();
             let mut alive = PackedByteArray::new();
+            let mut facing = PackedByteArray::new();
+            let mut state = PackedByteArray::new();
             for u in &frame.units {
                 fac.push(u.faction as u8);
                 kind.push(match u.kind {
@@ -375,13 +387,19 @@ impl TwoWorldsEngine {
                 });
                 xs.push(u.x);
                 ys.push(u.y);
+                zs.push(u.z);
                 alive.push(if u.alive { 1 } else { 0 });
+                facing.push(u.facing);
+                state.push(u.state);
             }
             fd.set("fac", &fac);
             fd.set("kind", &kind);
             fd.set("x", &xs);
             fd.set("y", &ys);
+            fd.set("z", &zs);
             fd.set("alive", &alive);
+            fd.set("facing", &facing);
+            fd.set("state", &state);
             frames_arr.push(&fd.to_variant());
         }
         out.set("frames", &frames_arr);
