@@ -7,6 +7,13 @@ signoff + a `DESIGN.md` edit before any implementation (see `eoy-design-lock-cha
 
 **Explored:** 2026-09-07
 
+**Implementation status (2026-09-08):** The **engine spine** is implemented and unit-tested as the
+godot-agnostic `rust/eon_engine` crate (deterministic replay, double-entry reconciliation, dominion
+field, agents, squad+LOS battles to 1000 units, WEGO turns, win checks, nested battle result txns)
+and wired into the `empire_territory` GDExtension as `TwoWorldsEngine`. The HD-2D battle viewer
+plays baked tracks (diorama, banners, tracers, 8-way billboards). Live World Conquest QA + Rust/CPU
+parity unaffected. Branch: `cursor/mvp-two-worlds-engine-0600`.
+
 ---
 
 ## 1. Vision
@@ -101,27 +108,40 @@ SpreadDominion (field phase) → corruption/unrest → events → win checks`.
 
 **Resolution (authority, Rust-only, deterministic):**
 
-- **Squad/regiment brain** owns *orders* — where the body goes and who it engages (advance to X,
-  charge squad B, hold, flank, rout) — plus **cohesion** and **morale** (break → the squad flees).
-- **Individual soldier** moves toward its formation slot in the squad's target area, and within a
-  local **perception/LOS radius** picks the nearest valid enemy and attacks; has its own HP + death.
-  ("They all head to X, but each one fights whoever is in front of them.")
+- **Squad/regiment brain** owns *guides* — formation field, facing, engagement line, who the body
+  is meant to fight, **cohesion**, **morale** (break → the squad flees). Formation is **not** a rail:
+  it is the company order the individuals drift around.
+- **Each body fights individually.** It is attracted toward its slot, then within a local
+  **perception/LOS radius** picks a valid enemy and attacks; own HP + death. Fighting a local target
+  beats dressing ranks. ("The line is the intent; the soldier is the fight.")
+- **One loop, many kinds.** Land / air / (later) naval share the tick + spatial hash; each kind is a
+  **profile** (domain, cohesion, reach, speed, altitude). Tanks hug the guide, soldiers peel off to
+  shoot, zombies swarm, planes use an altitude corridor. Prototype roster is soldiers + bombers;
+  the schema must accept tanks, aliens, etc. without a second engine.
 - Runs as a fixed-timestep transaction loop with a **spatial hash** for neighbor/LOS queries
   (≈O(1)); parallelizable (rayon). Resolved **once**, then **baked to the wide EYTR replay**.
 - **Determinism discipline** (fixed iteration order, seeded PRNG, consistent float handling) is the
   main engineering risk; resolve solely in Rust — no second implementation to keep in parity.
+  The viewer never picks targets.
 
 **Presentation (Dominions free-cam × Octopath HD-2D):**
+
+Visual bar is locked in [REQUEST_BATTLE_VISUAL_READ.md](REQUEST_BATTLE_VISUAL_READ.md): it has to
+**look like a fight** (tableau → march in formation → halt and fire → front holds → rout home → chase).
+Centroid-seek during a standing fight is a defect; chasing a broken army is the break beat. Realism is the *picture*, not
+ballistic fidelity.
 
 - **Diorama landscape** themed from the contested province's biome/elevation
   (`WorldConquestMapGenerator`). Terrain that does *not* matter to the Dominion tide *does* matter
   here (chokepoints, high ground) and for army movement cost.
 - **Free orbit/pan/zoom camera** (Dominions 6 style), reusing the globe orbit camera on a flat slab.
+  Default framing shows **both armies and the contact band**; auto-rotate is off during the fight.
 - **Billboard sprites** with **directional facing frames** (4-way min, **8-way** preferred for a
   free camera) so units read correctly from any angle; **MultiMesh / GPU instancing** for the mass.
 - **Scale: 1000+ units minimum.** Achieved by *resolve-once → bake replay* (viewer only interpolates
-  baked transforms + state flags) plus **LOD** (near = full anim/facing; far = static billboard /
-  density blobs + banners/dust). Mass + banners + casualties sell "sizable" more than raw count.
+  baked transforms + **state flags** — idle/march/aim/fire/hit/dead/rout) plus **LOD** (near = full
+  anim/facing; far = static billboard / density blobs + banners/dust). Mass + banners + casualties
+  sell "sizable" more than raw count.
 - **Art scope for the prototype: soldiers + bombers only** (existing pixel billboards). Expand the
   roster (and facings/anims) later.
 
@@ -184,7 +204,8 @@ Use the `eoy-design-lock-change` template. **None are accepted yet.**
   re-sim on demand (storage tradeoff; symmetry makes either trivial).
 - **Sprite facing count:** 4-way vs **8-way** (drives art budget; 8 reads better under free camera).
 - **Individual bodies:** soft collision/press (lines form/crush; costlier, more epic) vs free overlap
-  (cheaper, more Dominions-ish).
+  (cheaper, more Dominions-ish). Visual read still requires a **front** — overlap must not turn the
+  army into a pile or a commute across the map ([REQUEST_BATTLE_VISUAL_READ.md](REQUEST_BATTLE_VISUAL_READ.md)).
 - Confirmed already: squad-brain + **individual LOS** combat; **free-ish** Dominions-style camera;
   auto-resolved **watchable replays**; **passive + amplifier** Dominion; **soldiers + bombers** first.
 

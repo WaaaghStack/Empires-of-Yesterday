@@ -205,6 +205,20 @@ Product choices locked for the current ship target (code may implement them as i
 | **R1** | **Roads + land bridges removed.** See § Direction — roads & bridges removed. |
 | **R2** | **Soldier ferry water speed** = `SOLDIER_FERRY_MOVE_MULT` (**0.25×** land). Land march is `SOLDIER_MOVE_CELLS_PER_SEC` (0.55); bombers `BOMBER_MOVE_CELLS_PER_SEC` (0.9). |
 
+### Two-Worlds MVP — turn-based mode (exploratory, 2026-09-07)
+
+A heavy-deviation prototype (see [docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md](docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md)) meshing **Total War** (campaign, agents, formations), **Dominions 6** (turn-based globe, spreading Dominion, auto-resolved battles you set up but do not control), and EOY's engine. It runs as a **separate mode**: the live real-time World Conquest game and every lock above are **unchanged**. Within this mode the following are intentionally superseded (product-owner directed):
+
+| Aspect | Live game | Two-Worlds MVP |
+|--------|-----------|----------------|
+| Tempo | continuous real-time sim | **turn-based** WEGO resolve + playback |
+| `effective_height` | H = P + elevation; mountains slow flow | Dominion tide is **height-independent** (elevation still affects battle terrain / movement) |
+| **F5** | win = land or zero-power; units don't count | adds **dominion-kill** (≈ zero-power) and **Thrones / Ascension** wins |
+| **F6** | 5/structure, 100 global caps | army-scale counts (**1000+** units per battle) |
+| **A14** | bombers no continuous upkeep | **preserved** (bombers stay upkeep-free) |
+
+Authority is the godot-agnostic **`eon_engine`** crate: an ordered **transaction ledger** (double-entry, deterministic) projected to **wide-row reports** for presentation/replay. Both the World (per turn) and a Battle (per tick) use the same pattern; a battle is nested under a `ResolveBattle` world transaction. Skills: `eoy-sim-transaction-engine`, `eoy-battle-resolve`. Status: engine spine + globe/campaign UI + a first HD-2D viewer exist on `cursor/mvp-two-worlds-engine-0600`; battles do **not** yet meet the visual-read contract ([docs/REQUEST_BATTLE_VISUAL_READ.md](docs/REQUEST_BATTLE_VISUAL_READ.md)) — form up, halt, fire, hold the field.
+
 ### Direction — roads & bridges removed (locked 2026-07-24)
 
 **Remove:** cell-path roads, land bridges, logistics strain, road/bridge move augmentation, bridge AI, SCD1/presentation road + bridge associations.

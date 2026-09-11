@@ -43,6 +43,10 @@ var _theater_id: String = CFG.THEATER_EARTH
 var _settings_open: bool = false
 var _start_region_id: int = 0
 
+# Custom Battle setup overlay (built in code so we never hand-edit MainMenu.tscn).
+const CustomBattleSetupScript := preload("res://CustomBattleSetup.gd")
+var _cb_panel: Control = null
+
 
 func _ready() -> void:
 	GameTheme.apply_to_control(self)
@@ -70,6 +74,7 @@ func _ready() -> void:
 	GameTheme.apply_ghost_button(copy_seed_button)
 	GameTheme.apply_ghost_button(reroll_seed_button)
 	play_button.pressed.connect(_on_play_pressed)
+	_add_two_worlds_button()
 	custom_world_button.pressed.connect(_on_custom_world_pressed)
 	quit_button.pressed.connect(_on_quit_pressed)
 	settings_button.pressed.connect(_on_settings_pressed)
@@ -426,6 +431,85 @@ func _on_play_pressed() -> void:
 	if RunState.run_seed == 0:
 		RunState.run_seed = randi() & 0x7FFFFFFF
 	get_tree().change_scene_to_file("res://WorldConquestScreen.tscn")
+
+
+func _add_two_worlds_button() -> void:
+	# Exploratory turn-based mode (docs/REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md). Added in code so
+	# we don't have to hand-edit MainMenu.tscn.
+	var tw_btn := Button.new()
+	tw_btn.name = "TwoWorldsButton"
+	tw_btn.text = "Two Worlds (Turn-Based) — MVP"
+	GameTheme.apply_ghost_button(tw_btn)
+	var parent := play_button.get_parent()
+	parent.add_child(tw_btn)
+	parent.move_child(tw_btn, play_button.get_index() + 1)
+	tw_btn.pressed.connect(_on_two_worlds_pressed)
+
+	# Custom Battle — Total War style quick-battle launcher (HD-2D viewer test harness).
+	var cb_btn := Button.new()
+	cb_btn.name = "CustomBattleButton"
+	cb_btn.text = "Custom Battle"
+	GameTheme.apply_ghost_button(cb_btn)
+	parent.add_child(cb_btn)
+	parent.move_child(cb_btn, tw_btn.get_index() + 1)
+	cb_btn.pressed.connect(_on_custom_battle_pressed)
+
+	# Data Dictionary — in-game reference for the tables that populate the game (Unity Catalog style).
+	var dd_btn := Button.new()
+	dd_btn.name = "DataDictionaryButton"
+	dd_btn.text = "Data Dictionary"
+	GameTheme.apply_ghost_button(dd_btn)
+	parent.add_child(dd_btn)
+	parent.move_child(dd_btn, cb_btn.get_index() + 1)
+	dd_btn.pressed.connect(_on_data_dictionary_pressed)
+
+	# Lore — in-game encyclopedia for the Hearthspan setting (exploratory; not a live lock).
+	var lore_btn := Button.new()
+	lore_btn.name = "LoreButton"
+	lore_btn.text = "Lore"
+	GameTheme.apply_ghost_button(lore_btn)
+	parent.add_child(lore_btn)
+	parent.move_child(lore_btn, dd_btn.get_index() + 1)
+	lore_btn.pressed.connect(_on_lore_pressed)
+
+
+func _on_data_dictionary_pressed() -> void:
+	RunLog.info("Opening Data Dictionary")
+	get_tree().change_scene_to_file("res://DataDictionary.tscn")
+
+
+func _on_lore_pressed() -> void:
+	RunLog.info("Opening Lore")
+	get_tree().change_scene_to_file("res://Lore.tscn")
+
+
+func _on_two_worlds_pressed() -> void:
+	RunLog.info("Launching Two Worlds (turn-based globe MVP)")
+	get_tree().change_scene_to_file("res://TwoWorldsGlobe.tscn")
+
+
+func _on_custom_battle_pressed() -> void:
+	if _cb_panel == null:
+		_cb_panel = Control.new()
+		_cb_panel.set_script(CustomBattleSetupScript)
+		_cb_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+		add_child(_cb_panel)
+		_cb_panel.cancelled.connect(func(): _cb_panel.visible = false)
+		_cb_panel.fight_requested.connect(_on_custom_battle_fight)
+	_cb_panel.visible = true
+	_cb_panel.move_to_front()
+
+
+func _on_custom_battle_fight(params: Dictionary) -> void:
+	RunState.set_meta("custom_battle", params)
+	var roster: Array = params.get("roster", [])
+	RunLog.info("Custom Battle: seed=%d roster=%d order=%d/%d" % [
+		int(params.get("seed", 1)),
+		roster.size(),
+		int(params.get("order0", 0)),
+		int(params.get("order1", 0)),
+	])
+	get_tree().change_scene_to_file("res://TwoWorldsBattle.tscn")
 
 
 func _on_custom_world_pressed() -> void:

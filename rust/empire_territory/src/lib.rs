@@ -22,6 +22,7 @@ mod sim;
 mod sphere_grid;
 mod structures;
 mod tape_codec;
+mod two_worlds;
 mod world_edit;
 mod world_session;
 

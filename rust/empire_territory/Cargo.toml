@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 # (Godot 4.x including 4.6). Bump intentionally when upgrading gdext.
 godot = { git = "https://github.com/godot-rust/gdext", rev = "38154780a3aa959df50158959e2c04dbcacc9956" }
 rayon = "1.10"
+# Godot-agnostic two-worlds transaction engine (deterministic authority core).
+eon_engine = { path = "../eon_engine" }
 
 [features]
 default = []

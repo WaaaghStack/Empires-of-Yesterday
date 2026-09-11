@@ -26,6 +26,9 @@ const TERRITORY_MAX_SEGMENT_SECONDS := 1.25
 const TERRITORY_REPLAY_SECONDS_PER_ROUND := 0.12
 const MIN_BATTLE_SECONDS := 30.0
 const MAX_BATTLE_SECONDS := 6000.0
+## HD-2D 1× watch clock. One recorded frame (RECORD_STRIDE sim ticks) in this many seconds.
+## 0.56 was a timelapse; soldiers must read as walking, not skating.
+const BATTLE_WATCH_SEC_PER_FRAME := 1.8
 
 
 static func replay_segment_seconds(frame_count: int, record_stride: int = 1) -> float:

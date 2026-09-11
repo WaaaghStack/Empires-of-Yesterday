@@ -5,9 +5,9 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
 
 # EOY battle resolve (proposed)
 
-> **Status: exploratory proposal.** Not built, not accepted. Depends on the turn-based reframe and
-> its design-lock changes (`eoy-design-lock-change`). Players **do not control battles** — they set
-> them up, then watch a deterministic replay.
+> **Status: exploratory proposal, with a working slice on `cursor/mvp-two-worlds-engine-0600`.**
+> Depends on the turn-based reframe and its design-lock changes (`eoy-design-lock-change`).
+> Players **do not control battles** — they set them up, then watch a deterministic replay.
 
 ## Canon
 
@@ -17,11 +17,17 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
 
 ## Model: resolve coarse, fight fine
 
-- **Squad/regiment brain** owns *orders*: where the body moves and who it engages (advance to X,
-  charge squad B, hold, flank, rout), plus **cohesion** and **morale** (break → whole squad flees).
-- **Individual soldier** moves toward its formation slot in the squad's target area, and within a
-  local **perception/LOS radius** picks the nearest valid enemy and attacks; has its own HP + death.
-  → "They all head to X, but each one fights whoever is in front of them."
+- **Rust is the only combat authority.** The HD-2D viewer interpolates the bake. It does not target,
+  damage, or path.
+- **Squad/regiment brain** owns *guides*: formation field, facing, engagement line, who to engage,
+  **cohesion**, **morale** (break → whole squad flees). Formation is an attractor, not a rail.
+- **Each body fights individually.** Bias toward its slot; in local **perception/LOS** pick a valid
+  enemy and attack (own HP + death). Local fight beats dressing ranks. Perception is **not** scaled
+  with the 5× slab — squad guides cover the march; whole-map per-body search made 3k+ resolves hang.
+  → "The line is the intent; the soldier is the fight."
+- **One loop, many kinds.** Kind profile = domain (land/air/sea) + cohesion + reach + speed +
+  altitude. Same tick/hash for soldiers, tanks, zombies, aliens, planes; naval later. Prototype art
+  is soldiers + bombers only.
 
 ## Resolution rules (authority)
 
@@ -39,13 +45,20 @@ description: Empires of Yesterday proposed auto-resolved battles — squad/regim
 
 ## Presentation (HD-2D × Dominions free-cam)
 
+Visual contract: [docs/REQUEST_BATTLE_VISUAL_READ.md](../../../docs/REQUEST_BATTLE_VISUAL_READ.md)
+(form up → halt → fire → hold; no centroid-jog to the far edge). Realism is the picture, not the ballistics.
+
 - **Diorama slab** themed from the province biome/elevation (`WorldConquestMapGenerator`).
-- **Free orbit/pan/zoom camera** (Dominions 6 style) — reuse the globe orbit camera on a flat slab.
+- **Free orbit/pan/zoom camera** (Dominions 6 style) — right-drag orbit, wheel zoom, **WASD / arrows** pan the look-at across the slab. Default framing shows both armies; auto-rotate off during the fight.
 - **Billboard sprites**, **directional facing frames** (4-way min, **8-way** preferred for a free
-  camera), rendered via **MultiMesh / GPU instancing**.
-- **1000+ units minimum:** feasible because it is baked-replay playback; add **LOD** (near = full
-  anim/facing; far = static billboard / density blobs + banners/dust).
-- **Prototype art scope: soldiers + bombers only** (existing pixel billboards). Expand roster later.
+  camera), rendered via **MultiMesh / GPU instancing**. Bake `facing` + anim state, not just `x,y,alive`.
+- **10000-body stress cap** on the same resolver (Custom Battle **10k stress** fills 50 inf per side at 100). Combat reach is unchanged; the slab is 5× (1000×600). Live World Conquest F6 is untouched.
+- **Prototype art scope: soldiers + bombers only.** Soldiers play an 8-frame run/shoot sheet from baked state (GPU UV slice). Bombers keep a single stamp. Globe World Conquest stamps are unchanged.
+- **No per-unit banners** on the replay slab.
+- **Shots travel:** fire ticks spawn short streaks that move shooter → aim, then vanish. Hit tint is a brief flash, not a held glow. No second combat brain.
+- **Even 1× playback.** 1× is the human-readable pace (the old 0.5× clock). Player can slow (0.25× / 0.5×) or speed up (2× / 4× / 8×).
+- **Press through.** Regiment orders pick a lane, then the guide closes on that enemy. Halt is weapon reach, not a river parking band.
+- **Bombers** overfly, drop a blast, continue the pass, then come around again. Infantry AA is weak (~50 soldiers to kill one bomber). Blasts launch land bodies (baked `z`); not always lethal.
 
 ## Reporting (accounting model)
 
@@ -61,7 +74,11 @@ Battles follow the same **ledger → report** discipline as the world (see
 
 ## Change checklist
 
-- [ ] Squad brain change vs individual-combat change — kept on the right tier?
+- [ ] Squad brain change vs individual-combat change — kept on the right tier? Formation still a guide (cohesion), not a rail?
+- [ ] Preset formations (Line / Double / Column / Wedge) space regiment *centers*; individuals still break slots to fight.
+- [ ] Directional orders are **per regiment** (Custom Battle); army-wide values are defaults only. Rear wraps the field. Land paths around solid hills; river stays a ford.
+- [ ] Custom Battle builder is Total War cards + RMB-drag facing — no GDScript combat authority.
+- [ ] New unit kind is a **profile** (domain/cohesion/reach), not a new resolver?
 - [ ] Deterministic (fixed order + seeded PRNG)? Spatial-hash queries, not O(n²)?
 - [ ] Replay tracks (per-unit transform + state) updated as a projection only?
 - [ ] Result transaction surfaced to the World log (`eoy-sim-transaction-engine`)?

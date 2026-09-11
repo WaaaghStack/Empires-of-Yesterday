@@ -1,0 +1,329 @@
+{
+  "title": "Empires of Yesterday — Data Dictionary",
+  "subtitle": "Guidance on the tables that populate the game. Unity Catalog–style reference: pick a table to see its grain, source, and columns.",
+  "catalogs": [
+    {
+      "name": "Two Worlds — Campaign (authority tables)",
+      "description": "Narrow, normalized authority tables for the turn-based Two Worlds mode. These hold sim truth; wide-row reports (see Battle replay / presentation) are derived projections. Source crate: rust/eon_engine.",
+      "tables": [
+        {
+          "name": "province",
+          "grain": "One row per province (a large carved region of the globe).",
+          "source": "rust/eon_engine/src/model.rs :: Province",
+          "description": "A campaign region. Ownership is derived from the dominion (faith) tide, not stored directly.",
+          "columns": [
+            {"name": "id", "type": "u32", "null": "NOT NULL", "key": "PK", "desc": "Province identifier (dense index)."},
+            {"name": "name", "type": "string", "null": "NOT NULL", "key": "", "desc": "Display name, e.g. P0."},
+            {"name": "is_land", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Land provinces participate in the tide; water blocks it."},
+            {"name": "elevation", "type": "u8 (0..100)", "null": "NOT NULL", "key": "", "desc": "Terrain height. Ignored by dominion diffusion (height-independent tide); affects battle terrain/movement."},
+            {"name": "neighbors", "type": "u32[]", "null": "NOT NULL", "key": "FK→province.id", "desc": "Adjacency (borders + sea lanes) used by the tide and army movement."},
+            {"name": "dom", "type": "f32[] (per faction)", "null": "NOT NULL", "key": "", "desc": "Dominion/faith mass held by each faction here. The visible tide; drives owner()."},
+            {"name": "unrest", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Corruption pressure from enemy faith in an owned province; high unrest erodes the owner's faith."},
+            {"name": "temple_owner", "type": "FactionId?", "null": "NULLABLE", "key": "FK→faction.id", "desc": "Faction whose temple sits here (a fixed dominion amplifier). Null if none."},
+            {"name": "capital_of", "type": "FactionId?", "null": "NULLABLE", "key": "FK→faction.id", "desc": "Faction whose capital sits here (strongest fixed source). Null if none."},
+            {"name": "has_throne", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Throne of Ascension marker for the ascension win condition."},
+            {"name": "deposit", "type": "GemPath?", "null": "NULLABLE", "key": "", "desc": "Gem deposit (Aurelium/Verdantite/Emberstone) credited to the owner. Null if none."},
+            {"name": "revealed", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Scouted/revealed flag (fog of war hook)."}
+          ],
+          "notes": "owner() = strict-max dominion above a threshold, else neutral. Diffusion conserves per-faction mass; injection/cancellation post to the ledger."
+        },
+        {
+          "name": "faction",
+          "grain": "One row per faction (player or AI).",
+          "source": "rust/eon_engine/src/model.rs :: Faction",
+          "description": "A competing power (e.g. Azure, Crimson).",
+          "columns": [
+            {"name": "id", "type": "u32", "null": "NOT NULL", "key": "PK", "desc": "Faction identifier."},
+            {"name": "name", "type": "string", "null": "NOT NULL", "key": "", "desc": "Display name."},
+            {"name": "is_ai", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Driven by the built-in AI (both sides can be AI for AI-vs-AI)."},
+            {"name": "alive", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Still in the game (has faith or armies)."},
+            {"name": "ascension_points", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Owned thrones this turn; drives the Ascension victory."}
+          ],
+          "notes": "relations[a][b] (see Config/relations) tracks diplomacy in [-100,100]."
+        },
+        {
+          "name": "army",
+          "grain": "One row per army (commander stack) on the campaign map.",
+          "source": "rust/eon_engine/src/model.rs :: Army",
+          "description": "A movable force of squads, rendered on the globe as a commander billboard; expands into individual units in battle.",
+          "columns": [
+            {"name": "id", "type": "u32", "null": "NOT NULL", "key": "PK", "desc": "Army identifier."},
+            {"name": "faction", "type": "u32", "null": "NOT NULL", "key": "FK→faction.id", "desc": "Owning faction."},
+            {"name": "province", "type": "u32", "null": "NOT NULL", "key": "FK→province.id", "desc": "Current location."},
+            {"name": "squads", "type": "Squad[]", "null": "NOT NULL", "key": "", "desc": "Regiments carried (see squad)."},
+            {"name": "move_to", "type": "ProvinceId?", "null": "NULLABLE", "key": "FK→province.id", "desc": "Movement order for the turn; resolved in the Movement phase."}
+          ],
+          "notes": "Two enemy armies meeting in a province trigger a battle (resolved by the battle engine)."
+        },
+        {
+          "name": "squad",
+          "grain": "One row per regiment within an army.",
+          "source": "rust/eon_engine/src/model.rs :: Squad",
+          "description": "A block of identical units. Expands to `count` individual soldiers/bombers in battle.",
+          "columns": [
+            {"name": "kind", "type": "enum{Soldier,Bomber}", "null": "NOT NULL", "key": "", "desc": "Unit type. Soldiers have Verdantite upkeep; bombers have none (A14)."},
+            {"name": "count", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Living units in the squad."}
+          ],
+          "notes": "Per-kind stats (hp, attack, reach, speed) live on UnitKind in model.rs."
+        },
+        {
+          "name": "agent",
+          "grain": "One row per agent (meta-game character).",
+          "source": "rust/eon_engine/src/model.rs :: Agent",
+          "description": "A Total-War-style operative acting on the campaign each turn.",
+          "columns": [
+            {"name": "id", "type": "u32", "null": "NOT NULL", "key": "PK", "desc": "Agent identifier."},
+            {"name": "faction", "type": "u32", "null": "NOT NULL", "key": "FK→faction.id", "desc": "Owning faction."},
+            {"name": "province", "type": "u32", "null": "NOT NULL", "key": "FK→province.id", "desc": "Current location."},
+            {"name": "kind", "type": "enum{Prophet,Priest,Spy,Assassin,Diplomat,Scout}", "null": "NOT NULL", "key": "", "desc": "Verb: amplify faith / sap enemy faith / kill agents / diplomacy / reveal."},
+            {"name": "level", "type": "u8", "null": "NOT NULL", "key": "", "desc": "Skill (affects e.g. assassination odds)."},
+            {"name": "alive", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Killed agents are removed from play."},
+            {"name": "target", "type": "ProvinceId?", "null": "NULLABLE", "key": "FK→province.id", "desc": "Action target this turn (spy/assassin/diplomat/scout)."},
+            {"name": "move_to", "type": "ProvinceId?", "null": "NULLABLE", "key": "FK→province.id", "desc": "One-step move order this turn."}
+          ],
+          "notes": "Prophets/priests amplify dominion from their location during the Dominion phase."
+        }
+      ]
+    },
+    {
+      "name": "Two Worlds — Accounting (transaction ledger)",
+      "description": "The engine is a double-entry ledger: narrow ordered transactions are journal entries; wide-row reports are the finished statements. Every state change is a balanced posting so the books always tie out (trial_balance == 0). Source: rust/eon_engine/src/ledger.rs.",
+      "tables": [
+        {
+          "name": "ledger_txn",
+          "grain": "One row per posted transaction (append-only journal).",
+          "source": "rust/eon_engine/src/ledger.rs :: Txn",
+          "description": "Immutable journal entry. Corrections are reversing transactions, never edits.",
+          "columns": [
+            {"name": "seq", "type": "u64", "null": "NOT NULL", "key": "PK", "desc": "Monotonic sequence number (posting order)."},
+            {"name": "turn", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Turn this transaction posted in."},
+            {"name": "phase", "type": "enum Phase", "null": "NOT NULL", "key": "", "desc": "Order-of-operations phase: income, upkeep, agents, rituals, movement, battles, dominion, corruption, events, win_check."},
+            {"name": "kind", "type": "string", "null": "NOT NULL", "key": "", "desc": "Stable op tag, e.g. inject_capital, cancel, casualties, consecrate, spy_sap."},
+            {"name": "postings", "type": "(Account, f64)[]", "null": "NOT NULL", "key": "", "desc": "Double-entry postings; must sum to ~0."},
+            {"name": "note", "type": "string", "null": "NOT NULL", "key": "", "desc": "Human note for drill-down (province/faction ids)."}
+          ],
+          "notes": "The journal digest proves replay determinism. Diffusion conserves mass, so it posts nothing; only mint/destroy/transfer post."
+        },
+        {
+          "name": "account_balance",
+          "grain": "One row per tracked account (running balance).",
+          "source": "rust/eon_engine/src/ledger.rs :: Account",
+          "description": "Conserved quantities. Wide-row reports must reconcile against these aggregates (trial balance).",
+          "columns": [
+            {"name": "account", "type": "enum Account", "null": "NOT NULL", "key": "PK", "desc": "Dominion(f) / DominionSource(f) / DominionSink / UnitsAlive(f) / UnitSource(f) / Casualties(f) / Gems(f,path) / GemSource(f)."},
+            {"name": "balance", "type": "f64", "null": "NOT NULL", "key": "", "desc": "Running total; sum of all balances is always ~0 (double-entry)."}
+          ],
+          "notes": "Example invariants: sum_provinces(dom[f]) == Dominion(f); UnitsAlive(f) + Casualties(f) == recruited(f)."
+        }
+      ]
+    },
+    {
+      "name": "Two Worlds — Battle (baked replay)",
+      "description": "Battles are resolved once (deterministically, spatial-hash O(n)) and baked to wide-row frames the HD-2D viewer interpolates at ~60fps. Source: rust/eon_engine/src/battle.rs.",
+      "tables": [
+        {
+          "name": "battle_report",
+          "grain": "One row per resolved battle.",
+          "source": "rust/eon_engine/src/battle.rs :: BattleReport",
+          "description": "Outcome + baked frames for a battle in a contested province.",
+          "columns": [
+            {"name": "province", "type": "u32", "null": "NOT NULL", "key": "FK→province.id", "desc": "Where the battle happened."},
+            {"name": "attacker / defender", "type": "u32", "null": "NOT NULL", "key": "FK→faction.id", "desc": "The two sides."},
+            {"name": "winner", "type": "FactionId?", "null": "NULLABLE", "key": "", "desc": "Winning faction, or null on a draw."},
+            {"name": "ticks", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Sim ticks the battle ran (up to MAX_TICKS)."},
+            {"name": "initial / survivors / casualties", "type": "(FactionId,u32)[]", "null": "NOT NULL", "key": "", "desc": "Per-side counts; initial == survivors + casualties (reconciles)."},
+            {"name": "frames", "type": "Frame[]", "null": "NOT NULL", "key": "", "desc": "Recorded every RECORD_STRIDE ticks; the replay track."}
+          ],
+          "notes": "Casualties post back to the World ledger; the victor consecrates the province (a balanced dominion injection)."
+        },
+        {
+          "name": "battle_frame",
+          "grain": "One row per recorded tick of a battle.",
+          "source": "rust/eon_engine/src/battle.rs :: Frame",
+          "description": "A snapshot of all units at a tick. Unit index is stable across frames, enabling interpolation.",
+          "columns": [
+            {"name": "tick", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Sim tick of this frame."},
+            {"name": "units", "type": "UnitSnapshot[]", "null": "NOT NULL", "key": "", "desc": "All units, in stable order (see unit_snapshot)."}
+          ],
+          "notes": "Streamed to Godot via get_last_battle_frame_xy(index, frame); meta (fac/kind) fetched once via get_last_battle_meta."
+        },
+        {
+          "name": "unit_snapshot",
+          "grain": "One row per unit per frame.",
+          "source": "rust/eon_engine/src/battle.rs :: UnitSnapshot",
+          "description": "A single unit's position/state at a frame (billboard sprite in the viewer).",
+          "columns": [
+            {"name": "faction", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Owning faction (color)."},
+            {"name": "kind", "type": "enum{Soldier,Bomber}", "null": "NOT NULL", "key": "", "desc": "Sprite selection."},
+            {"name": "x / y", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Battlefield position (0..BATTLE_WIDTH / 0..BATTLE_HEIGHT)."},
+            {"name": "alive", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Rendered only while alive."}
+          ],
+          "notes": "The viewer buckets units by (faction, kind) into MultiMesh draw calls for scale."
+        },
+        {
+          "name": "locomotor",
+          "grain": "One row per UnitKind.",
+          "source": "rust/eon_engine/src/nav.rs :: LOCOMOTOR",
+          "description": "How a Compact kind moves on the battle slab. Static Rust table; not JSON.",
+          "columns": [
+            {"name": "kind", "type": "enum UnitKind", "null": "NOT NULL", "key": "PK", "desc": "Compact kind 0–7."},
+            {"name": "domain", "type": "enum{Land,Air,Naval}", "null": "NOT NULL", "key": "", "desc": "Locomotion plane."},
+            {"name": "blocked_by_hill / blocked_by_ruin", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Land walks around; air flies over."},
+            {"name": "ford_ok", "type": "bool", "null": "NOT NULL", "key": "", "desc": "River is a ford, not a wall."}
+          ]
+        },
+        {
+          "name": "nav_policy",
+          "grain": "One row per (situation, attack_style).",
+          "source": "rust/eon_engine/src/nav.rs :: NAV_POLICY",
+          "description": "Join situation → intent. ST_IDLE is only legal for TrainHold.",
+          "columns": [
+            {"name": "situation", "type": "enum NavSituation", "null": "NOT NULL", "key": "PK", "desc": "Routing / Train / DriveBy / HaltInReach / Advance / AaClose / AirIgnore / FollowLane."},
+            {"name": "style", "type": "enum AttackStyle", "null": "NOT NULL", "key": "", "desc": "Hold / Charge / DriveBy / Train."},
+            {"name": "intent", "type": "enum NavIntent", "null": "NOT NULL", "key": "", "desc": "FollowGuide / CloseContact / HaltAim / Overfly / RoutHome / TrainHold."}
+          ],
+          "notes": "Guides and land bodies steer around nav_blocker rows (hill, ruin). No per-body A*."
+        },
+        {
+          "name": "nav_blocker",
+          "grain": "One row per solid occupancy on the slab (hill, ruin).",
+          "source": "rust/eon_engine/src/battle.rs :: LAND_NAV + rust/eon_engine/src/nav.rs :: NavBlocker",
+          "description": "Static circles land steers around. Air ignores land blockers. Rust tables, not JSON.",
+          "columns": [
+            {"name": "cx / cy / r", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Circle in slab space. Nav radius is occupancy plus a walk-around pad."},
+            {"name": "blocks_land / blocks_air", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Which locomotor domains this occupies."}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Two Worlds — Config (tunables)",
+      "description": "Global sim knobs for the campaign + battle pacing. Source: rust/eon_engine/src/model.rs :: Config.",
+      "tables": [
+        {
+          "name": "config",
+          "grain": "Singleton (one row).",
+          "source": "rust/eon_engine/src/model.rs :: Config",
+          "description": "Balance constants; product law lives in DESIGN.md § Design locks.",
+          "columns": [
+            {"name": "dominion_spread_rate", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Slow tide diffusion rate."},
+            {"name": "cancel_rate", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Opposing-faith erosion on contact."},
+            {"name": "capital_output / temple_output / prophet_output / priest_output", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Per-turn dominion injection by source."},
+            {"name": "unrest_from_enemy / unrest_decay / unrest_threshold / unrest_faith_erosion", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Corruption/unrest feedback."},
+            {"name": "gem_per_deposit", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Gem income per owned deposit."},
+            {"name": "thrones_to_win", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Thrones needed for Ascension (set very high in globe mode to force a contest)."},
+            {"name": "turn_limit", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Hard cap; leader by land then dominion wins by Score."},
+            {"name": "dominion_alive_eps", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Faith below this counts as eliminated (dominion-kill win)."}
+          ],
+          "notes": "Battle-side constants (BATTLE_WIDTH/HEIGHT, MAX_TICKS, RECORD_STRIDE, GRID_CELL) live in battle.rs. Shot cadence is KindProfile attack_interval (ticks); air keeps BOMB_COOLDOWN as a floor."
+        }
+      ]
+    },
+    {
+      "name": "Live World Conquest — SCD1 domains",
+      "description": "The shipping real-time game's live authority is the Rust WorldDataset; Godot presentation is apply-only via SCD1 per-domain versioned pulls. Source: DESIGN.md, RUST.md, Scd1DomainPull.gd, rust/empire_territory/src/domain_version.rs.",
+      "tables": [
+        {
+          "name": "territory",
+          "grain": "One row per grid cell (per-domain versioned).",
+          "source": "domain_version.rs (DomainId::Territory); sim.rs owners/pressure",
+          "description": "Owners + pressure per cell; the fluid conquest truth.",
+          "columns": [
+            {"name": "cell", "type": "i32", "null": "NOT NULL", "key": "PK", "desc": "Grid cell index (equirect or sphere cell)."},
+            {"name": "owner", "type": "u8", "null": "NOT NULL", "key": "", "desc": "0 neutral / friendly / hostile / contested / unclaimable."},
+            {"name": "pressure_friendly / pressure_hostile", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Per-side fluid pressure (sim truth)."},
+            {"name": "version", "type": "u64", "null": "NOT NULL", "key": "", "desc": "SCD1 row version; Godot pulls rows with version > last."}
+          ],
+          "notes": "Owner = simple majority pressure. Godot never authors this in live Play."
+        },
+        {
+          "name": "structures",
+          "grain": "One row per structure (SCD1 versioned).",
+          "source": "rust/empire_territory/src/structures.rs",
+          "description": "Outposts, barracks, hangars (corridor kept for save/compat).",
+          "columns": [
+            {"name": "id", "type": "i32", "null": "NOT NULL", "key": "PK", "desc": "Structure id."},
+            {"name": "team", "type": "u8", "null": "NOT NULL", "key": "", "desc": "Owner side."},
+            {"name": "kind", "type": "string", "null": "NOT NULL", "key": "", "desc": "spawner(outpost) / barracks / hangar."},
+            {"name": "state", "type": "string", "null": "NOT NULL", "key": "", "desc": "e.g. ACTIVE (instant under R1)."},
+            {"name": "gx / gy", "type": "i32", "null": "NOT NULL", "key": "", "desc": "Grid position."},
+            {"name": "spawner_mode / battery_tank", "type": "i32 / f32", "null": "NULLABLE", "key": "", "desc": "Outpost Pump/Drain/Battery mode + stored surge."},
+            {"name": "version", "type": "u64", "null": "NOT NULL", "key": "", "desc": "SCD1 row version; removed_ids carry tombstones."}
+          ],
+          "notes": "See structure_record_to_dict in ffi_convert.rs for the full field set."
+        },
+        {
+          "name": "agents (soldiers)",
+          "grain": "One row per living soldier (SCD1 versioned).",
+          "source": "rust/empire_territory/src/agents.rs",
+          "description": "Ground units with aura + erode; Aurelium+Verdantite upkeep.",
+          "columns": [
+            {"name": "id", "type": "i32", "null": "NOT NULL", "key": "PK", "desc": "Soldier id."},
+            {"name": "team", "type": "u8", "null": "NOT NULL", "key": "", "desc": "Owner side."},
+            {"name": "gx / gy", "type": "i32", "null": "NOT NULL", "key": "", "desc": "Grid position (or sphere cell)."},
+            {"name": "version", "type": "u64", "null": "NOT NULL", "key": "", "desc": "SCD1 row version."}
+          ],
+          "notes": "Caps: 5 per barracks, 100 global (Design lock F6). Ferry on open water at 0.25x (R2)."
+        },
+        {
+          "name": "bombers",
+          "grain": "One row per living bomber (SCD1 versioned).",
+          "source": "rust/empire_territory/src/bombers.rs",
+          "description": "Air units; bomb any non-team land; no continuous upkeep (A14).",
+          "columns": [
+            {"name": "id", "type": "i32", "null": "NOT NULL", "key": "PK", "desc": "Bomber id."},
+            {"name": "team", "type": "u8", "null": "NOT NULL", "key": "", "desc": "Owner side."},
+            {"name": "gx / gy", "type": "i32", "null": "NOT NULL", "key": "", "desc": "Grid position."},
+            {"name": "version", "type": "u64", "null": "NOT NULL", "key": "", "desc": "SCD1 row version."}
+          ],
+          "notes": "Caps: 5 per hangar, 100 global (F6)."
+        },
+        {
+          "name": "wallet",
+          "grain": "One row per team resource wallet (SCD1 versioned).",
+          "source": "rust/empire_territory/src/resources.rs",
+          "description": "Supply + minerals (Aurelium/Verdantite/Emberstone) authority.",
+          "columns": [
+            {"name": "team", "type": "u8", "null": "NOT NULL", "key": "PK", "desc": "Owner side."},
+            {"name": "aurelium / verdantite / emberstone", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Mineral balances (owned-deposit credit + baseline)."},
+            {"name": "version", "type": "u64", "null": "NOT NULL", "key": "", "desc": "SCD1 wallet version."}
+          ],
+          "notes": "Income/spend applied in Rust (apply_resource_tick_delta), then mirrored to Godot."
+        }
+      ]
+    },
+    {
+      "name": "Content / Reference",
+      "description": "Static content and constants that parameterize both modes.",
+      "tables": [
+        {
+          "name": "economy_catalog",
+          "grain": "One row per structure/unit kind.",
+          "source": "EconomyCatalog.gd / EconomyLib.gd (mirrored in economy.rs)",
+          "description": "Costs, drains, caps for structures and units.",
+          "columns": [
+            {"name": "kind", "type": "string", "null": "NOT NULL", "key": "PK", "desc": "outpost / barracks / hangar / soldier / bomber."},
+            {"name": "supply_cost", "type": "int", "null": "NOT NULL", "key": "", "desc": "Supply to build/spawn (e.g. 400 for structures)."},
+            {"name": "spawn_cost", "type": "minerals", "null": "NULLABLE", "key": "", "desc": "Mineral cost to spawn units (Au/Ve/Em)."},
+            {"name": "upkeep", "type": "minerals/sec", "null": "NULLABLE", "key": "", "desc": "Continuous upkeep (soldiers only; bombers none — A14)."},
+            {"name": "cap", "type": "int", "null": "NOT NULL", "key": "", "desc": "Per-structure and global caps (F6)."}
+          ],
+          "notes": "Rust economy.rs mirrors these for parity; QA checks catalog vs config."
+        },
+        {
+          "name": "world_conquest_config",
+          "grain": "Singleton reference of live-game constants.",
+          "source": "WorldConquestConfig.gd",
+          "description": "Pacing, camera, globe, and flow constants for the live World Conquest game.",
+          "columns": [
+            {"name": "GLOBE_RADIUS / HEIGHT_SCALE", "type": "float", "null": "NOT NULL", "key": "", "desc": "Globe geometry."},
+            {"name": "PRESSURE_* / FLOW_*", "type": "float", "null": "NOT NULL", "key": "", "desc": "Fluid inject/gradient pacing."},
+            {"name": "STARTING_SUPPLY / INCOME_PER_TILE_PER_SEC", "type": "float", "null": "NOT NULL", "key": "", "desc": "Economy pacing."},
+            {"name": "CAMERA_*", "type": "float", "null": "NOT NULL", "key": "", "desc": "Orbit/zoom limits."}
+          ],
+          "notes": "Numbers are code-truth; DESIGN.md explains the why."
+        }
+      ]
+    }
+  ]
+}

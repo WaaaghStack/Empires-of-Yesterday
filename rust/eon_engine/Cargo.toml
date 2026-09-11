@@ -1,0 +1,12 @@
+[package]
+name = "eon_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Empires of Yesterday — two-worlds transaction engine (godot-agnostic, deterministic authority)."
+
+# Pure-Rust, dependency-free authority core. Determinism is a hard contract, so we ship our
+# own seeded PRNG rather than pulling `rand` (which does not guarantee cross-version streams).
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
