@@ -6,7 +6,7 @@ extends Control
 
 signal closed
 
-const FRAME_DT := 0.06
+const FRAME_DT := 1.8
 
 var _frames: Array = []
 var _summary: Dictionary = {}

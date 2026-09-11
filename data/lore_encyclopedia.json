@@ -12,11 +12,16 @@
           "vibe": "The prototype is a provincial war. The setting is a sky.",
           "origin": "Live World Conquest still talks about one globe. This encyclopedia opens the rest without pretending eight anatomies already ship.",
           "temperament": "",
-          "fight": "On the playable shard: soldiers from barracks, bombers from hangars, two Compact banners (Azure / Crimson). DESIGN.md locks still govern that match (F5 land or zero pressure; A14 bombers; R1 no roads).",
-          "strengths": ["Honest about scope", "Does not retcon prototype art"],
-          "weaknesses": ["Horizon species are not selectable armies yet"],
+          "fight": "On the playable shard: Hearthline from barracks, Debt Wings from hangars, two Compact banners (Azure / Crimson). DESIGN.md locks still govern that match (F5 land or zero pressure; A14 bombers; R1 no roads).",
+          "strengths": [
+            "Honest about scope",
+            "Does not retcon prototype art"
+          ],
+          "weaknesses": [
+            "Horizon species are not selectable armies yet"
+          ],
           "win": "N/A — this card is a reading rule, not a faction.",
-          "body": "PLAYABLE NOW: Hearthkin only, as soldiers and bombers, usually under two Compact colors. That civil quarrel is locally total and cosmically small.\n\nLORE HORIZON: eight species, real travel between planets, each with a unique way to end the setting. Do not invent Rust battle mechanics from these pages. Do not treat this as a silent change to design locks.",
+          "body": "PLAYABLE NOW: Hearthkin only. Prototype kinds are Hearthline (soldiers) and Debt Wings (bombers), usually under two Compact colors. That civil quarrel is locally total and cosmically small. The Compact's other six jobs are lore — see Hearthkin roster.\n\nLORE HORIZON: eight species, real travel between planets, each with a unique way to end the setting. Do not invent Rust battle mechanics from these pages. Do not treat this as a silent change to design locks.",
           "notes": "Canon: docs/LORE.md"
         },
         {
@@ -27,11 +32,37 @@
           "origin": "Hearth aged unevenly. Regions that had already happened tore away from regions that had not.",
           "temperament": "The present is thin. Power is harvested from leftover Yesterday.",
           "fight": "Travel is real: ships owe distance to the past and pay it as After. Spend too much in one corridor and the Wake thins.",
-          "strengths": ["Many peoples", "Many endings", "No single correct playstyle"],
-          "weaknesses": ["Overharvesting After causes Open Tears"],
+          "strengths": [
+            "Many peoples",
+            "Many endings",
+            "No single correct playstyle"
+          ],
+          "weaknesses": [
+            "Overharvesting After causes Open Tears"
+          ],
           "win": "Nobody has won. Someone will. See End-states.",
           "body": "Between the shards runs the Wake: leftover Yesterday — mass that remembers being one planet. Empires of Yesterday is literal: polities that harvest residual time-mass to stay warm in a cooling present.\n\nThe globe you play is one shard. The rest of the span files that war under weather.",
           "notes": "docs/lore/HEARTHSPAN.md"
+        },
+        {
+          "id": "unit_cards",
+          "name": "Unit cards (groups and stats)",
+          "playable": "now",
+          "vibe": "Total War category, Dominions-style block. Rank is where a formation puts the card.",
+          "origin": "Mapped to the existing KindProfile loop: domain, cohesion, reach, speed, altitude. Not a second combat dialect.",
+          "temperament": "",
+          "fight": "Arm is the class (infantry, assault, recon, pioneer, artillery, armor, support, anti_air, air, naval). Rank is the band (screen, line, overwatch, battery, train, air, sea). Custom Battle today still only splits soldier vs bomber.",
+          "strengths": [
+            "Formations can key off rank",
+            "Live stats match Rust for Hearthline and Debt Wings"
+          ],
+          "weaknesses": [
+            "Horizon stats are proposed",
+            "Templates do not consume rank yet"
+          ],
+          "win": "N/A — this card is a reading rule, not a faction.",
+          "body": "ARM is what the unit is. RANK is where a template stands it. Rolling Hearths are support, never armor.\n\nLIVE numbers (Hearthline, Debt Wings) match rust/eon_engine KindProfile. Proposed numbers are lore until a battles card ships the kind.\n\nCanon: docs/lore/UNIT_METADATA.md",
+          "notes": "Canon: docs/lore/UNIT_METADATA.md"
         }
       ]
     },
@@ -45,12 +76,22 @@
           "vibe": "Industrial fronts. Logistics as religion. The people of the mapped shard.",
           "origin": "Children of the playable globe; they inherited factories instead of a myth they trusted.",
           "temperament": "Direct, scheduled, loyal to the next decision. Slightly ashamed of wonder.",
-          "fight": "Combined arms. Infantry hold a receipt of ground; bombers collect debts the infantry cannot reach. They admire a decision that stays decided.",
-          "strengths": ["Logistics", "Mapping", "Holding a line", "Good-enough engineering"],
-          "weaknesses": ["Think in one-world terms", "Poor at wars that are not fronts", "Spend After like coal", "Easy for corridor peoples to tax"],
+          "fight": "Combined arms. Hearthline hold a receipt of ground; Debt Wings collect debts the infantry cannot reach. Horizon roster adds assault, pioneers, recon, guns, rolling hearths, and anti-air clerks. They admire a decision that stays decided.",
+          "strengths": [
+            "Logistics",
+            "Mapping",
+            "Holding a line",
+            "Good-enough engineering"
+          ],
+          "weaknesses": [
+            "Think in one-world terms",
+            "Poor at wars that are not fronts",
+            "Spend After like coal",
+            "Easy for corridor peoples to tax"
+          ],
           "win": "The Last Warmth — monopolize remaining heat and After until only their hearths stay lit.",
-          "body": "Prototype art is their art: soldiers and bombers. Azure and Crimson are banners of one species, a Compact civil quarrel — a house fire: locally total, cosmically small.\n\nThey still believe a front is a line you can stand on. Their poetry is the after-action. Marshal Sera Vohl can win this world and lose the span without noticing.",
-          "notes": "Only playable species in the current prototype."
+          "body": "Prototype art is their art: Hearthline and Debt Wings. Azure and Crimson are banners of one species, a Compact civil quarrel — a house fire: locally total, cosmically small.\n\nThey still believe a front is a line you can stand on. Their poetry is the after-action. Marshal Sera Vohl can win this world and lose the span without noticing. Full Compact list: eight jobs in Hearthkin roster.",
+          "notes": "Only playable species in the current prototype. Custom Battle can field the eight Compact jobs. Live World Conquest stays Hearthline and Debt Wings."
         },
         {
           "id": "orunai",
@@ -60,8 +101,16 @@
           "origin": "Tidally locked terminator-lands, where noon and midnight share a fence.",
           "temperament": "Formal, hot, allergic to absence. Trophies are filings.",
           "fight": "Close. Bind survivors to terms. A campaign is a stack of orun — witnessed bouts. Range is a kind of lying.",
-          "strengths": ["Shock", "Morale", "Making victory stick as law"],
-          "weaknesses": ["Wars of absence", "Victory without witnesses is void", "Corridor and legal peoples frustrate them"],
+          "strengths": [
+            "Shock",
+            "Morale",
+            "Making victory stick as law"
+          ],
+          "weaknesses": [
+            "Wars of absence",
+            "Victory without witnesses is void",
+            "Corridor and legal peoples frustrate them"
+          ],
           "win": "The Unblinking Crown — make the universe watch them win, then file the watching.",
           "body": "Dense-boned, short-slept, legally obsessed. A fight that is not witnessed is weather, not war.\n\nReceipt-King Orun-Tal won so completely that no witnesses remained, then filed his own defeat. The Orunai still argue whether he is the greatest king or the most failed. That argument is his monument.",
           "notes": "Directness admirers — not the only valid playstyle."
@@ -74,8 +123,17 @@
           "origin": "Thin-atmosphere shards where sound had to become weather to survive.",
           "temperament": "Patient, mournful, precise, a little hollow at the edges.",
           "fight": "Weather, morale, un-happening small events. A shot that missed because the aiming was forgotten. Fragile in a street fight.",
-          "strengths": ["Information", "Denial", "Long games", "Forgetting routes on purpose"],
-          "weaknesses": ["Each expansion costs origin", "Old Mnari are emptied rooms", "Direct assault shatters them"],
+          "strengths": [
+            "Information",
+            "Denial",
+            "Long games",
+            "Forgetting routes on purpose"
+          ],
+          "weaknesses": [
+            "Each expansion costs origin",
+            "Old Mnari are emptied rooms",
+            "Direct assault shatters them"
+          ],
           "win": "The Closed Book — remember so completely that rivals cannot pay distance in After.",
           "body": "They do not beam thoughts. They keep. A child is born when a parent spends a memory — the empire grows by forgetting on purpose.\n\nArchivist Yel spent her childhood to remember a war that had not happened yet. She will tell you how your city dies, then ask who you are.",
           "notes": ""
@@ -88,8 +146,15 @@
           "origin": "The first people to treat the Split as a textile, not a wound.",
           "temperament": "Curious, unsatisfied, proud of errors that leave marks.",
           "fight": "Terrain rewriting. Join battlefields that should not share a border. Trap armies in half-built geometry.",
-          "strengths": ["Strategic shortcuts", "Siege of meaning", "Making maps lie usefully"],
-          "weaknesses": ["Cannot hold a finished peace", "Completed victory bores them into sabotage"],
+          "strengths": [
+            "Strategic shortcuts",
+            "Siege of meaning",
+            "Making maps lie usefully"
+          ],
+          "weaknesses": [
+            "Cannot hold a finished peace",
+            "Completed victory bores them into sabotage"
+          ],
           "win": "The Single Thread — reunify the span as a draft they refuse to stop editing.",
           "body": "Where others complete a city, they leave a seam. Needles are their craftspeople.\n\nNeedle of Nine almost stitched two suns and left a dead color in the sky — a hue that does not occur in honest weather. Ships still steer around it. The Ravel call it their proudest error.",
           "notes": ""
@@ -102,8 +167,16 @@
           "origin": "Ash-belt worlds where the Split left more cinder than soil.",
           "temperament": "Devout, practical, uncomfortable with unused things (including unused people).",
           "fight": "Attrition, area denial, burning After as ugly efficient fuel.",
-          "strengths": ["Endurance", "Converting loss into input", "Holding ruined ground"],
-          "weaknesses": ["Poor at precision", "Mercy-as-strategy fails them", "Starve the input and the liturgy cools"],
+          "strengths": [
+            "Endurance",
+            "Converting loss into input",
+            "Holding ruined ground"
+          ],
+          "weaknesses": [
+            "Poor at precision",
+            "Mercy-as-strategy fails them",
+            "Starve the input and the liturgy cools"
+          ],
           "win": "The Perfect Slag — cook living worlds into one useful brick.",
           "body": "Same heat as Hearthkin industry, different prayer: a universe that produces no residue has not yet been used. Slag-saints are furnaces with liturgy, not gods of spite.\n\nMother-Kiln Halex canonized a battlefield by cooking it into a brick that still ticks. Heard through gloves.",
           "notes": ""
@@ -116,8 +189,15 @@
           "origin": "Crews who stayed in transit until transit became a country.",
           "temperament": "Dry, toll-minded, claustrophilic. Capitals look provincial.",
           "fight": "Interdiction. Tax travel, collapse routes, drown navies of After. Rarely take a city.",
-          "strengths": ["Corridor mobility", "Campaign-layer strangling", "Knowing which road is thinning"],
-          "weaknesses": ["Weak on a held surface", "Suffocate if the Wake is sealed"],
+          "strengths": [
+            "Corridor mobility",
+            "Campaign-layer strangling",
+            "Knowing which road is thinning"
+          ],
+          "weaknesses": [
+            "Weak on a held surface",
+            "Suffocate if the Wake is sealed"
+          ],
           "win": "The Drowned Interval — flood the Wake so surfaces become isolated museums.",
           "body": "Drift-Speaker Quell collects tolls on the three busiest corridors, has not set foot on a planet in eleven years, and owns more movement than most emperors. The invoice arrives before the ship does.\n\nIf the present has a stronger hold, it often does not show on Hearthkin maps.",
           "notes": ""
@@ -130,8 +210,16 @@
           "origin": "The First Signature — a ceasefire that refused sunset. All Pale Clause are amendments.",
           "temperament": "Courteous, inexorable, frightened of novelty.",
           "fight": "Lawfare made kinetic. You may not fire because a clause from a war you did not fight is still in force.",
-          "strengths": ["Control", "Denial", "Beating impulsive cultures with paper"],
-          "weaknesses": ["Cannot pioneer", "Novel situations stall them", "The Open Tear has no precedent"],
+          "strengths": [
+            "Control",
+            "Denial",
+            "Beating impulsive cultures with paper"
+          ],
+          "weaknesses": [
+            "Cannot pioneer",
+            "Novel situations stall them",
+            "The Open Tear has no precedent"
+          ],
           "win": "The Binding Clause — the universe continues; choice does not.",
           "body": "Not machines. Not the restless dead. Ink dried; the war did not; limbs happened later. There is no face, only a hand that still hovers over a line.\n\nA majority of ended wars are, on paper, not ended. The date is still today.",
           "notes": ""
@@ -144,11 +232,443 @@
           "origin": "Shards where the Split left soil that remembered being a single forest.",
           "temperament": "Slow, hospitable, inevitable. They invoice in seasons.",
           "fight": "Occupation by growth. Regeneration. Turning supply into soil. Bad at the first week; terrible to uproot in the fifth.",
-          "strengths": ["Recovery", "Holding", "Converting theaters", "Patience"],
-          "weaknesses": ["Slow start", "Fire and slag", "Drowned corridors cut pollination between worlds"],
+          "strengths": [
+            "Recovery",
+            "Holding",
+            "Converting theaters",
+            "Patience"
+          ],
+          "weaknesses": [
+            "Slow start",
+            "Fire and slag",
+            "Drowned corridors cut pollination between worlds"
+          ],
           "win": "The Rooted Age — every world becomes one organism; empires become organs.",
           "body": "Not an insect hive: a watershed that votes. Individuals exist; they share weather.\n\nThe Green Account of Ilex is a forest that learned to invoice — largest living claim that is not a city, still not a winner. The bills are fair, which is worse.",
           "notes": ""
+        }
+      ]
+    },
+    {
+      "name": "Hearthkin roster",
+      "entries": [
+        {
+          "id": "hearthkin_roster_overview",
+          "name": "Compact field list",
+          "playable": "now",
+          "role": "Reading rule for the eight Compact jobs.",
+          "vibe": "A front is a line you can stand on. Logistics is the religion. After is spent like coal.",
+          "origin": "The mapped shard. Azure and Crimson are banners of one species, not two anatomies.",
+          "temperament": "Direct, scheduled, slightly ashamed of wonder and of range-as-lying.",
+          "fight": "Hearthline hold ground; Debt Wings collect debts infantry cannot reach. The other six jobs are what Sera Vohl would schedule if the prototype were a whole army. Prototype battles omit Ceiling Clerks — that is why rifles barely scratch bombers.",
+          "strengths": [
+            "Closed set of eight",
+            "Honest about playable vs horizon"
+          ],
+          "weaknesses": [
+            "Six jobs are lore only",
+            "Not Custom Battle cards",
+            "Not Rust kinds"
+          ],
+          "win": "N/A — this card is a reading rule, not a unit.",
+          "body": "Closed Compact TO&E: Hearthline, Stovebreakers, Ash Wardens, Walk-Mappers, Ledger Pieces, Rolling Hearths, Ceiling Clerks, Debt Wings.\n\nPlayable now: Hearthline (soldiers) and Debt Wings (bombers). Do not add a ninth without a new lore card. Do not invent Rust battle mechanics from these portraits.\n\nEach unit card has domain, arm, rank, stats, and tags. Arm is the class. Rank is the formation band (screen, line, overwatch, battery, train, air).",
+          "notes": "Canon: docs/lore/HEARTHKIN_ROSTER.md and docs/lore/UNIT_METADATA.md. Sprites: assets/lore/hearthkin/."
+        },
+        {
+          "id": "hearthline",
+          "name": "Hearthline",
+          "playable": "now",
+          "role": "Line infantry. Hold a receipt of ground.",
+          "sprite": "res://assets/lore/hearthkin/hearthline.png",
+          "vibe": "The people of the mapped shard in a coat that stays decided.",
+          "origin": "Compact barracks. Prototype soldiers are Hearthline under Compact paint.",
+          "temperament": "Loyal to the next decision. Poor at wars that are not fronts.",
+          "fight": "Rifles, a line, a front. They admire a decision that stays decided.",
+          "strengths": [
+            "Holding a line",
+            "Readable combined arms",
+            "Fits Compact mapping"
+          ],
+          "weaknesses": [
+            "Think in one-world terms",
+            "Helpless against aircraft without Ceiling Clerks"
+          ],
+          "win": "Hold the receipt. The ground stays decided.",
+          "body": "If the Compact has a face, it is this coat. Sera Vohl schedules them first because a front that cannot stand is not a Compact front.",
+          "notes": "Playable now as soldiers. Not a new Rust kind.",
+          "unit": {
+            "domain": "land",
+            "arm": "infantry",
+            "rank": "line",
+            "group": "infantry_hybrid",
+            "size_class": "person",
+            "weapon": "Compact rifle",
+            "stats_source": "live",
+            "regiment_size": 100,
+            "spacing": 3.6,
+            "stats": {
+              "hp": 100,
+              "attack": 12,
+              "attack_interval": 3,
+              "reach": 70,
+              "perception": 70,
+              "speed": 2.4,
+              "cohesion": 0.42,
+              "vs_air": 0.08,
+              "blast": 0,
+              "cruise_z": 0
+            },
+            "tags": [
+              "poor_vs_air",
+              "single_target"
+            ]
+          }
+        },
+        {
+          "id": "stovebreakers",
+          "name": "Stovebreakers",
+          "playable": "now",
+          "role": "Assault. Breach the stove-door of a position.",
+          "sprite": "res://assets/lore/hearthkin/stovebreakers.png",
+          "vibe": "Short heat-lances, heavier plates, ember vents.",
+          "origin": "When the line has found the door, someone has to go through the heat.",
+          "temperament": "Slightly ashamed: it looks like Orunai honesty. They tell themselves it is logistics with a shorter receipt.",
+          "fight": "Breach. Heat close. Still a front — just a thicker one.",
+          "strengths": [
+            "Shock at the door",
+            "Making a mapped breach stick"
+          ],
+          "weaknesses": [
+            "Expensive After-coal",
+            "Look like melee-as-honesty to the rest of the span"
+          ],
+          "win": "The door is open. The line can walk in.",
+          "body": "Hearthkin call this honest only because it is still a front. The after-action never says 'we charged.' It says 'we collected the door.'",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings (F6 / barracks / hangars).",
+          "unit": {
+            "domain": "land",
+            "arm": "assault",
+            "rank": "line",
+            "group": "infantry_melee",
+            "size_class": "person",
+            "weapon": "Heat-lance",
+            "stats_source": "live",
+            "regiment_size": 80,
+            "spacing": 4.0,
+            "stats": {
+              "hp": 140,
+              "attack": 16,
+              "attack_interval": 2,
+              "reach": 22,
+              "perception": 36,
+              "speed": 2.0,
+              "cohesion": 0.7,
+              "vs_air": 0.04,
+              "blast": 0,
+              "cruise_z": 0
+            },
+            "tags": [
+              "shock_breach",
+              "armored",
+              "poor_vs_air"
+            ]
+          }
+        },
+        {
+          "id": "ash_wardens",
+          "name": "Ash Wardens",
+          "playable": "now",
+          "role": "Pioneers. Dig the decision into the dirt.",
+          "sprite": "res://assets/lore/hearthkin/ash_wardens.png",
+          "vibe": "Stakes, satchels, folding tools. A place stays decided.",
+          "origin": "Compact engineering corps — the religion of logistics with a shovel.",
+          "temperament": "Patient. They do not win the first minute.",
+          "fight": "They make the fifth minute expensive to undo. Fortify, sap, deny.",
+          "strengths": [
+            "Holding ruined ground",
+            "Making a receipt expensive to reverse"
+          ],
+          "weaknesses": [
+            "Weak in the opening scrum",
+            "Need Hearthline to exist at all"
+          ],
+          "win": "The dirt agrees. The map was not lying.",
+          "body": "'A place stays decided' is their liturgy. They are why Compact charts survive contact with weather.",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings (F6 / barracks / hangars).",
+          "unit": {
+            "domain": "land",
+            "arm": "pioneer",
+            "rank": "train",
+            "group": "infantry_engineer",
+            "size_class": "person",
+            "weapon": "Satchel and stake",
+            "stats_source": "live",
+            "regiment_size": 60,
+            "spacing": 3.8,
+            "stats": {
+              "hp": 100,
+              "attack": 8,
+              "attack_interval": 6,
+              "reach": 18,
+              "perception": 40,
+              "speed": 2.2,
+              "cohesion": 0.5,
+              "vs_air": 0.05,
+              "blast": 4,
+              "cruise_z": 0
+            },
+            "tags": [
+              "sap",
+              "blast"
+            ]
+          }
+        },
+        {
+          "id": "walk_mappers",
+          "name": "Walk-Mappers",
+          "playable": "now",
+          "role": "Recon. Mapping as prayer.",
+          "sprite": "res://assets/lore/hearthkin/walk_mappers.png",
+          "vibe": "Map-cases, survey poles, binoculars. Charts that walk.",
+          "origin": "Hearthkin strength is mapping; Walk-Mappers are that strength on foot.",
+          "temperament": "Curious, scheduled, allergic to unmapped ground.",
+          "fight": "They find the line before the line exists. Weak in a scrum.",
+          "strengths": [
+            "Finding the front",
+            "Making the Compact's charts true"
+          ],
+          "weaknesses": [
+            "Cannot hold a receipt alone",
+            "Corridor peoples tax the trips they need"
+          ],
+          "win": "The map arrives before the army, so the army arrives as a decision.",
+          "body": "They are essential to a Compact that thinks in charts. Sera Vohl would rather lose a company than a survey.",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings (F6 / barracks / hangars).",
+          "unit": {
+            "domain": "land",
+            "arm": "recon",
+            "rank": "screen",
+            "group": "infantry_skirmish",
+            "size_class": "person",
+            "weapon": "Survey pole",
+            "stats_source": "live",
+            "regiment_size": 40,
+            "spacing": 4.2,
+            "stats": {
+              "hp": 70,
+              "attack": 8,
+              "attack_interval": 4,
+              "reach": 40,
+              "perception": 90,
+              "speed": 3.2,
+              "cohesion": 0.25,
+              "vs_air": 0.06,
+              "blast": 0,
+              "cruise_z": 0
+            },
+            "tags": [
+              "mapping",
+              "fragile"
+            ]
+          }
+        },
+        {
+          "id": "ledger_pieces",
+          "name": "Ledger Pieces",
+          "playable": "now",
+          "role": "Artillery. After spent as shells.",
+          "sprite": "res://assets/lore/hearthkin/ledger_pieces.png",
+          "vibe": "Field guns. Range is a kind of lying, so the after-action calls it accounting.",
+          "origin": "The Compact's answer to distance without admitting they asked the air to do their claiming.",
+          "temperament": "Bureaucratic about trajectory. The shell is a line item.",
+          "fight": "Spend After at a distance. Make a front expensive before the Hearthline arrives.",
+          "strengths": [
+            "Making a receipt from far away",
+            "Fits industrial heat"
+          ],
+          "weaknesses": [
+            "Shame of range-as-lying",
+            "Need Rolling Hearths or the ledger goes cold"
+          ],
+          "win": "The line item lands. The stove-door is already cracked.",
+          "body": "Orunai would call this cowardice. Hearthkin file it as coal spent correctly.",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings (F6 / barracks / hangars).",
+          "unit": {
+            "domain": "land",
+            "arm": "artillery",
+            "rank": "battery",
+            "group": "artillery",
+            "size_class": "gun",
+            "weapon": "After-shell",
+            "stats_source": "live",
+            "regiment_size": 8,
+            "spacing": 8.0,
+            "stats": {
+              "hp": 80,
+              "attack": 40,
+              "attack_interval": 8,
+              "reach": 160,
+              "perception": 160,
+              "speed": 1.4,
+              "cohesion": 0.35,
+              "vs_air": 0.02,
+              "blast": 16,
+              "cruise_z": 0
+            },
+            "tags": [
+              "after_shells",
+              "blast",
+              "slow",
+              "poor_vs_air"
+            ]
+          }
+        },
+        {
+          "id": "rolling_hearths",
+          "name": "Rolling Hearths",
+          "playable": "now",
+          "role": "Supply. The army's moving church.",
+          "sprite": "res://assets/lore/hearthkin/rolling_hearths.png",
+          "vibe": "Tracked hearths. Crates of After-coal. A stove that is also a chapel.",
+          "origin": "Logistics as religion made visible. Not a tank.",
+          "temperament": "Devout about schedules. If they go out, the Compact does not have an army — it has a hike.",
+          "fight": "They do not take the field. They make the field possible.",
+          "strengths": [
+            "Keeping the Compact an army",
+            "The liturgy you can see"
+          ],
+          "weaknesses": [
+            "Slow",
+            "A prize if Wakeborn tax the corridor"
+          ],
+          "win": "The stove stays lit. The rest of the list still has a job.",
+          "body": "Kilnbound would recognize the heat and reject the prayer. This is not slag-sainthood. It is a moving receipt of warmth.",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings (F6 / barracks / hangars). Rolling Hearths are support, never armor.",
+          "unit": {
+            "domain": "land",
+            "arm": "support",
+            "rank": "train",
+            "group": "support",
+            "size_class": "wagon",
+            "weapon": "None (stove)",
+            "stats_source": "live",
+            "regiment_size": 3,
+            "spacing": 10.0,
+            "stats": {
+              "hp": 220,
+              "attack": 4,
+              "attack_interval": 16,
+              "reach": 8,
+              "perception": 24,
+              "speed": 1.6,
+              "cohesion": 0.55,
+              "vs_air": 0.02,
+              "blast": 0,
+              "cruise_z": 0
+            },
+            "tags": [
+              "supply_spine",
+              "not_a_tank",
+              "slow"
+            ]
+          }
+        },
+        {
+          "id": "ceiling_clerks",
+          "name": "Ceiling Clerks",
+          "playable": "now",
+          "role": "Anti-air. File a claim against the sky.",
+          "sprite": "res://assets/lore/hearthkin/ceiling_clerks.png",
+          "vibe": "Clipboard and a tube. Bureaucratic on purpose.",
+          "origin": "Hearthkin would rather invoice the sky than worship it.",
+          "temperament": "Courteous, scheduled, allergic to aircraft that skip the ledger.",
+          "fight": "They are why a mature Compact is not helpless against Debt Wings.",
+          "strengths": [
+            "Making bombers a receipt, not weather",
+            "Explains why prototype AA feels weak"
+          ],
+          "weaknesses": [
+            "Need the line to exist or they invoice empty sky",
+            "Still ashamed of range"
+          ],
+          "win": "The sky is on the ledger. The bomber is a debt collected the other way.",
+          "body": "Prototype battles spawn Hearthline against Debt Wings with no clerks. Fifty rifles struggle because the clerks did not clock in. That is lore, not a request to buff soldiers into anti-air.",
+          "notes": "Custom Battle only. Live World Conquest stays Hearthline and Debt Wings. Do not silently change F6 / hangar / barracks.",
+          "unit": {
+            "domain": "land",
+            "arm": "anti_air",
+            "rank": "overwatch",
+            "group": "anti_air",
+            "size_class": "person",
+            "weapon": "Claim-tube",
+            "stats_source": "live",
+            "regiment_size": 40,
+            "spacing": 3.8,
+            "stats": {
+              "hp": 90,
+              "attack": 10,
+              "attack_interval": 4,
+              "reach": 80,
+              "perception": 90,
+              "speed": 2.3,
+              "cohesion": 0.45,
+              "vs_air": 1.4,
+              "blast": 0,
+              "cruise_z": 0
+            },
+            "tags": [
+              "good_vs_air"
+            ]
+          }
+        },
+        {
+          "id": "debt_wings",
+          "name": "Debt Wings",
+          "playable": "now",
+          "role": "Bombers. Collect what infantry cannot reach.",
+          "sprite": "res://assets/lore/hearthkin/debt_wings.png",
+          "vibe": "Sera Vohl names them after debts, not saints.",
+          "origin": "Compact hangars. Prototype bombers are Debt Wings.",
+          "temperament": "Scheduled overflight. A house fire with a flight plan.",
+          "fight": "They overfly, drop a blast, come around. The rest of the Hearthspan finds this adorable.",
+          "strengths": [
+            "Reach the infantry cannot claim",
+            "Fits A14: spawn cost, no continuous upkeep in the live globe"
+          ],
+          "weaknesses": [
+            "Mature Compacts answer with Ceiling Clerks",
+            "Live DESIGN.md still treats them as bombers, not a new kind"
+          ],
+          "win": "Collect the debt. Come around for the next line item.",
+          "body": "The rest of the span files Compact bombing under weather: locally total, cosmically small. Vohl names the wings after debts because saints would imply wonder, and Hearthkin are slightly ashamed of that.",
+          "notes": "Playable now as bombers. Not a new Rust kind.",
+          "unit": {
+            "domain": "air",
+            "arm": "air",
+            "rank": "air",
+            "group": "air",
+            "size_class": "aircraft",
+            "weapon": "Debt-blast",
+            "stats_source": "live",
+            "regiment_size": 5,
+            "spacing": 6.4,
+            "stats": {
+              "hp": 540,
+              "attack": 55,
+              "attack_interval": 32,
+              "reach": 18,
+              "perception": 48,
+              "speed": 4.2,
+              "cohesion": 0.22,
+              "vs_air": 1.0,
+              "blast": 12,
+              "cruise_z": 14
+            },
+            "tags": [
+              "blast",
+              "overfly"
+            ]
+          }
         }
       ]
     },
@@ -163,8 +683,13 @@
           "origin": "Entropy as strategy: heat and After are finite.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Readable on a map", "Fits industrial culture"],
-          "weaknesses": ["Looks like 'just more conquest' if told badly — it is a monopoly on remaining warmth, not a body count"],
+          "strengths": [
+            "Readable on a map",
+            "Fits industrial culture"
+          ],
+          "weaknesses": [
+            "Looks like 'just more conquest' if told badly — it is a monopoly on remaining warmth, not a body count"
+          ],
           "win": "Only Hearthkin hearths stay lit. Charts remain; destinations do not.",
           "body": "Monopolize remaining stellar heat and After until other species cannot travel or grow. The ledger of empires closes on their name.",
           "notes": "Owned by Hearthkin."
@@ -177,8 +702,13 @@
           "origin": "Law of the orun: unwitnessed victory is weather.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Identity-forward", "Makes melee culture win without requiring a fungus-horde"],
-          "weaknesses": ["Fails if the universe empties of witnesses (Orun-Tal)"],
+          "strengths": [
+            "Identity-forward",
+            "Makes melee culture win without requiring a fungus-horde"
+          ],
+          "weaknesses": [
+            "Fails if the universe empties of witnesses (Orun-Tal)"
+          ],
           "win": "Every other people has attended. The ledger of witnesses is a single name.",
           "body": "You do not have to kill the universe. You have to make it watch, then file the watching. Quiet after the filing.",
           "notes": "Owned by Orunai."
@@ -191,8 +721,12 @@
           "origin": "Yesterday as a voucher for travel.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Wins without a front"],
-          "weaknesses": ["Costs the winners their own origins as they grow"],
+          "strengths": [
+            "Wins without a front"
+          ],
+          "weaknesses": [
+            "Costs the winners their own origins as they grow"
+          ],
           "win": "Yesterday will not vouch for you. Routes forget they existed.",
           "body": "Remember so completely that rival histories cannot be paid in After. Empires become local rumors.",
           "notes": "Owned by Mnari."
@@ -205,8 +739,12 @@
           "origin": "The Split as textile.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Unique geography win"],
-          "weaknesses": ["A finished Hearth bores them — they want a draft, not a homecoming"],
+          "strengths": [
+            "Unique geography win"
+          ],
+          "weaknesses": [
+            "A finished Hearth bores them — they want a draft, not a homecoming"
+          ],
           "win": "Planets share a body. Borders become seams.",
           "body": "Re-unify the Hearthspan on Ravel terms: not Hearth restored, but Hearth as a draft they refuse to stop editing.",
           "notes": "Owned by the Ravel."
@@ -219,8 +757,12 @@
           "origin": "Waste as proof of transformation.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Civilizational, not a cartoon villain monologue"],
-          "weaknesses": ["Requires input; a starved kiln cannot finish the brick"],
+          "strengths": [
+            "Civilizational, not a cartoon villain monologue"
+          ],
+          "weaknesses": [
+            "Requires input; a starved kiln cannot finish the brick"
+          ],
           "win": "The span cools into one useful brick. Life was the ore.",
           "body": "Convert living worlds into a single useful residual. Residue is the point.",
           "notes": "Owned by Kilnbound."
@@ -233,8 +775,12 @@
           "origin": "Travel as a room that can be flooded.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Wins the between, not the flags"],
-          "weaknesses": ["Meaningless if the Wake is already sealed"],
+          "strengths": [
+            "Wins the between, not the flags"
+          ],
+          "weaknesses": [
+            "Meaningless if the Wake is already sealed"
+          ],
           "win": "Surfaces cannot pay distance. Capitals become museums.",
           "body": "Flood the Wake. The Wakeborn inherit the dark between. Excellent weather, no visitors.",
           "notes": "Owned by Wakeborn."
@@ -247,8 +793,12 @@
           "origin": "A ceasefire that refused sunset.",
           "temperament": "",
           "fight": "",
-          "strengths": ["Ends the game without ending the calendar"],
-          "weaknesses": ["Cannot bind an Open Tear"],
+          "strengths": [
+            "Ends the game without ending the calendar"
+          ],
+          "weaknesses": [
+            "Cannot bind an Open Tear"
+          ],
           "win": "Everything still allowed that was already allowed. Nothing new is.",
           "body": "Every other species signs away the right to a future that is not already in the file. Choice ends; calendar continues.",
           "notes": "Owned by the Pale Clause."
@@ -261,8 +811,12 @@
           "origin": "Soil that remembered being one forest.",
           "temperament": "",
           "fight": "",
-          "strengths": ["No surrender ceremony — just a season that does not end"],
-          "weaknesses": ["Slow; fire, slag, and drowned corridors delay it"],
+          "strengths": [
+            "No surrender ceremony — just a season that does not end"
+          ],
+          "weaknesses": [
+            "Slow; fire, slag, and drowned corridors delay it"
+          ],
           "win": "Worlds circulate. Empires discover they were organs.",
           "body": "Every world becomes one organism with Velm as the nerves. Travel becomes circulation.",
           "notes": "Owned by Velm."
@@ -275,8 +829,13 @@
           "origin": "Overharvest of After. The Wake rips instead of politely closing.",
           "temperament": "",
           "fight": "Cause arrives without effect. Armies march into days that will not keep them.",
-          "strengths": ["Anyone can cause it", "Already local (dead color; three thinning corridors)"],
-          "weaknesses": ["Nobody wins it"],
+          "strengths": [
+            "Anyone can cause it",
+            "Already local (dead color; three thinning corridors)"
+          ],
+          "weaknesses": [
+            "Nobody wins it"
+          ],
           "win": "Nobody. Dissolution. Maps stay beautiful and stop being true.",
           "body": "Pale Clause cannot prosecute it (no precedent). Orunai cannot witness it (no stable day). Hearthkin keep sending fronts into it because fronts are what they have.\n\nIf a new apocalypse is added later, do not collapse this table into one villain.",
           "notes": "Unowned. Structural slot: cosmic accident, not a personality."
@@ -293,9 +852,13 @@
           "vibe": "Hearthkin. Present. Tragic smallness, not incompetence.",
           "origin": "Best line-and-bomber officer of her Compact.",
           "temperament": "Commands as if the shard is the universe — because for her, it is.",
-          "fight": "Soldiers and bombers. Sleeps in her coat. Names bombers after debts, not saints.",
-          "strengths": ["Wins the globe you can play"],
-          "weaknesses": ["May lose the span without noticing"],
+          "fight": "Hearthline and Debt Wings. Sleeps in her coat. Names Debt Wings after debts, not saints.",
+          "strengths": [
+            "Wins the globe you can play"
+          ],
+          "weaknesses": [
+            "May lose the span without noticing"
+          ],
           "win": "She is not a victory condition. She is why the present feels local.",
           "body": "People remember the coat and the debt-names. A legend at home. A weather report abroad.",
           "notes": "Ties the prototype roster to a person."
@@ -308,8 +871,12 @@
           "origin": "Won a campaign so completely that no witnesses remained.",
           "temperament": "Filed his own defeat rather than keep an illegal crown.",
           "fight": "Orun as law.",
-          "strengths": ["Proved the culture's rule was real"],
-          "weaknesses": ["Victory without watching is weather"],
+          "strengths": [
+            "Proved the culture's rule was real"
+          ],
+          "weaknesses": [
+            "Victory without watching is weather"
+          ],
           "win": "He voided the Unblinking Crown. The argument about him is the monument.",
           "body": "Walked into a day-country that would not speak of him. Greatest king or most failed: the Orunai have not closed the file.",
           "notes": ""
@@ -322,8 +889,12 @@
           "origin": "Spent her childhood to remember a war that had not happened yet.",
           "temperament": "Accurate. Hollow. Needs a clerk for her own name.",
           "fight": "Memory as weapon and wound.",
-          "strengths": ["The span's most accurate prophet"],
-          "weaknesses": ["Cannot recall who she is without help"],
+          "strengths": [
+            "The span's most accurate prophet"
+          ],
+          "weaknesses": [
+            "Cannot recall who she is without help"
+          ],
           "win": "N/A — she is a scar that walks.",
           "body": "She will tell you how your city dies, then ask who you are. Mnari children cost memories; Yel spent the stock.",
           "notes": ""
@@ -336,8 +907,12 @@
           "origin": "Almost stitched two suns.",
           "temperament": "Proud of the error.",
           "fight": "Seams between things that should not touch.",
-          "strengths": ["Left a navigational fact"],
-          "weaknesses": ["Local Open Tear risk"],
+          "strengths": [
+            "Left a navigational fact"
+          ],
+          "weaknesses": [
+            "Local Open Tear risk"
+          ],
           "win": "Did not land the Single Thread. Left a flinch instead.",
           "body": "A hue that does not occur in honest weather. Ships steer around it. Wakeborn tolls simply refuse that heading. The color has no name, only a flinch.",
           "notes": ""
@@ -350,8 +925,12 @@
           "origin": "Canonized a battlefield by cooking it.",
           "temperament": "Seasonal, inevitable, slightly bored by debate.",
           "fight": "Relic and weapon in one brick.",
-          "strengths": ["Proof of liturgy"],
-          "weaknesses": ["Needs input"],
+          "strengths": [
+            "Proof of liturgy"
+          ],
+          "weaknesses": [
+            "Needs input"
+          ],
           "win": "Wants the Perfect Slag the way other people want a harvest.",
           "body": "The tick is heard through gloves.",
           "notes": ""
@@ -364,8 +943,14 @@
           "origin": "Tolls on the three busiest corridors.",
           "temperament": "Invoice-first. Has not set foot on a planet in eleven years.",
           "fight": "Interdiction as government.",
-          "strengths": ["Movement", "Knowing which corridor is thinning"],
-          "weaknesses": ["Invisible on Hearthkin maps", "Suffocates if the Wake seals"],
+          "strengths": [
+            "Movement",
+            "Knowing which corridor is thinning"
+          ],
+          "weaknesses": [
+            "Invisible on Hearthkin maps",
+            "Suffocates if the Wake seals"
+          ],
           "win": "Not won yet — but if the present has a quiet favorite, it is often Quell.",
           "body": "The invoice arrives before the ship does. Sera Vohl is winning a world. Quell is charging her for the trip she has not taken yet.",
           "notes": ""
@@ -378,8 +963,12 @@
           "origin": "A ceasefire that refused sunset.",
           "temperament": "No face. Only amendment.",
           "fight": "Law that grew limbs.",
-          "strengths": ["Every Pale Clause descends from this signing"],
-          "weaknesses": ["Novelty, Open Tears"],
+          "strengths": [
+            "Every Pale Clause descends from this signing"
+          ],
+          "weaknesses": [
+            "Novelty, Open Tears"
+          ],
           "win": "The Binding Clause is this signature, finished.",
           "body": "Ink dried; the war did not. The date is still today.",
           "notes": ""
@@ -392,8 +981,12 @@
           "origin": "Largest contiguous living claim that is not a city.",
           "temperament": "Polite. Seasonal. Fair.",
           "fight": "Shade, pollen, and the use of neighboring dead.",
-          "strengths": ["Biggest organism that is not a government"],
-          "weaknesses": ["Still not a winner"],
+          "strengths": [
+            "Biggest organism that is not a government"
+          ],
+          "weaknesses": [
+            "Still not a winner"
+          ],
           "win": "A down payment on the Rooted Age, not the Age itself.",
           "body": "Sends fair bills to neighboring empires. Fair is worse.",
           "notes": ""
@@ -411,8 +1004,18 @@
           "origin": "After the epics (Orun-Tal, Needle of Nine, First Signature), before anyone's unique win.",
           "temperament": "Fickle.",
           "fight": "Hearthkin schedule convoys. Wakeborn argue toll vs closure. Mnari have forgotten one thinning corridor on purpose and will not say which.",
-          "strengths": ["Hearthkin: maps", "Wakeborn: movement", "Orunai: respect", "Mnari: records", "Velm: living surface"],
-          "weaknesses": ["Three corridors thinning toward an Open Tear", "Ravel stitches nobody wants finished", "Pale Clause still has old wars open"],
+          "strengths": [
+            "Hearthkin: maps",
+            "Wakeborn: movement",
+            "Orunai: respect",
+            "Mnari: records",
+            "Velm: living surface"
+          ],
+          "weaknesses": [
+            "Three corridors thinning toward an Open Tear",
+            "Ravel stitches nobody wants finished",
+            "Pale Clause still has old wars open"
+          ],
           "win": "Nobody. Someone will.",
           "body": "Hearthkin look strongest if you only count flags. Wakeborn look strongest if you only count arrivals. Both readings are true. Neither is a victory.\n\nThe past was epic. The playable present is a provincial fire on a mapped shard, billed by a people who do not live on maps.",
           "notes": "docs/lore/PRESENT.md"

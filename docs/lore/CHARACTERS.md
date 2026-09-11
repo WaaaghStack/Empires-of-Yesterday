@@ -8,7 +8,7 @@ The past can be huge. The present is fickle. These names exist so the present ha
 
 Best line-and-bomber officer of her Compact. Commands as if the shard is the universe — because for her, it is. She can win the globe you play and still lose the span without noticing. Tragic smallness, not incompetence.
 
-People remember: she sleeps in her coat and names bombers after debts, not saints.
+People remember: she sleeps in her coat and names **Debt Wings** after debts, not saints.
 
 ---
 

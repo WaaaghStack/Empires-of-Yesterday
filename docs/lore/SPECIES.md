@@ -2,7 +2,7 @@
 
 Eight peoples. Tendency-balanced: some worship the honest blow, others barely occupy the same definition of “war.” Original names only.
 
-**Playable now:** Hearthkin, as soldiers and bombers, on one globe, usually under two Compact banners.  
+**Playable now:** Hearthkin. On the globe: **Hearthline** (soldiers) and **Debt Wings** (bombers). Custom Battle can field the other six Compact jobs. Still one species, not eight anatomies.  
 **Lore horizon:** everyone below.
 
 ---
@@ -15,9 +15,11 @@ They still believe a **front** is a line you can stand on. Their religion is log
 
 Azure and Crimson (and any blue/red Compact split on the globe) are **banners of one species**, a civil quarrel. The rest of the Hearthspan finds this adorable and dangerous the way a house fire is dangerous: locally total, cosmically small.
 
+**Compact roster:** eight jobs — Hearthline, Stovebreakers, Ash Wardens, Walk-Mappers, Ledger Pieces, Rolling Hearths, Ceiling Clerks, Debt Wings. Custom Battle can field all eight. Globe Play still only spawns Hearthline and Debt Wings. Full list: [HEARTHKIN_ROSTER.md](HEARTHKIN_ROSTER.md).
+
 - **Origin:** Children of the mapped shard; they inherited factories instead of a myth they trusted.
 - **Temperament:** Direct, scheduled, loyal to the next decision.
-- **How they fight:** Combined arms. Infantry to hold a receipt of ground; bombers to collect debts the infantry cannot reach. They admire a decision that stays decided.
+- **How they fight:** Combined arms. Hearthline hold a receipt of ground; Debt Wings collect debts the infantry cannot reach. Horizon roster adds assault, pioneers, recon, guns, rolling hearths, and anti-air clerks. They admire a decision that stays decided.
 - **Strengths:** Logistics, mapping, “good enough” engineering, holding a line.
 - **Weaknesses:** Think in one-world terms. Poor at wars that are not fronts. Crude After-budgeting. Easy for corridor peoples to tax.
 - **Win — The Last Warmth:** Monopolize remaining stellar heat and After until other species cannot travel or grow. Not a hobby of corpses: **entropy monopoly**. If only Hearthkin hearths stay lit, the ledger closes on their name.

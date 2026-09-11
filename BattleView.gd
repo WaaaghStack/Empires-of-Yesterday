@@ -3,12 +3,14 @@ extends Control
 ## HD-2D battle viewer. Plays a baked battle (from TwoWorldsEngine) as a 3D diorama: a themed
 ## ground plane with GPU-instanced Y-axis billboards, traveling shot streaks from baked fire ticks,
 ## brief hit flashes, and a free orbit camera. Soldiers use an 8-frame run/shoot sheet driven by
-## baked ST_MARCH / ST_ROUT / ST_FIRE. Godot interpolates the bake — it does not pick targets or
+## baked ST_MARCH / ST_ROUT / ST_FIRE. Rust mixes bake pages into MultiMesh buffers; Godot assigns
+## them and draws tracers. The viewer does not pick targets or
 ## apply damage. Emits `finished` when the viewer is dismissed.
 
 signal finished
 
 const UiTheme := preload("res://GameTheme.gd")
+const Kinds := preload("res://BattleKinds.gd")
 const BillboardShaderPath := "res://shaders/battle_billboard.gdshader"
 const DioramaShaderPath := "res://shaders/battle_diorama.gdshader"
 const TracerShaderPath := "res://shaders/battle_tracer.gdshader"
@@ -17,20 +19,15 @@ const FxMuzzlePath := "res://assets/fx/battle/muzzle.png"
 const FxSparkPath := "res://assets/fx/battle/spark.png"
 const FxBombPath := "res://assets/fx/battle/bomb.png"
 const FxTracerPath := "res://assets/fx/battle/tracer.png"
-const MAX_MUZZLES := 96
-const MAX_SPARKS := 96
-# Bucket order: 0 = friendly soldier, 1 = hostile soldier, 2 = friendly bomber, 3 = hostile bomber.
+const FxShellPath := "res://assets/fx/battle/shell.png"
+# Bucket order: kind * 2 + faction (0=friendly, 1=hostile) — 16 Compact kinds.
 const TEX := [
 	preload("res://assets/units/soldier_friendly.png"),
 	preload("res://assets/units/soldier_hostile.png"),
 	preload("res://assets/units/bomber_friendly.png"),
 	preload("res://assets/units/bomber_hostile.png"),
 ]
-const SOLDIER_SHEET := [
-	"res://assets/units/soldier_friendly_sheet.png",
-	"res://assets/units/soldier_hostile_sheet.png",
-]
-const SOLDIER_SHEET_COLS := 8
+const BUCKETS := 16
 const SCALE := 1.0
 const SPRITE_SIZE := 3.2
 const BOMBER_SIZE := 5.2
@@ -44,13 +41,13 @@ const ST_DEAD := 4
 const ST_ROUT := 5
 const ST_FLED := 6
 const ST_HIT := 7
-const MAX_TRACERS := 160
-const MAX_PUFFS := 72
+## FX MultiMeshes grow to the bake. Combat is one-way; the viewer does not drop a volley for a pool cap.
 const XFORM_STRIDE := 12
 const HIT_FLASH := 0.10
 const HIT_GAP := 0.18
 const SHOT_SPEED := 160.0
-const BOMB_SPEED := 58.0
+const BOMB_SPEED := 38.0
+const SHELL_SPEED := 42.0
 const STREAK_LEN := 1.55
 const MUZZLE_LIFE := 0.055
 
@@ -75,18 +72,22 @@ var _play_fps: float = 3.0
 var _speed: float = 1.0
 var _playing: bool = true
 var _done: bool = false
-var _cache := {}
+var _cache_i0: int = -1
+var _cache_i1: int = -1
+var _cache_d0 := {}
+var _cache_d1 := {}
+var _draw_ms: float = 0.0
+var _unit_sz := PackedFloat32Array()
+var _unit_style := PackedByteArray()
+var _unit_sheet := PackedByteArray()
 
 var _sub: SubViewport
 var _cam: Camera3D
 var _ground: MeshInstance3D
 var _ground_mat: ShaderMaterial
 var _props: Node3D
-var _mmi := [null, null, null, null]
-var _buf0 := PackedFloat32Array()
-var _buf1 := PackedFloat32Array()
-var _buf2 := PackedFloat32Array()
-var _buf3 := PackedFloat32Array()
+var _mmi: Array = []
+var _bufs: Array = []
 var _bkt := PackedByteArray()
 var _off := PackedInt32Array()
 var _tracer_mmi: MultiMeshInstance3D
@@ -97,7 +98,10 @@ var _muzzle_mmi: MultiMeshInstance3D
 var _muzzle_buf := PackedFloat32Array()
 var _spark_mmi: MultiMeshInstance3D
 var _spark_buf := PackedFloat32Array()
-var _sheet_cols := PackedFloat32Array([1.0, 1.0, 1.0, 1.0])
+var _proj_mmi: MultiMeshInstance3D
+var _proj_buf := PackedFloat32Array()
+var _fx_n := 1
+var _sheet_cols := PackedFloat32Array()
 var _yaw := 0.42
 var _pitch := 0.52
 var _dist := 175.0
@@ -115,6 +119,7 @@ var _snd_cool: float = 0.0
 var _rout_played: bool = false
 var _shots: Array = []
 var _shot_cd := PackedFloat32Array()
+var _shot_live := PackedByteArray()
 var _hit_t := PackedFloat32Array()
 var _hit_gap := PackedFloat32Array()
 
@@ -174,7 +179,10 @@ func _build_3d() -> void:
 	_sub.add_child(_ground)
 
 	var shader: Shader = load(BillboardShaderPath)
-	for id in range(4):
+	_mmi.resize(BUCKETS)
+	_bufs.resize(BUCKETS)
+	_sheet_cols.resize(BUCKETS)
+	for id in BUCKETS:
 		var mmi := MultiMeshInstance3D.new()
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -186,13 +194,15 @@ func _build_3d() -> void:
 		mmi.multimesh = mm
 		var mat := ShaderMaterial.new()
 		mat.shader = shader
-		var tex: Texture2D = TEX[id]
-		var cols := 1.0
-		if id < 2:
-			var sheet := _load_tex(SOLDIER_SHEET[id])
-			if sheet != null:
-				tex = sheet
-				cols = float(SOLDIER_SHEET_COLS)
+		var kind := Kinds.kind_of_bucket(id)
+		var fac := id & 1
+		var tex: Texture2D = _load_tex(Kinds.tex_for(kind, fac))
+		if tex == null:
+			if Kinds.is_air(kind):
+				tex = TEX[2 + fac]
+			else:
+				tex = TEX[fac]
+		var cols := float(Kinds.sheet_cols(kind))
 		_sheet_cols[id] = cols
 		mat.set_shader_parameter("tex", tex)
 		mat.set_shader_parameter("sheet_cols", cols)
@@ -201,14 +211,16 @@ func _build_3d() -> void:
 		mmi.position = Vector3(0.0, 0.02, 0.0)
 		_sub.add_child(mmi)
 		_mmi[id] = mmi
+		_bufs[id] = PackedFloat32Array()
 
-	_tracer_mmi = _make_fx_mmi(load(TracerShaderPath), Vector2(1.0, 1.0), MAX_TRACERS, false)
+	_tracer_mmi = _make_fx_mmi(load(TracerShaderPath), Vector2(1.0, 1.0), 1, false)
 	var tracer_tex := _load_tex(FxTracerPath)
 	if _tracer_mmi.material_override is ShaderMaterial and tracer_tex != null:
 		(_tracer_mmi.material_override as ShaderMaterial).set_shader_parameter("streak", tracer_tex)
-	_puff_mmi = _make_tex_mmi(_load_tex(FxBombPath), Vector2(1.0, 1.0), MAX_PUFFS)
-	_muzzle_mmi = _make_tex_mmi(_load_tex(FxMuzzlePath), Vector2(1.0, 1.0), MAX_MUZZLES)
-	_spark_mmi = _make_tex_mmi(_load_tex(FxSparkPath), Vector2(1.0, 1.0), MAX_SPARKS)
+	_puff_mmi = _make_tex_mmi(_load_tex(FxBombPath), Vector2(1.0, 1.0), 1)
+	_muzzle_mmi = _make_tex_mmi(_load_tex(FxMuzzlePath), Vector2(1.0, 1.0), 1)
+	_spark_mmi = _make_tex_mmi(_load_tex(FxSparkPath), Vector2(1.0, 1.0), 1)
+	_proj_mmi = _make_tex_mmi(_load_tex(FxShellPath), Vector2(1.0, 1.0), 1)
 
 	_props = Node3D.new()
 	_sub.add_child(_props)
@@ -368,6 +380,7 @@ func _set_speed(v: float) -> void:
 
 
 func play_engine_battle(engine: Object, index: int, summary: Dictionary = {}) -> void:
+	_ensure_built()
 	_engine = engine
 	_index = index
 	_summary = summary
@@ -392,7 +405,10 @@ func play_engine_battle(engine: Object, index: int, summary: Dictionary = {}) ->
 			"winner": int(meta.get("winner", -1)),
 			"owner_after": int(meta.get("owner_after", -1)),
 		}
-	_cache.clear()
+	_cache_i0 = -1
+	_cache_i1 = -1
+	_cache_d0 = {}
+	_cache_d1 = {}
 	_frame_pos = 0.0
 	_speed = 1.0
 	_playing = true
@@ -405,15 +421,36 @@ func play_engine_battle(engine: Object, index: int, summary: Dictionary = {}) ->
 	_apply_diorama_uniforms()
 	_rebuild_props()
 	_dist = clampf(maxf(_w, _h) * 0.95, 90.0, 2200.0)
-	# 1x is the human-readable pace (what 0.5x used to look like). Buttons stay 1x / 2x / …
-	var duration: float = clampf(float(_frame_count) * 0.28, 48.0, 360.0)
-	_play_fps = float(maxi(_frame_count, 1)) / duration * 0.5
+	# 1x is a fixed watch clock. Tape length must not change 1x.
+	_play_fps = 1.0 / BattlePacing.BATTLE_WATCH_SEC_PER_FRAME
 	_prepare_buckets()
 	_apply_camera()
 	visible = true
 	_set_speed(1.0)
 	_render_frame()
 	_update_header()
+
+
+func profile_render_ms(samples: int = 12) -> float:
+	var n := maxi(samples, 1)
+	_render_frame()
+	var acc := 0.0
+	for _i in n:
+		var t0 := Time.get_ticks_usec()
+		_render_frame()
+		acc += float(Time.get_ticks_usec() - t0)
+	return acc / float(n) / 1000.0
+
+
+func _ensure_built() -> void:
+	# SceneTree -s scripts can play() before _ready. Build the diorama once.
+	if _cam != null and _mmi.size() >= BUCKETS:
+		return
+	_build_3d()
+	if _header == null:
+		_build_hud()
+	if _audio_fire == null:
+		_build_audio()
 
 
 func _apply_diorama_uniforms() -> void:
@@ -504,33 +541,64 @@ func _prepare_buckets() -> void:
 	_off = PackedInt32Array()
 	_bkt.resize(_unit_count)
 	_off.resize(_unit_count)
-	var counts := [0, 0, 0, 0]
+	var counts := PackedInt32Array()
+	counts.resize(BUCKETS)
+	counts.fill(0)
+	_unit_sz.resize(_unit_count)
+	_unit_style.resize(_unit_count)
+	_unit_sheet.resize(_unit_count)
 	for i in range(_unit_count):
 		var fac := int(_fac[i]) if i < _fac.size() else 0
 		var knd := int(_kind[i]) if i < _kind.size() else 0
-		var id := (fac & 1) + (knd & 1) * 2
+		var id := Kinds.bucket_id(knd, fac)
 		_bkt[i] = id
 		_off[i] = counts[id] * BUF_STRIDE
 		counts[id] += 1
-	_buf0 = _make_buf(counts[0], SPRITE_SIZE)
-	_buf1 = _make_buf(counts[1], SPRITE_SIZE)
-	_buf2 = _make_buf(counts[2], BOMBER_SIZE)
-	_buf3 = _make_buf(counts[3], BOMBER_SIZE)
-	for id in range(4):
-		(_mmi[id].multimesh as MultiMesh).instance_count = counts[id]
-	_tracer_buf = _zero_xform(MAX_TRACERS)
-	_puff_buf = _zero_xform(MAX_PUFFS)
-	_muzzle_buf = _zero_xform(MAX_MUZZLES)
-	_spark_buf = _zero_xform(MAX_SPARKS)
+		_unit_sz[i] = Kinds.sprite_size(knd)
+		_unit_style[i] = Kinds.shot_style(knd)
+		_unit_sheet[i] = 1 if Kinds.uses_sheet(knd) else 0
+	_bufs.resize(BUCKETS)
+	for id in BUCKETS:
+		_bufs[id] = _make_buf(counts[id], Kinds.sprite_size(Kinds.kind_of_bucket(id)))
+		if id < _mmi.size() and _mmi[id] != null:
+			(_mmi[id].multimesh as MultiMesh).instance_count = counts[id]
+	_size_fx(_unit_count)
 	_reset_fx_state()
+
+
+static func fx_capacity(unit_count: int) -> int:
+	return maxi(unit_count, 1)
+
+
+func _size_fx(n: int) -> void:
+	_fx_n = fx_capacity(n)
+	_set_mm_count(_tracer_mmi, _fx_n)
+	_set_mm_count(_puff_mmi, _fx_n)
+	_set_mm_count(_muzzle_mmi, _fx_n)
+	_set_mm_count(_spark_mmi, _fx_n)
+	_set_mm_count(_proj_mmi, _fx_n)
+	_tracer_buf = _zero_xform(_fx_n)
+	_puff_buf = _zero_xform(_fx_n)
+	_muzzle_buf = _zero_xform(_fx_n)
+	_spark_buf = _zero_xform(_fx_n)
+	_proj_buf = _zero_xform(_fx_n)
+
+
+func _set_mm_count(mmi: MultiMeshInstance3D, n: int) -> void:
+	if mmi == null or mmi.multimesh == null:
+		return
+	if mmi.multimesh.instance_count != n:
+		mmi.multimesh.instance_count = n
 
 
 func _reset_fx_state() -> void:
 	_shots.clear()
 	_shot_cd.resize(_unit_count)
+	_shot_live.resize(_unit_count)
 	_hit_t.resize(_unit_count)
 	_hit_gap.resize(_unit_count)
 	_shot_cd.fill(0.0)
+	_shot_live.fill(0)
 	_hit_t.fill(0.0)
 	_hit_gap.fill(0.0)
 
@@ -554,21 +622,38 @@ func _zero_xform(count: int) -> PackedFloat32Array:
 
 func _frame(idx: int) -> Dictionary:
 	idx = clampi(idx, 0, maxi(_frame_count - 1, 0))
-	if _cache.has(idx):
-		return _cache[idx]
+	if idx == _cache_i0:
+		return _cache_d0
+	if idx == _cache_i1:
+		return _cache_d1
 	var f: Dictionary = _engine.get_last_battle_frame_xy(_index, idx)
-	if _cache.size() > 6:
-		_cache.clear()
-	_cache[idx] = f
+	if _cache_i0 < 0:
+		_cache_i0 = idx
+		_cache_d0 = f
+	elif _cache_i1 < 0:
+		_cache_i1 = idx
+		_cache_d1 = f
+	elif absi(idx - _cache_i0) >= absi(idx - _cache_i1):
+		_cache_i0 = idx
+		_cache_d0 = f
+	else:
+		_cache_i1 = idx
+		_cache_d1 = f
 	return f
 
 
 func _lod() -> int:
+	var cam := 0
 	if _dist > 1400.0:
-		return 2
-	if _dist > 700.0:
-		return 1
-	return 0
+		cam = 2
+	elif _dist > 700.0:
+		cam = 1
+	# 10k watch: keep MultiMesh, drop per-body FX/sheet work. Combat is already baked.
+	if _unit_count >= 6000:
+		return maxi(cam, 2)
+	if _unit_count >= 2500:
+		return maxi(cam, 1)
+	return cam
 
 
 func _process(delta: float) -> void:
@@ -596,6 +681,9 @@ func _age_fx(dt: float) -> void:
 		var shot: Dictionary = _shots[i]
 		shot.t = float(shot.t) + dt
 		if float(shot.t) >= float(shot.life):
+			var owner := int(shot.get("unit", -1))
+			if owner >= 0 and owner < _shot_live.size():
+				_shot_live[owner] = 0
 			_shots.remove_at(i)
 		else:
 			_shots[i] = shot
@@ -615,6 +703,102 @@ func _age_fx(dt: float) -> void:
 func _render_frame() -> void:
 	if _frame_count <= 0 or _unit_count <= 0:
 		return
+	var t0 := Time.get_ticks_usec()
+	var tracer_i := 0
+	var puff_i := 0
+	var muzzle_i := 0
+	var spark_i := 0
+	var fire_n := 0
+	var hit_n := 0
+	var rout_n := 0
+	var rust_pose := false
+	if _engine != null and _engine.has_method("fill_battle_watch_pose"):
+		var stats := _apply_watch_pose()
+		if stats.size() >= 3:
+			rust_pose = true
+			fire_n = int(stats[0])
+			hit_n = int(stats[1])
+			rout_n = int(stats[2])
+	if not rust_pose:
+		var script_stats := _lerp_bodies_script()
+		fire_n = int(script_stats[0])
+		hit_n = int(script_stats[1])
+		rout_n = int(script_stats[2])
+	var flying := _draw_flying_shots(tracer_i, muzzle_i, spark_i, puff_i)
+	tracer_i = int(flying[0])
+	muzzle_i = int(flying[1])
+	spark_i = int(flying[2])
+	puff_i = int(flying[3])
+	var proj_i := int(flying[4]) if flying.size() > 4 else 0
+	if not rust_pose:
+		for id in BUCKETS:
+			if id >= _mmi.size() or _mmi[id] == null:
+				continue
+			if _mmi[id].multimesh.instance_count > 0:
+				_mmi[id].multimesh.buffer = _bufs[id]
+	if _tracer_mmi:
+		_tracer_mmi.multimesh.buffer = _tracer_buf
+		_tracer_mmi.multimesh.visible_instance_count = tracer_i
+	if _puff_mmi:
+		_puff_mmi.multimesh.buffer = _puff_buf
+		_puff_mmi.multimesh.visible_instance_count = puff_i
+	if _muzzle_mmi:
+		_muzzle_mmi.multimesh.buffer = _muzzle_buf
+		_muzzle_mmi.multimesh.visible_instance_count = muzzle_i
+	if _spark_mmi:
+		_spark_mmi.multimesh.buffer = _spark_buf
+		_spark_mmi.multimesh.visible_instance_count = spark_i
+	if _proj_mmi:
+		_proj_mmi.multimesh.buffer = _proj_buf
+		_proj_mmi.multimesh.visible_instance_count = proj_i
+	_tick_audio(fire_n, hit_n, rout_n)
+	_draw_ms = float(Time.get_ticks_usec() - t0) / 1000.0
+
+
+func _apply_watch_pose() -> PackedInt32Array:
+	var posed: Dictionary = _engine.fill_battle_watch_pose(_index, _frame_pos, _lod())
+	if not bool(posed.get("ok", false)):
+		return PackedInt32Array()
+	var bufs: Array = posed.get("bufs", [])
+	for id in BUCKETS:
+		if id >= _mmi.size() or _mmi[id] == null:
+			continue
+		var mm: MultiMesh = _mmi[id].multimesh
+		if mm.instance_count <= 0:
+			continue
+		if id >= bufs.size():
+			continue
+		var buf = bufs[id]
+		if buf is PackedFloat32Array and (buf as PackedFloat32Array).size() >= mm.instance_count * BUF_STRIDE:
+			mm.buffer = buf
+	var fire_unit: PackedInt32Array = posed.get("fire_unit", PackedInt32Array())
+	var fire_kind: PackedByteArray = posed.get("fire_kind", PackedByteArray())
+	var fire_style: PackedByteArray = posed.get("fire_style", PackedByteArray())
+	var fx: PackedFloat32Array = posed.get("fire_from_x", PackedFloat32Array())
+	var fy: PackedFloat32Array = posed.get("fire_from_y", PackedFloat32Array())
+	var fz: PackedFloat32Array = posed.get("fire_from_z", PackedFloat32Array())
+	var tx: PackedFloat32Array = posed.get("fire_to_x", PackedFloat32Array())
+	var ty: PackedFloat32Array = posed.get("fire_to_y", PackedFloat32Array())
+	var tz: PackedFloat32Array = posed.get("fire_to_z", PackedFloat32Array())
+	var nfire := mini(fire_unit.size(), fx.size())
+	for i in nfire:
+		var u := int(fire_unit[i])
+		if u < 0 or u >= _shot_cd.size() or _shot_cd[u] > 0.0:
+			continue
+		var style := int(fire_style[i]) if i < fire_style.size() else Kinds.SHOT_RIFLE
+		var kind := int(fire_kind[i]) if i < fire_kind.size() else 0
+		var from := Vector3(fx[i], fy[i] if i < fy.size() else 0.0, fz[i] if i < fz.size() else 0.0)
+		var to := Vector3(tx[i] if i < tx.size() else 0.0, ty[i] if i < ty.size() else 0.0, tz[i] if i < tz.size() else 0.0)
+		if _spawn_shot(from, to, style, kind, u):
+			_shot_cd[u] = Kinds.tracer_interval(kind) + 0.06 * float((u * 13) % 11) / 10.0
+	return PackedInt32Array([
+		int(posed.get("fire_n", 0)),
+		int(posed.get("hit_n", 0)),
+		int(posed.get("rout_n", 0)),
+	])
+
+
+func _lerp_bodies_script() -> PackedInt32Array:
 	var a := int(floor(_frame_pos))
 	var b := mini(a + 1, _frame_count - 1)
 	var alpha := _frame_pos - float(a)
@@ -628,26 +812,20 @@ func _render_frame() -> void:
 	var fa_st: PackedByteArray = fa.get("state", PackedByteArray())
 	var axa: PackedFloat32Array = fa.get("aim_x", PackedFloat32Array())
 	var aya: PackedFloat32Array = fa.get("aim_y", PackedFloat32Array())
+	var aza: PackedFloat32Array = fa.get("aim_z", PackedFloat32Array())
 	var xb: PackedFloat32Array = fb.get("x", PackedFloat32Array())
 	var yb: PackedFloat32Array = fb.get("y", PackedFloat32Array())
 	var zb: PackedFloat32Array = fb.get("z", PackedFloat32Array())
 	var ab: PackedByteArray = fb.get("alive", PackedByteArray())
 	var fb_st: PackedByteArray = fb.get("state", PackedByteArray())
+	var azb: PackedFloat32Array = fb.get("aim_z", PackedFloat32Array())
 	var lod := _lod()
 	var n := mini(_unit_count, xa.size())
 	var hw := _w * 0.5
 	var hh := _h * 0.5
-	var tracer_i := 0
-	var puff_i := 0
-	var muzzle_i := 0
-	var spark_i := 0
 	var fire_n := 0
 	var hit_n := 0
 	var rout_n := 0
-	_tracer_buf.fill(0.0)
-	_puff_buf.fill(0.0)
-	_muzzle_buf.fill(0.0)
-	_spark_buf.fill(0.0)
 	for i in range(n):
 		var id := _bkt[i]
 		var o := _off[i]
@@ -685,8 +863,8 @@ func _render_frame() -> void:
 		var pz: float = lerpf(az, bz, alpha)
 		var wx := (clampf(px, 0.0, _w) - hw) * SCALE
 		var wz := (clampf(py, 0.0, _h) - hh) * SCALE
-		var far := lod == 2 and id < 2
-		var base_sz := BOMBER_SIZE if id >= 2 else SPRITE_SIZE
+		var far := lod == 2 and i < _unit_sheet.size() and _unit_sheet[i] != 0
+		var base_sz := _unit_sz[i] if i < _unit_sz.size() else SPRITE_SIZE
 		if far:
 			base_sz *= 0.82
 		var szx := base_sz
@@ -724,7 +902,7 @@ func _render_frame() -> void:
 				szy = base_sz * 0.28
 		elif i < _hit_t.size() and _hit_t[i] > HIT_FLASH * 0.35:
 			szy = base_sz * 0.90
-		elif (st == ST_MARCH or st == ST_ROUT) and _sheet_cols[id] < 2.0:
+		elif (st == ST_MARCH or st == ST_ROUT) and id < _sheet_cols.size() and _sheet_cols[id] < 2.0:
 			var bob := 1.0 + 0.045 * sin(_frame_pos * 9.0 + float(i))
 			szy *= bob
 		var yc := GROUND_Y + szy * 0.5 + pz * SCALE
@@ -735,10 +913,11 @@ func _render_frame() -> void:
 		var fire_ch := 0.0
 		if i < _hit_t.size() and _hit_t[i] > 0.0:
 			fire_ch = 0.28 + 0.32 * (_hit_t[i] / HIT_FLASH)
+		var corpse := 1.0 if ((dead or dying) and pz < 0.55) else 0.0
 		_write_instance(
 			id, o, szx, szy, wx, yc, wz,
-			flip, _pose_frame(id, i, st, firing, dead or dying), fire_ch,
-			1.0 if (dead or dying) else 0.0, fade
+			flip, _pose_frame(id, i, st, firing, corpse > 0.5), fire_ch,
+			corpse, fade
 		)
 		if firing:
 			fire_n += 1
@@ -747,99 +926,203 @@ func _render_frame() -> void:
 		if st == ST_ROUT:
 			rout_n += 1
 		if firing and axa.size() == n and i < _shot_cd.size() and _shot_cd[i] <= 0.0:
-			if lod < 2 or (i % 2) == 0:
-				var tx := axa[i]
-				var ty := aya[i] if i < aya.size() else 0.0
-				if absf(tx) + absf(ty) > 1.0:
+			var kind := int(_kind[i]) if i < _kind.size() else 0
+			var style := int(_unit_style[i]) if i < _unit_style.size() else Kinds.shot_style(kind)
+			if style != Kinds.SHOT_NONE:
+				var txx := axa[i]
+				var tyy := aya[i] if i < aya.size() else 0.0
+				if absf(txx) + absf(tyy) > 1.0:
 					var from := Vector3(wx, yc + 0.4, wz)
-					var to := _battle_to_world(tx, ty)
-					to.y = GROUND_Y + 0.9 if id < 2 else (GROUND_Y + 8.0)
-					if _spawn_shot(from, to, id >= 2):
-						_shot_cd[i] = (0.28 if id >= 2 else 0.11) + 0.06 * float((i * 13) % 11) / 10.0
+					var to := _battle_to_world(txx, tyy)
+					var tzz := aza[i] if i < aza.size() else 0.0
+					if i < azb.size():
+						tzz = lerpf(tzz, azb[i], alpha)
+					if style == Kinds.SHOT_BOMB:
+						to.y = GROUND_Y + 0.35
+					elif tzz > 1.0:
+						to.y = GROUND_Y + tzz * SCALE
+					elif style == Kinds.SHOT_SHELL:
+						to.y = GROUND_Y + 0.55
+					else:
+						to.y = GROUND_Y + 0.9
+					if _spawn_shot(from, to, style, kind, i):
+						_shot_cd[i] = Kinds.tracer_interval(kind) + 0.06 * float((i * 13) % 11) / 10.0
 		elif (not firing) and i < _shot_cd.size():
 			_shot_cd[i] = 0.0
-	var flying := _draw_flying_shots(tracer_i, muzzle_i, spark_i, puff_i)
-	tracer_i = int(flying[0])
-	muzzle_i = int(flying[1])
-	spark_i = int(flying[2])
-	puff_i = int(flying[3])
-	if _mmi[0].multimesh.instance_count > 0:
-		_mmi[0].multimesh.buffer = _buf0
-	if _mmi[1].multimesh.instance_count > 0:
-		_mmi[1].multimesh.buffer = _buf1
-	if _mmi[2].multimesh.instance_count > 0:
-		_mmi[2].multimesh.buffer = _buf2
-	if _mmi[3].multimesh.instance_count > 0:
-		_mmi[3].multimesh.buffer = _buf3
-	_tracer_mmi.multimesh.buffer = _tracer_buf
-	_tracer_mmi.multimesh.visible_instance_count = tracer_i
-	_puff_mmi.multimesh.buffer = _puff_buf
-	_puff_mmi.multimesh.visible_instance_count = puff_i
-	_muzzle_mmi.multimesh.buffer = _muzzle_buf
-	_muzzle_mmi.multimesh.visible_instance_count = muzzle_i
-	_spark_mmi.multimesh.buffer = _spark_buf
-	_spark_mmi.multimesh.visible_instance_count = spark_i
-	_tick_audio(fire_n, hit_n, rout_n)
+	return PackedInt32Array([fire_n, hit_n, rout_n])
 
 
-func _spawn_shot(from: Vector3, to: Vector3, air: bool) -> bool:
+func _spawn_shot(from: Vector3, to: Vector3, style: int, kind: int, unit: int = -1) -> bool:
+	if style == Kinds.SHOT_NONE:
+		return false
 	var dist := from.distance_to(to)
 	if dist < 0.4:
 		return false
-	if _shots.size() >= MAX_TRACERS:
-		_shots.remove_at(0)
-	var speed := BOMB_SPEED if air else SHOT_SPEED
-	var max_life := 0.50 if air else 0.32
+	if unit >= 0 and unit < _shot_live.size() and _shot_live[unit] != 0:
+		return false
+	if _shots.size() >= _fx_n:
+		_size_fx(maxi(_fx_n * 2, _shots.size() + 1))
+	var speed := SHOT_SPEED
+	var max_life := 0.32
+	var apex := 0.0
+	var aim := to
+	match style:
+		Kinds.SHOT_HEAT:
+			speed = 150.0
+			max_life = 0.28
+		Kinds.SHOT_SHELL:
+			speed = SHELL_SPEED
+			max_life = 1.20
+			apex = clampf(dist * 0.20, 8.0, 36.0)
+		Kinds.SHOT_SATCHEL:
+			speed = 36.0
+			max_life = 0.55
+			apex = clampf(dist * 0.12, 2.5, 9.0)
+		Kinds.SHOT_BOMB:
+			speed = BOMB_SPEED
+			max_life = 0.90
+		Kinds.SHOT_FLAK:
+			speed = 160.0
+			max_life = 0.36
+		_:
+			if kind == Kinds.WALK_MAPPERS:
+				speed = 140.0
+				max_life = 0.36
 	var life := clampf(dist / speed, 0.06, max_life)
+	var thick := 0.14
+	if style == Kinds.SHOT_RIFLE and kind == Kinds.WALK_MAPPERS:
+		thick = 0.09
+	elif style == Kinds.SHOT_HEAT:
+		thick = 0.16
+	elif style == Kinds.SHOT_FLAK:
+		thick = 0.12
 	_shots.append({
 		"from": from,
-		"to": to,
+		"to": aim,
 		"t": 0.0,
 		"life": life,
-		"air": air,
+		"style": style,
+		"apex": apex,
+		"thick": thick,
+		"unit": unit,
 	})
+	if unit >= 0 and unit < _shot_live.size():
+		_shot_live[unit] = 1
 	return true
 
 
+func _shot_pos(from: Vector3, to: Vector3, u: float, style: int, apex: float) -> Vector3:
+	if style == Kinds.SHOT_BOMB:
+		return Vector3(
+			lerpf(from.x, to.x, u),
+			lerpf(from.y, to.y, u * u),
+			lerpf(from.z, to.z, u)
+		)
+	var pos := from.lerp(to, u)
+	if apex > 0.0:
+		pos.y += apex * 4.0 * u * (1.0 - u)
+	return pos
+
+
 func _draw_flying_shots(tracer_i: int, muzzle_i: int, spark_i: int, puff_i: int) -> PackedInt32Array:
+	var proj_i := 0
 	for raw in _shots:
-		if tracer_i >= MAX_TRACERS:
-			break
 		var shot: Dictionary = raw
 		var from: Vector3 = shot.from
 		var to: Vector3 = shot.to
+		var style := int(shot.get("style", Kinds.SHOT_RIFLE))
+		var apex := float(shot.get("apex", 0.0))
 		var life := maxf(float(shot.life), 0.001)
 		var t := float(shot.t)
 		var u := clampf(t / life, 0.0, 1.0)
-		var pos: Vector3 = from.lerp(to, u)
-		var d := to - from
-		var length := d.length()
-		if length < 0.2:
-			continue
-		var dir := d / length
-		var half := STREAK_LEN * 0.5
-		var back := minf(half, u * length)
-		var fwd := minf(half, (1.0 - u) * length + 0.12)
-		if _write_tracer(tracer_i, pos - dir * back, pos + dir * fwd):
-			tracer_i += 1
-		var air := bool(shot.air)
-		if t < MUZZLE_LIFE and not air and muzzle_i < MAX_MUZZLES:
-			_write_billboard(_muzzle_buf, muzzle_i, from + Vector3(0.0, 0.25, 0.0), 1.5)
-			muzzle_i += 1
-		if u >= 0.88 and not air and spark_i < MAX_SPARKS:
-			_write_billboard(_spark_buf, spark_i, to, 1.3)
-			spark_i += 1
-		if air and u >= 0.82 and puff_i < MAX_PUFFS:
-			_write_puff(puff_i, to)
-			puff_i += 1
-	return PackedInt32Array([tracer_i, muzzle_i, spark_i, puff_i])
+		var pos := _shot_pos(from, to, u, style, apex)
+		var pos2 := _shot_pos(from, to, minf(u + 0.04, 1.0), style, apex)
+		var travel := pos2 - pos
+		if travel.length() < 0.04:
+			travel = to - from
+		match style:
+			Kinds.SHOT_BOMB:
+				if _slot_ok(_proj_buf, proj_i):
+					_write_billboard(_proj_buf, proj_i, pos, 1.35)
+					proj_i += 1
+				if u >= 0.88 and _slot_ok(_puff_buf, puff_i):
+					_write_puff(puff_i, Vector3(to.x, GROUND_Y + 0.55, to.z), 2.2)
+					puff_i += 1
+			Kinds.SHOT_SHELL:
+				if _slot_ok(_proj_buf, proj_i):
+					_write_billboard(_proj_buf, proj_i, pos, 1.15)
+					proj_i += 1
+				if _slot_ok(_tracer_buf, tracer_i):
+					var trail := travel.normalized() * minf(1.8, travel.length() * 8.0 + 0.6)
+					if _write_tracer(tracer_i, pos - trail * 0.35, pos + trail * 0.15, 0.22):
+						tracer_i += 1
+				if t < MUZZLE_LIFE and _slot_ok(_muzzle_buf, muzzle_i):
+					_write_billboard(_muzzle_buf, muzzle_i, from + Vector3(0.0, 0.2, 0.0), 2.1)
+					muzzle_i += 1
+				if u >= 0.90 and _slot_ok(_puff_buf, puff_i):
+					var impact := to if to.y > 2.0 else Vector3(to.x, GROUND_Y + 0.55, to.z)
+					_write_puff(puff_i, impact, 2.4)
+					puff_i += 1
+			Kinds.SHOT_HEAT:
+				if _slot_ok(_proj_buf, proj_i):
+					_write_billboard(_proj_buf, proj_i, pos, 0.55)
+					proj_i += 1
+				if _slot_ok(_tracer_buf, tracer_i):
+					if _write_gun_streak(tracer_i, pos, travel, from, to, float(shot.get("thick", 0.16))):
+						tracer_i += 1
+				if t < MUZZLE_LIFE and _slot_ok(_muzzle_buf, muzzle_i):
+					_write_billboard(_muzzle_buf, muzzle_i, from + Vector3(0.0, 0.15, 0.0), 1.8)
+					muzzle_i += 1
+				if u >= 0.88 and _slot_ok(_spark_buf, spark_i):
+					_write_billboard(_spark_buf, spark_i, to, 1.15)
+					spark_i += 1
+			Kinds.SHOT_SATCHEL:
+				if _slot_ok(_spark_buf, spark_i):
+					_write_billboard(_spark_buf, spark_i, pos, 1.1)
+					spark_i += 1
+				if u >= 0.88 and _slot_ok(_puff_buf, puff_i):
+					_write_puff(puff_i, Vector3(to.x, GROUND_Y + 0.45, to.z), 1.5)
+					puff_i += 1
+			Kinds.SHOT_FLAK:
+				if _slot_ok(_tracer_buf, tracer_i):
+					if _write_gun_streak(tracer_i, pos, travel, from, to, float(shot.get("thick", 0.12))):
+						tracer_i += 1
+				if t < MUZZLE_LIFE and _slot_ok(_muzzle_buf, muzzle_i):
+					_write_billboard(_muzzle_buf, muzzle_i, from + Vector3(0.0, 0.25, 0.0), 1.4)
+					muzzle_i += 1
+				if u >= 0.82 and _slot_ok(_puff_buf, puff_i):
+					_write_puff(puff_i, pos, 1.6)
+					puff_i += 1
+			_:
+				var d := to - from
+				var length := d.length()
+				if length >= 0.2 and _slot_ok(_tracer_buf, tracer_i):
+					var dir := d / length
+					var thick := float(shot.get("thick", 0.14))
+					var half := STREAK_LEN * 0.5
+					var back := minf(half, u * length)
+					var fwd := minf(half, (1.0 - u) * length + 0.12)
+					if _write_tracer(tracer_i, pos - dir * back, pos + dir * fwd, thick):
+						tracer_i += 1
+				if t < MUZZLE_LIFE and _slot_ok(_muzzle_buf, muzzle_i):
+					_write_billboard(_muzzle_buf, muzzle_i, from + Vector3(0.0, 0.25, 0.0), 1.5)
+					muzzle_i += 1
+				if u >= 0.88 and _slot_ok(_spark_buf, spark_i):
+					_write_billboard(_spark_buf, spark_i, to, 1.3)
+					spark_i += 1
+	return PackedInt32Array([tracer_i, muzzle_i, spark_i, puff_i, proj_i])
 
 
 func _pose_frame(id: int, i: int, st: int, firing: bool, dead: bool) -> int:
-	if id >= 2 or _sheet_cols[id] < 2.0:
+	if id < 0 or id >= _sheet_cols.size():
+		return 0
+	var cols := int(_sheet_cols[id] + 0.5)
+	if cols < 2:
 		return 0
 	if dead:
 		return 0
+	if cols == 2:
+		return 1 if firing else 0
 	if firing:
 		return 5 + (int(_frame_pos * 12.0) + i * 2) % 3
 	if st == ST_HIT:
@@ -851,7 +1134,26 @@ func _pose_frame(id: int, i: int, st: int, firing: bool, dead: bool) -> int:
 	return 0
 
 
-func _write_tracer(slot: int, from: Vector3, to: Vector3) -> bool:
+func _slot_ok(buf: PackedFloat32Array, slot: int) -> bool:
+	return slot >= 0 and (slot + 1) * XFORM_STRIDE <= buf.size()
+
+
+func _write_gun_streak(slot: int, pos: Vector3, travel: Vector3, from: Vector3, to: Vector3, thick: float) -> bool:
+	var d := travel
+	if d.length() < 0.04:
+		d = to - from
+	var length := d.length()
+	if length < 0.04:
+		return false
+	var dir := d / length
+	var back := minf(STREAK_LEN * 0.7, 1.35)
+	var fwd := minf(STREAK_LEN * 0.45, 0.7)
+	return _write_tracer(slot, pos - dir * back, pos + dir * fwd, thick)
+
+
+func _write_tracer(slot: int, from: Vector3, to: Vector3, thick: float = 0.14) -> bool:
+	if not _slot_ok(_tracer_buf, slot):
+		return false
 	var d := to - from
 	var length := d.length()
 	if length < 0.2:
@@ -866,15 +1168,18 @@ func _write_tracer(slot: int, from: Vector3, to: Vector3) -> bool:
 		return false
 	z_axis = z_axis.normalized()
 	y_axis = z_axis.cross(x_axis).normalized()
-	_write_basis(slot, _tracer_buf, x_axis * length, y_axis * 0.14, z_axis * 0.14, mid)
+	var r := maxf(thick, 0.06)
+	_write_basis(slot, _tracer_buf, x_axis * length, y_axis * r, z_axis * r, mid)
 	return true
 
 
-func _write_puff(slot: int, at: Vector3) -> void:
-	_write_billboard(_puff_buf, slot, Vector3(at.x, GROUND_Y + 0.55, at.z), 1.8)
+func _write_puff(slot: int, at: Vector3, size: float = 1.8) -> void:
+	_write_billboard(_puff_buf, slot, at, size)
 
 
 func _write_billboard(buf: PackedFloat32Array, slot: int, at: Vector3, size: float) -> void:
+	if not _slot_ok(buf, slot):
+		return
 	var o := slot * XFORM_STRIDE
 	buf[o + 0] = size
 	buf[o + 5] = size
@@ -918,24 +1223,19 @@ func _write_instance(
 	id: int, o: int, szx: float, szy: float, wx: float, yc: float, wz: float,
 	flip: float, frame: int, fire: float, dead: float, fade: float
 ) -> void:
+	if id < 0 or id >= _bufs.size():
+		return
 	var packed := float(frame * 2 + (1 if flip > 0.5 else 0))
-	match id:
-		0:
-			_buf0[o + 0] = szx; _buf0[o + 5] = szy; _buf0[o + 10] = szx
-			_buf0[o + 3] = wx; _buf0[o + 7] = yc; _buf0[o + 11] = wz
-			_buf0[o + 12] = packed; _buf0[o + 13] = fire; _buf0[o + 14] = dead; _buf0[o + 15] = fade
-		1:
-			_buf1[o + 0] = szx; _buf1[o + 5] = szy; _buf1[o + 10] = szx
-			_buf1[o + 3] = wx; _buf1[o + 7] = yc; _buf1[o + 11] = wz
-			_buf1[o + 12] = packed; _buf1[o + 13] = fire; _buf1[o + 14] = dead; _buf1[o + 15] = fade
-		2:
-			_buf2[o + 0] = szx; _buf2[o + 5] = szy; _buf2[o + 10] = szx
-			_buf2[o + 3] = wx; _buf2[o + 7] = yc; _buf2[o + 11] = wz
-			_buf2[o + 12] = packed; _buf2[o + 13] = fire; _buf2[o + 14] = dead; _buf2[o + 15] = fade
-		_:
-			_buf3[o + 0] = szx; _buf3[o + 5] = szy; _buf3[o + 10] = szx
-			_buf3[o + 3] = wx; _buf3[o + 7] = yc; _buf3[o + 11] = wz
-			_buf3[o + 12] = packed; _buf3[o + 13] = fire; _buf3[o + 14] = dead; _buf3[o + 15] = fade
+	_bufs[id][o + 0] = szx
+	_bufs[id][o + 5] = szy
+	_bufs[id][o + 10] = szx
+	_bufs[id][o + 3] = wx
+	_bufs[id][o + 7] = yc
+	_bufs[id][o + 11] = wz
+	_bufs[id][o + 12] = packed
+	_bufs[id][o + 13] = fire
+	_bufs[id][o + 14] = dead
+	_bufs[id][o + 15] = fade
 
 
 func _update_header() -> void:
@@ -946,9 +1246,13 @@ func _update_header() -> void:
 		int(_summary.get("defender", 1)),
 		("  ·  F%d holds the field" % winner) if (winner >= 0 and _done) else hold,
 	]
-	_progress.text = "right-drag orbit   wheel zoom   %s" % [
-		_speed_label() if _playing else "paused",
-	]
+	var pace := _speed_label() if _playing else "paused"
+	if _unit_count >= 800:
+		_progress.text = "right-drag orbit   wheel zoom   %s   ·   %d fps  %.1fms draw" % [
+			pace, Engine.get_frames_per_second(), _draw_ms
+		]
+	else:
+		_progress.text = "right-drag orbit   wheel zoom   %s" % pace
 
 
 func _speed_label() -> String:
@@ -958,10 +1262,15 @@ func _speed_label() -> String:
 
 
 func _apply_camera() -> void:
+	if _cam == null:
+		return
 	var cp := cos(_pitch)
 	var offset := Vector3(_dist * cp * sin(_yaw), _dist * sin(_pitch), _dist * cp * cos(_yaw))
 	_cam.position = _look + offset
-	_cam.look_at(_look, Vector3.UP)
+	if _cam.is_inside_tree():
+		_cam.look_at(_look, Vector3.UP)
+	else:
+		_cam.look_at_from_position(_cam.position, _look, Vector3.UP)
 
 
 func _pan_camera(delta: float) -> bool:

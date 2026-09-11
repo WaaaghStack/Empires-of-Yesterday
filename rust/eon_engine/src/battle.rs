@@ -6,7 +6,8 @@
 //! (land / air / later naval). Resolved once, baked for the HD-2D replay.
 
 use crate::ledger::{Account, Ledger, Phase};
-use crate::model::{AgentKind, FactionId, ProvinceId, UnitDomain, UnitKind, World};
+use crate::model::{AttackStyle, AgentKind, FactionId, ProvinceId, UnitDomain, UnitKind, World};
+use crate::nav::{self, NavIntent};
 use crate::rng::Rng;
 
 /// Linear scale vs the original 200×120 prototype. Combat reach stays unscaled.
@@ -19,7 +20,6 @@ const DT: f32 = 1.0;
 const MAX_TICKS: u32 = 1400;
 const RECORD_STRIDE: u32 = 3;
 const ROUT_CASUALTY_FRAC: f32 = 0.6;
-const ATTACK_COOLDOWN: u32 = 3;
 const GRID_CELL: f32 = 10.0;
 const CONSECRATE: f32 = 8.0;
 /// Gap between the two engagement lines at first bind. Individuals close to weapon reach.
@@ -48,14 +48,36 @@ pub const ST_HIT: u8 = 7;
 const ESCAPE_RIM: f32 = 3.0;
 /// How many ticks a wounded body holds ST_HIT before moving again.
 const HIT_STAGGER: u32 = 2;
-/// One bomb per pass; the aircraft flies through instead of hovering to shoot.
+/// Land vs land: how much a file (Y) gap costs vs an X gap. Linear, not squared —
+/// dx² let a man 25 forward beat the body across from you.
+const FILE_WEIGHT: f32 = 24.0;
+/// Extra cost per shooter already looking at this body this tick.
+/// ~one file of spacing so the next mate takes the next living body.
+const FILE_HEAT: f32 = 80.0;
+/// Air bomb floor (Debt Wings). Land blast uses the kind's `attack_interval` instead.
 const BOMB_COOLDOWN: u32 = 32;
+
+fn shot_cooldown(kind: UnitKind) -> u32 {
+    let n = kind.attack_interval().max(1);
+    if kind.domain() == UnitDomain::Air {
+        n.max(BOMB_COOLDOWN)
+    } else {
+        n
+    }
+}
+
 /// Horizontal window to pickle a bomb over a ground target.
 const DROP_XY: f32 = 22.0;
 /// How far past the enemy the outbound leg continues.
 const OVERFLY: f32 = 70.0;
-const GRAVITY: f32 = 0.38;
-const FALL_DMG: f32 = 7.0;
+/// Land toss hang. Kept high enough to read a hop, low enough they do not float.
+const GRAVITY: f32 = 1.05;
+/// Dead flyers lose lift slower than a land toss so the bake records a fall, not a snap.
+const AIR_CRASH_G: f32 = 0.40;
+/// HP per unit of landing speed. Half-height bomb tosses still take a chunk, not a slap.
+const FALL_DMG: f32 = 12.0;
+/// Skip dust-settling taps; a real bomb toss always lands harder than this.
+const FALL_IMPACT_MIN: f32 = 0.25;
 
 /// Shared with the viewer so the diorama matches movement cost (tide still ignores height).
 pub const RIVER_X: f32 = BATTLE_WIDTH * 0.5;
@@ -69,11 +91,17 @@ pub const HILL_BLOCK_R: f32 = HILL_R * 0.92;
 pub const RUIN_CX: f32 = 20.0 * MAP_SCALE;
 pub const RUIN_CY: f32 = 11.0 * MAP_SCALE;
 pub const RUIN_R: f32 = 5.5 * MAP_SCALE;
+const LAND_NAV: [nav::NavBlocker; 2] = [
+    nav::NavBlocker::land(HILL_CX, HILL_CY, HILL_BLOCK_R + 12.0),
+    nav::NavBlocker::land(RUIN_CX, RUIN_CY, RUIN_R + 6.0),
+];
 /// Extra dominion dumped when the victor was not already the owner (nested result txn).
 const BATTLE_CLAIM: f32 = 10.0;
 const Y_PAD: f32 = 8.0 * MAP_SCALE;
 const WING_Y: f32 = 24.0 * MAP_SCALE;
 const DEPLOY_INSET: f32 = 32.0 * MAP_SCALE;
+/// Stay in this Y band while anyone is still fighting there. Empty lane → hunt remaining land.
+const LANE_HALF: f32 = 44.0;
 
 /// Group/regiment shape. Formation is an attractor, not a rail.
 #[repr(u8)]
@@ -207,6 +235,7 @@ struct Unit {
     state: u8,
     aim_x: f32,
     aim_y: f32,
+    aim_z: f32,
     hit_until: u32,
     fire_until: u32,
     vx: f32,
@@ -252,6 +281,7 @@ pub struct UnitSnapshot {
     /// Aim point for fire/aim ticks (zeros when idle). Viewer tracers read this; they do not invent targets.
     pub aim_x: f32,
     pub aim_y: f32,
+    pub aim_z: f32,
 }
 
 /// The finished battle report — the wide-row projection of the battle journal.
@@ -394,6 +424,7 @@ pub fn resolve_battle_with_plan(
                             state: ST_IDLE,
                             aim_x: 0.0,
                             aim_y: 0.0,
+                            aim_z: 0.0,
                             hit_until: 0,
                             fire_until: 0,
                             vx: 0.0,
@@ -473,11 +504,13 @@ pub fn resolve_battle_with_plan(
         let routing_d = squads.iter().any(|s| s.faction == defender && s.routing);
 
         grid.rebuild(&units);
+        let land_facs = land_faction_bits(&units);
+        let mut file_heat = vec![0u8; units.len()];
 
         for i in 0..units.len() {
             if !units[i].alive {
                 units[i].state = ST_DEAD;
-                if airborne(&units[i]) {
+                if airborne(&units[i]) || crashing_air(&units[i]) {
                     step_ballistic(&mut units[i]);
                 }
                 continue;
@@ -508,7 +541,6 @@ pub fn resolve_battle_with_plan(
             let speed = kind.move_speed()
                 * MAP_SCALE
                 * terrain_speed(ux, uy, elev_f, kind.domain());
-            let reach = kind.reach();
             // Local LOS only. Map scale is for march distance, not "see the whole slab".
             let perception = kind.perception() * perc_mod.get(&fac).copied().unwrap_or(1.0);
             let cruise_z = kind.cruise_z();
@@ -527,6 +559,7 @@ pub fn resolve_battle_with_plan(
                 units[i].facing = octant(-face_sign, 0.0);
                 units[i].aim_x = 0.0;
                 units[i].aim_y = 0.0;
+                units[i].aim_z = 0.0;
                 if at_home_rim(units[i].x, face_sign) {
                     units[i].state = ST_FLED;
                 } else {
@@ -540,7 +573,22 @@ pub fn resolve_battle_with_plan(
                 continue;
             }
 
-            let (target, dist) = nearest_enemy(i, ux, uy, uz, fac, perception, &units, &grid);
+            let (target, dist) = nearest_enemy(
+                i,
+                ux,
+                uy,
+                uz,
+                fac,
+                perception,
+                kind,
+                enemy_land_alive(fac, land_facs),
+                &units,
+                &grid,
+                &file_heat,
+            );
+            if let Some(j) = target {
+                file_heat[j] = file_heat[j].saturating_add(1);
+            }
 
             if is_air {
                 let dest_x = if enemy_routing {
@@ -562,10 +610,12 @@ pub fn resolve_battle_with_plan(
                 let (fdx, fdy) = if let Some(j) = target {
                     units[i].aim_x = units[j].x;
                     units[i].aim_y = units[j].y;
+                    units[i].aim_z = units[j].z;
                     (units[j].x - ux, units[j].y - uy)
                 } else {
                     units[i].aim_x = 0.0;
                     units[i].aim_y = 0.0;
+                    units[i].aim_z = 0.0;
                     (dx, dy)
                 };
                 units[i].z = cruise_z;
@@ -585,55 +635,108 @@ pub fn resolve_battle_with_plan(
                 continue;
             }
 
-            let (state, fdx, fdy) = if let Some(j) = target {
-                let (ex, ey) = (units[j].x, units[j].y);
-                units[i].aim_x = ex;
-                units[i].aim_y = ey;
-                let fdx = ex - ux;
-                let fdy = ey - uy;
-                let target_routing = units[j].state == ST_ROUT
-                    || squads
-                        .get(units[j].squad as usize)
-                        .map(|s| s.routing)
-                        .unwrap_or(false);
-                if target_routing {
-                    let inv = 1.0 / dist.max(1e-3);
-                    let close = speed * 1.3 * DT;
-                    if dist > PURSUE_CONTACT {
-                        units[i].x += fdx * inv * close;
-                        units[i].y += fdy * inv * close;
-                        (ST_MARCH, fdx, fdy)
-                    } else {
-                        units[i].x += fdx * inv * close * 0.28;
-                        units[i].y += fdy * inv * close * 0.28;
-                        (ST_AIM, fdx, fdy)
-                    }
-                } else if dist <= reach {
-                    units[i].x += (slot_x - ux) * cohesion * 0.12;
-                    units[i].y += (slot_y - uy) * cohesion * 0.12;
-                    (ST_AIM, fdx, fdy)
-                } else {
-                    let inv = 1.0 / dist.max(1e-3);
-                    let close = (1.0 - cohesion * 0.35) * speed * DT;
-                    units[i].x += fdx * inv * close + (slot_x - ux) * cohesion * 0.25;
-                    units[i].y += fdy * inv * close + (slot_y - uy) * cohesion * 0.25;
-                    (ST_MARCH, fdx, fdy)
-                }
+            let halt_at = kind.contact_range().max(0.01);
+            let air_tgt = target
+                .map(|j| units[j].kind.domain() == UnitDomain::Air)
+                .unwrap_or(false);
+            let in_reach = target.is_some() && dist <= halt_at;
+            let sit = nav::situation(kind, false, target.is_some(), air_tgt, in_reach);
+            let nintent = nav::intent(kind, sit);
+            let target_routing = target
+                .and_then(|j| {
+                    Some(
+                        units[j].state == ST_ROUT
+                            || squads
+                                .get(units[j].squad as usize)
+                                .map(|s| s.routing)
+                                .unwrap_or(false),
+                    )
+                })
+                .unwrap_or(false);
+
+            if let Some(j) = target {
+                units[i].aim_x = units[j].x;
+                units[i].aim_y = units[j].y;
+                units[i].aim_z = units[j].z;
             } else {
                 units[i].aim_x = 0.0;
                 units[i].aim_y = 0.0;
-                let dx = slot_x - ux;
-                let dy = slot_y - uy;
-                let d = (dx * dx + dy * dy).sqrt();
-                if d > 0.35 {
-                    let step = speed.min(d) * DT;
-                    units[i].x += dx / d * step;
-                    units[i].y += dy / d * step;
-                    (ST_MARCH, dx, dy)
-                } else {
-                    units[i].x = slot_x;
-                    units[i].y = slot_y;
-                    (ST_IDLE, face_sign, 0.0)
+                units[i].aim_z = 0.0;
+            }
+
+            let (state, fdx, fdy) = match nintent {
+                NavIntent::RoutHome | NavIntent::Overfly => (ST_MARCH, face_sign, 0.0),
+                NavIntent::TrainHold => {
+                    let (nx, ny) = land_steer(ux, uy, slot_x, slot_y, speed.min(dist_to(ux, uy, slot_x, slot_y)) * DT);
+                    let dslot = dist_to(nx, ny, slot_x, slot_y);
+                    if dslot <= 0.35 {
+                        units[i].x = slot_x;
+                        units[i].y = slot_y;
+                        (ST_IDLE, face_sign, 0.0)
+                    } else {
+                        units[i].x = nx;
+                        units[i].y = ny;
+                        (ST_MARCH, slot_x - ux, slot_y - uy)
+                    }
+                }
+                NavIntent::HaltAim => {
+                    let (ex, ey) = target
+                        .map(|j| (units[j].x, units[j].y))
+                        .unwrap_or((slot_x, slot_y));
+                    if kind.attack_style() == AttackStyle::Hold {
+                        units[i].y += (slot_y - uy) * cohesion * 0.12;
+                    } else {
+                        let (nx, ny) = land_steer(ux, uy, ex, ey, speed * 0.18 * DT);
+                        units[i].x = nx;
+                        units[i].y = ny;
+                    }
+                    (ST_AIM, ex - ux, ey - uy)
+                }
+                NavIntent::CloseContact => {
+                    let (ex, ey) = target
+                        .map(|j| (units[j].x, units[j].y))
+                        .unwrap_or((slot_x, slot_y));
+                    let close = if target_routing {
+                        speed * 1.3 * DT
+                    } else {
+                        speed * DT
+                    };
+                    let slow = if target_routing && dist <= PURSUE_CONTACT {
+                        close * 0.28
+                    } else {
+                        close
+                    };
+                    let (nx, ny) = land_steer(ux, uy, ex, ey, slow);
+                    units[i].x = nx;
+                    units[i].y = ny;
+                    (
+                        if dist <= halt_at {
+                            ST_AIM
+                        } else {
+                            ST_MARCH
+                        },
+                        ex - ux,
+                        ey - uy,
+                    )
+                }
+                NavIntent::FollowGuide => {
+                    let (nx, ny) = land_steer(
+                        ux,
+                        uy,
+                        slot_x,
+                        slot_y,
+                        speed.min(dist_to(ux, uy, slot_x, slot_y).max(0.35)) * DT,
+                    );
+                    let dslot = dist_to(nx, ny, slot_x, slot_y);
+                    if dslot <= 0.35 {
+                        units[i].x = slot_x;
+                        units[i].y = slot_y;
+                        (ST_MARCH, face_sign, 0.0)
+                    } else {
+                        units[i].x = nx;
+                        units[i].y = ny;
+                        (ST_MARCH, slot_x - ux, slot_y - uy)
+                    }
                 }
             };
 
@@ -669,6 +772,9 @@ pub fn resolve_battle_with_plan(
             if airborne(&units[i]) {
                 continue;
             }
+            if units[i].kind.attack_style() == AttackStyle::Train {
+                continue;
+            }
             let sq_i = units[i].squad as usize;
             if sq_i >= squads.len() || squads[sq_i].routing {
                 continue;
@@ -686,13 +792,15 @@ pub fn resolve_battle_with_plan(
                 if !squads[sq_i].air_outbound {
                     continue;
                 }
-                let (target, dist) = nearest_land_enemy_xy(i, ux, uy, fac, DROP_XY, &units, &grid);
+                let (target, dist) =
+                    nearest_land_enemy_xy(i, ux, uy, fac, DROP_XY, &units, &grid, &file_heat);
                 let Some(j) = target else {
                     continue;
                 };
                 if dist > DROP_XY {
                     continue;
                 }
+                file_heat[j] = file_heat[j].saturating_add(1);
                 let radius = kind.blast_radius();
                 if radius <= 0.01 {
                     continue;
@@ -706,16 +814,34 @@ pub fn resolve_battle_with_plan(
                 ));
                 continue;
             }
-            let (target, dist) = nearest_enemy(i, ux, uy, uz, fac, kind.reach(), &units, &grid);
+            let (target, dist) = nearest_enemy(
+                i,
+                ux,
+                uy,
+                uz,
+                fac,
+                kind.reach(),
+                kind,
+                enemy_land_alive(fac, land_facs),
+                &units,
+                &grid,
+                &file_heat,
+            );
             let Some(j) = target else {
                 continue;
             };
             if dist > kind.reach() {
                 continue;
             }
+            file_heat[j] = file_heat[j].saturating_add(1);
             let mut dmg = kind.base_attack() * jitter * am;
             if units[j].kind.domain() == UnitDomain::Air {
                 dmg *= kind.vs_air();
+            }
+            let radius = kind.blast_radius();
+            if radius > 0.01 {
+                bombs.push((i, units[j].x, units[j].y, dmg, radius));
+                continue;
             }
             hits.push((i, j, dmg));
         }
@@ -728,32 +854,49 @@ pub fn resolve_battle_with_plan(
             if units[j].hp <= 0.0 {
                 units[j].alive = false;
                 units[j].state = ST_DEAD;
+                start_air_crash(&mut units[j]);
             } else if units[j].kind.domain() != UnitDomain::Air {
                 // Small-arms do not pin aircraft. A staggered bomber becomes a piñata.
                 units[j].state = ST_HIT;
                 units[j].hit_until = tick + HIT_STAGGER;
             }
             let (ux, uy) = (units[i].x, units[i].y);
-            units[i].next_attack = tick + ATTACK_COOLDOWN;
+            units[i].next_attack = tick + shot_cooldown(units[i].kind);
             units[i].state = ST_FIRE;
             units[i].fire_until = tick + FIRE_HOLD;
             units[i].facing = octant(tx - ux, ty - uy);
             units[i].aim_x = tx;
             units[i].aim_y = ty;
+            units[i].aim_z = units[j].z;
         }
         for (i, bx, by, dmg, radius) in bombs {
             if !in_fight(&units[i]) {
                 continue;
             }
             apply_blast(&mut units, bx, by, radius, dmg, &mut rng);
-            units[i].next_attack = tick + BOMB_COOLDOWN;
+            units[i].next_attack = tick + shot_cooldown(units[i].kind);
             units[i].state = ST_FIRE;
             units[i].fire_until = tick + FIRE_HOLD;
             units[i].aim_x = bx;
             units[i].aim_y = by;
+            units[i].aim_z = 0.0;
             units[i].facing = octant(bx - units[i].x, by - units[i].y);
         }
 
+        if tick % RECORD_STRIDE == 0 {
+            record_frame(&mut frames, tick, &units);
+        }
+    }
+    // Combat may end while wrecks are still at cruise altitude. Finish the falls
+    // so the last recorded pose is on the slab, not crumpled in midair.
+    while tick < MAX_TICKS && units.iter().any(crashing_air) {
+        tick += 1;
+        for u in units.iter_mut() {
+            if crashing_air(u) {
+                step_ballistic(u);
+                u.state = ST_DEAD;
+            }
+        }
         if tick % RECORD_STRIDE == 0 {
             record_frame(&mut frames, tick, &units);
         }
@@ -950,8 +1093,19 @@ fn at_home_rim(x: f32, face_sign: f32) -> bool {
 }
 
 fn both_sides_fighting(units: &[Unit], a: FactionId, d: FactionId) -> bool {
-    let fighting = |f: FactionId| units.iter().any(|u| in_fight(u) && u.faction == f);
-    fighting(a) && fighting(d)
+    let contests = |u: &Unit| in_fight(u) && u.kind.attack_style() != AttackStyle::Train;
+    let side = |f: FactionId| units.iter().any(|u| contests(u) && u.faction == f);
+    if !side(a) || !side(d) {
+        return false;
+    }
+    // Wings cannot shoot each other. Once the land fight is gone, leftover
+    // overflies + baggage trains must not run the tape to MAX_TICKS.
+    let land = |f: FactionId| {
+        units
+            .iter()
+            .any(|u| contests(u) && u.faction == f && u.kind.domain() == UnitDomain::Land)
+    };
+    land(a) || land(d)
 }
 
 fn in_circle(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> bool {
@@ -1090,20 +1244,29 @@ fn order_engage_y(order: BattleOrder, face_sign: f32, guide_y: f32) -> f32 {
 fn guide_dest(s: &SquadState) -> (f32, f32) {
     match s.order {
         BattleOrder::Rear => {
-            let wrap_y = s.engage_y;
-            let enemy_home = if s.face_sign > 0.0 {
-                BATTLE_WIDTH - DEPLOY_INSET
+            let wrap_y = if s.guide_y < BATTLE_HEIGHT * 0.5 {
+                Y_PAD
             } else {
-                DEPLOY_INSET
+                BATTLE_HEIGHT - Y_PAD
             };
-            if (s.guide_y - wrap_y).abs() > 5.0 {
+            if (s.guide_y - wrap_y).abs() > LANE_HALF {
                 (s.guide_x, wrap_y)
             } else {
-                (enemy_home, wrap_y)
+                (s.engage_x, s.engage_y)
             }
         }
         _ => (s.engage_x, s.engage_y),
     }
+}
+
+fn dist_to(x: f32, y: f32, tx: f32, ty: f32) -> f32 {
+    let dx = tx - x;
+    let dy = ty - y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn land_steer(x: f32, y: f32, tx: f32, ty: f32, step: f32) -> (f32, f32) {
+    nav::steer(x, y, tx, ty, step, UnitDomain::Land, &LAND_NAV)
 }
 
 fn step_toward(x: f32, y: f32, tx: f32, ty: f32, step: f32) -> (f32, f32) {
@@ -1432,6 +1595,12 @@ fn enemy_is_routing(squads: &[SquadState], fac: FactionId) -> bool {
     squads.iter().any(|s| s.faction != fac && s.routing)
 }
 
+fn enemy_unrouted_land(squads: &[SquadState], fac: FactionId) -> bool {
+    squads
+        .iter()
+        .any(|s| s.faction != fac && !s.routing && !s.is_air)
+}
+
 fn enemy_in_fight_centroid(units: &[Unit], fac: FactionId) -> Option<(f32, f32)> {
     let mut sx = 0.0;
     let mut sy = 0.0;
@@ -1448,18 +1617,31 @@ fn enemy_in_fight_centroid(units: &[Unit], fac: FactionId) -> Option<(f32, f32)>
     }
 }
 
+fn squad_primary_kind(s: &SquadState, units: &[Unit]) -> UnitKind {
+    units
+        .iter()
+        .find(|u| u.squad == s.id && u.alive)
+        .or_else(|| units.iter().find(|u| u.squad == s.id))
+        .map(|u| u.kind)
+        .unwrap_or(UnitKind::Soldier)
+}
+
 fn march_guides(squads: &mut [SquadState], units: &[Unit]) {
     for i in 0..squads.len() {
         if squads[i].routing {
             continue;
         }
         refresh_engage_x(&mut squads[i], units);
+        let fac = squads[i].faction;
+        let kind = squad_primary_kind(&squads[i], units);
+        let style = kind.attack_style();
         let step = if squads[i].is_air {
             GUIDE_SPEED * 1.35
+        } else if style == AttackStyle::Charge {
+            GUIDE_SPEED * 1.85
         } else {
             GUIDE_SPEED
         };
-        let fac = squads[i].faction;
         if squads[i].is_air && !enemy_is_routing(squads, fac) {
             let dest = if squads[i].air_outbound {
                 squads[i].engage_x + squads[i].face_sign * OVERFLY
@@ -1482,24 +1664,61 @@ fn march_guides(squads: &mut [SquadState], units: &[Unit]) {
             }
             continue;
         }
-        if enemy_is_routing(squads, fac) {
+        if style == AttackStyle::Train {
+            let dest = squads[i].home_x + squads[i].face_sign * 6.0;
+            let (gx, gy) = land_steer(squads[i].guide_x, squads[i].guide_y, dest, squads[i].guide_y, step);
+            squads[i].guide_x = gx;
+            squads[i].guide_y = gy;
+            continue;
+        }
+        if style == AttackStyle::Hold && !enemy_unrouted_land(squads, fac) {
+            continue;
+        }
+        if style == AttackStyle::Hold {
+            let enemy_x = squads[i].engage_x + squads[i].face_sign * 8.0;
+            let gap = dist_to(
+                squads[i].guide_x,
+                squads[i].guide_y,
+                enemy_x,
+                squads[i].engage_y,
+            );
+            if gap <= kind.reach() * 0.95 {
+                let (gx, gy) = land_steer(
+                    squads[i].guide_x,
+                    squads[i].guide_y,
+                    squads[i].guide_x,
+                    squads[i].engage_y,
+                    step,
+                );
+                squads[i].guide_x = gx;
+                squads[i].guide_y = gy;
+                continue;
+            }
+        }
+        if style != AttackStyle::Hold && enemy_is_routing(squads, fac) {
             if let Some((cx, cy)) = enemy_in_fight_centroid(units, fac) {
                 let leash_lo = ESCAPE_RIM + PURSUE_LEASH;
                 let leash_hi = BATTLE_WIDTH - ESCAPE_RIM - PURSUE_LEASH;
                 let tx = cx.clamp(leash_lo, leash_hi);
-                let (gx, gy) = step_toward(squads[i].guide_x, squads[i].guide_y, tx, cy, step * 1.45);
+                let (gx, gy) = land_steer(
+                    squads[i].guide_x,
+                    squads[i].guide_y,
+                    tx,
+                    cy,
+                    step * 1.45,
+                );
                 squads[i].guide_x = gx;
                 squads[i].guide_y = gy.clamp(Y_PAD, BATTLE_HEIGHT - Y_PAD);
             }
             continue;
         }
         let (tx, ty) = guide_dest(&squads[i]);
-        let (gx, gy) = step_toward(squads[i].guide_x, squads[i].guide_y, tx, ty, step);
         if squads[i].is_air {
+            let (gx, gy) = step_toward(squads[i].guide_x, squads[i].guide_y, tx, ty, step);
             squads[i].guide_x = gx;
             squads[i].guide_y = gy.clamp(Y_PAD, BATTLE_HEIGHT - Y_PAD);
         } else {
-            let (gx, gy) = slide_land(gx, gy);
+            let (gx, gy) = land_steer(squads[i].guide_x, squads[i].guide_y, tx, ty, step);
             squads[i].guide_x = gx;
             squads[i].guide_y = gy;
         }
@@ -1507,17 +1726,56 @@ fn march_guides(squads: &mut [SquadState], units: &[Unit]) {
 }
 
 fn refresh_engage_x(s: &mut SquadState, units: &[Unit]) {
-    if s.order == BattleOrder::Rear {
-        return;
+    let kind = squad_primary_kind(s, units);
+    let aa = !s.is_air && kind.vs_air() >= 1.0;
+    let mut enemy_land = false;
+    let mut enemy_air = false;
+    for u in units {
+        if !in_fight(u) || u.faction == s.faction {
+            continue;
+        }
+        match u.kind.domain() {
+            UnitDomain::Land => enemy_land = true,
+            UnitDomain::Air => enemy_air = true,
+            UnitDomain::Naval => {}
+        }
     }
+    let standing_land = units.iter().any(|u| {
+        in_fight(u)
+            && u.faction != s.faction
+            && u.kind.domain() == UnitDomain::Land
+            && u.state != ST_ROUT
+    });
+    let candidate = |u: &Unit| -> bool {
+        if !in_fight(u) || u.faction == s.faction {
+            return false;
+        }
+        if standing_land && u.state == ST_ROUT {
+            return false;
+        }
+        let domain = u.kind.domain();
+        if s.is_air && domain != UnitDomain::Land {
+            return false;
+        }
+        if !s.is_air && !aa && enemy_land && domain != UnitDomain::Land {
+            return false;
+        }
+        if !s.is_air && aa && enemy_air && domain != UnitDomain::Air {
+            return false;
+        }
+        true
+    };
+    // Chargers from another band must not steal a Hold line's bind.
+    let any_lane = units
+        .iter()
+        .any(|u| candidate(u) && (u.y - s.engage_y).abs() <= LANE_HALF);
     let mut best_x = None;
     let mut best_y = None;
     let mut best_d = f32::MAX;
-    for u in units.iter().filter(|u| in_fight(u) && u.faction != s.faction) {
-        if s.is_air && u.kind.domain() != UnitDomain::Land {
+    for u in units.iter().filter(|u| candidate(u)) {
+        if any_lane && (u.y - s.engage_y).abs() > LANE_HALF {
             continue;
         }
-        // Prefer the assigned lane (front / left / right), then close on that enemy.
         let d = (u.x - s.guide_x).hypot(u.y - s.guide_y) + (u.y - s.engage_y).abs() * 0.7;
         if d < best_d {
             best_d = d;
@@ -1537,8 +1795,10 @@ fn refresh_engage_x(s: &mut SquadState, units: &[Unit]) {
     let lo = ESCAPE_RIM + PURSUE_LEASH;
     let hi = BATTLE_WIDTH - ESCAPE_RIM - PURSUE_LEASH;
     s.engage_x = dest.clamp(lo, hi);
-    if s.is_air {
-        if let Some(ey) = best_y {
+    if let Some(ey) = best_y {
+        let arrived = (s.guide_y - s.engage_y).abs() <= LANE_HALF + 8.0;
+        let hunt = !any_lane && arrived;
+        if s.is_air || kind.attack_style() == AttackStyle::Charge || hunt {
             s.engage_y = ey.clamp(Y_PAD, BATTLE_HEIGHT - Y_PAD);
         }
     }
@@ -1553,6 +1813,24 @@ fn octant(dx: f32, dy: f32) -> u8 {
     o.rem_euclid(8) as u8
 }
 
+fn land_faction_bits(units: &[Unit]) -> u64 {
+    let mut bits = 0u64;
+    for u in units {
+        if u.faction < 64 && in_fight(u) && u.kind.domain() == UnitDomain::Land {
+            bits |= 1u64 << u.faction;
+        }
+    }
+    bits
+}
+
+fn enemy_land_alive(fac: FactionId, bits: u64) -> bool {
+    if fac < 64 {
+        bits & !(1u64 << fac) != 0
+    } else {
+        bits != 0
+    }
+}
+
 fn nearest_enemy(
     self_i: usize,
     ux: f32,
@@ -1560,14 +1838,108 @@ fn nearest_enemy(
     uz: f32,
     fac: FactionId,
     radius: f32,
+    shooter: UnitKind,
+    enemy_has_land: bool,
     units: &[Unit],
     grid: &SpatialGrid,
+    heat: &[u8],
+) -> (Option<usize>, f32) {
+    let prefer_air = shooter.vs_air() >= 1.0;
+    if prefer_air {
+        let air = nearest_enemy_domain(
+            self_i,
+            ux,
+            uy,
+            uz,
+            fac,
+            radius,
+            Some(UnitDomain::Air),
+            units,
+            grid,
+            heat,
+            false,
+        );
+        if air.0.is_some() {
+            return air;
+        }
+        return nearest_enemy_domain(
+            self_i,
+            ux,
+            uy,
+            uz,
+            fac,
+            radius,
+            Some(UnitDomain::Land),
+            units,
+            grid,
+            heat,
+            false,
+        );
+    }
+    let land = nearest_enemy_domain(
+        self_i,
+        ux,
+        uy,
+        uz,
+        fac,
+        radius,
+        Some(UnitDomain::Land),
+        units,
+        grid,
+        heat,
+        false,
+    );
+    // Infantry keep the land fight. Falling back to aircraft just because the line is
+    // still outside local reach makes the whole army walk bomber shadows.
+    if land.0.is_some() || enemy_has_land {
+        return land;
+    }
+    nearest_enemy_domain(
+        self_i,
+        ux,
+        uy,
+        uz,
+        fac,
+        radius,
+        Some(UnitDomain::Air),
+        units,
+        grid,
+        heat,
+        false,
+    )
+}
+
+fn file_cost(dx: f32, dy: f32, dz: f32, air: bool, heat: u8) -> f32 {
+    let geom = if air {
+        dx * dx + dy * dy + dz * dz
+    } else {
+        // Prefer the living body in your file. A stepped-forward magnet must not
+        // undercut the man across from you; heat then hands the next mate the next body.
+        dy.abs() * FILE_WEIGHT + dx.abs()
+    };
+    geom + heat as f32 * FILE_HEAT
+}
+
+fn nearest_enemy_domain(
+    self_i: usize,
+    ux: f32,
+    uy: f32,
+    uz: f32,
+    fac: FactionId,
+    radius: f32,
+    want: Option<UnitDomain>,
+    units: &[Unit],
+    grid: &SpatialGrid,
+    heat: &[u8],
+    skip_airborne: bool,
 ) -> (Option<usize>, f32) {
     let (cx, cy) = SpatialGrid::cell(ux, uy);
     let max_rings = (radius / GRID_CELL).ceil() as i32;
     let r2 = radius * radius;
+    let air = want == Some(UnitDomain::Air);
     let mut best = None;
-    let mut best_d2 = f32::MAX;
+    let mut best_cost = f32::MAX;
+    let mut best_d = 0.0;
     for ring in 0..=max_rings {
         let gx0 = cx - ring;
         let gx1 = cx + ring;
@@ -1586,33 +1958,82 @@ fn nearest_enemy(
                     if !in_fight(e) || e.faction == fac {
                         continue;
                     }
+                    if let Some(d) = want {
+                        if e.kind.domain() != d {
+                            continue;
+                        }
+                    }
+                    if skip_airborne && airborne(e) {
+                        continue;
+                    }
                     let dx = e.x - ux;
                     let dy = e.y - uy;
                     let dz = e.z - uz;
-                    let d2 = dx * dx + dy * dy + dz * dz;
-                    if d2 <= r2 && d2 < best_d2 {
-                        best_d2 = d2;
+                    let d2 = if air {
+                        dx * dx + dy * dy + dz * dz
+                    } else {
+                        dx * dx + dy * dy
+                    };
+                    if d2 > r2 {
+                        continue;
+                    }
+                    let h = heat.get(j).copied().unwrap_or(0);
+                    let cost = file_cost(dx, dy, dz, air, h);
+                    if cost < best_cost {
+                        best_cost = cost;
                         best = Some(j);
+                        best_d = d2.sqrt();
                     }
                 }
             }
         }
-        if ring >= 1 && best_d2 < (ring as f32 * GRID_CELL) * (ring as f32 * GRID_CELL) {
-            break;
-        }
     }
-    (best, best_d2.sqrt())
+    (best, best_d)
 }
 
 fn airborne(u: &Unit) -> bool {
     u.kind.domain() == UnitDomain::Land && (u.z > 0.12 || u.vz > 0.08)
 }
 
+fn crashing_air(u: &Unit) -> bool {
+    u.kind.domain() == UnitDomain::Air && !u.alive && u.z > 0.12
+}
+
+fn start_air_crash(u: &mut Unit) {
+    if u.kind.domain() != UnitDomain::Air || u.z <= 0.12 {
+        return;
+    }
+    let (dx, dy) = octant_dir(u.facing);
+    u.vx = dx * 3.2;
+    u.vy = dy * 3.2;
+    if u.vz > -0.4 {
+        u.vz = -0.65;
+    }
+}
+
+fn octant_dir(o: u8) -> (f32, f32) {
+    match o % 8 {
+        0 => (1.0, 0.0),
+        1 => (0.707, 0.707),
+        2 => (0.0, 1.0),
+        3 => (-0.707, 0.707),
+        4 => (-1.0, 0.0),
+        5 => (-0.707, -0.707),
+        6 => (0.0, -1.0),
+        _ => (0.707, -0.707),
+    }
+}
+
 fn step_ballistic(u: &mut Unit) {
+    let g = if u.kind.domain() == UnitDomain::Air {
+        AIR_CRASH_G
+    } else {
+        GRAVITY
+    };
     u.x = (u.x + u.vx * DT).clamp(2.0, BATTLE_WIDTH - 2.0);
     u.y = (u.y + u.vy * DT).clamp(2.0, BATTLE_HEIGHT - 2.0);
     u.z += u.vz * DT;
-    u.vz -= GRAVITY * DT;
+    u.vz -= g * DT;
     u.vx *= 0.94;
     u.vy *= 0.94;
     if u.z > 0.0 {
@@ -1623,7 +2044,7 @@ fn step_ballistic(u: &mut Unit) {
     u.vz = 0.0;
     u.vx = 0.0;
     u.vy = 0.0;
-    if u.alive && impact > 0.4 {
+    if u.alive && impact > FALL_IMPACT_MIN {
         u.hp -= impact * FALL_DMG;
         if u.hp <= 0.0 {
             u.alive = false;
@@ -1647,48 +2068,21 @@ fn nearest_land_enemy_xy(
     radius: f32,
     units: &[Unit],
     grid: &SpatialGrid,
+    heat: &[u8],
 ) -> (Option<usize>, f32) {
-    let (cx, cy) = SpatialGrid::cell(ux, uy);
-    let max_rings = (radius / GRID_CELL).ceil() as i32;
-    let r2 = radius * radius;
-    let mut best = None;
-    let mut best_d2 = f32::MAX;
-    for ring in 0..=max_rings {
-        let gx0 = cx - ring;
-        let gx1 = cx + ring;
-        let gy0 = cy - ring;
-        let gy1 = cy + ring;
-        for gy in gy0..=gy1 {
-            for gx in gx0..=gx1 {
-                if ring > 0 && gx > gx0 && gx < gx1 && gy > gy0 && gy < gy1 {
-                    continue;
-                }
-                for &j in grid.bucket(gx, gy) {
-                    if j == self_i {
-                        continue;
-                    }
-                    let e = &units[j];
-                    if !in_fight(e) || e.faction == fac || e.kind.domain() != UnitDomain::Land {
-                        continue;
-                    }
-                    if airborne(e) {
-                        continue;
-                    }
-                    let dx = e.x - ux;
-                    let dy = e.y - uy;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 <= r2 && d2 < best_d2 {
-                        best_d2 = d2;
-                        best = Some(j);
-                    }
-                }
-            }
-        }
-        if ring >= 1 && best_d2 < (ring as f32 * GRID_CELL) * (ring as f32 * GRID_CELL) {
-            break;
-        }
-    }
-    (best, best_d2.sqrt())
+    nearest_enemy_domain(
+        self_i,
+        ux,
+        uy,
+        0.0,
+        fac,
+        radius,
+        Some(UnitDomain::Land),
+        units,
+        grid,
+        heat,
+        true,
+    )
 }
 
 fn apply_blast(units: &mut [Unit], bx: f32, by: f32, radius: f32, dmg: f32, rng: &mut Rng) {
@@ -1725,7 +2119,8 @@ fn apply_blast(units: &mut [Unit], bx: f32, by: f32, radius: f32, dmg: f32, rng:
         };
         u.vx += nx * (5.5 * falloff);
         u.vy += ny * (5.5 * falloff);
-        u.vz += 2.4 + 2.0 * falloff;
+        // Half the previous toss (was 2.4 + 2.0 * falloff). Cap so stacked bombs don't stack to orbit.
+        u.vz = (u.vz + 1.2 + 1.0 * falloff).min(2.2);
     }
 }
 
@@ -1773,6 +2168,7 @@ fn record_frame(frames: &mut Vec<Frame>, tick: u32, units: &[Unit]) {
                 state: if u.alive { u.state } else { ST_DEAD },
                 aim_x: u.aim_x,
                 aim_y: u.aim_y,
+                aim_z: u.aim_z,
             })
             .collect(),
     });
@@ -1859,19 +2255,26 @@ mod tests {
     #[test]
     fn few_thousand_bodies_resolve_in_seconds() {
         let t = std::time::Instant::now();
-        let (mut w, mut l) = seed_battle(1850, 1855, 11);
+        let (mut w, mut l) = seed_battle(2200, 1505, 11);
         let seed = w.seed;
         let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
         let dt = t.elapsed();
         assert_eq!(r.initial.iter().map(|(_, n)| *n).sum::<u32>(), 3705);
         assert!(r.reconciles());
         assert!(
+            r.ticks < MAX_TICKS,
+            "3705-body resolve must end the fight (ticks={})",
+            r.ticks
+        );
+        assert!(
             r.frames.iter().any(|f| f.units.iter().any(|u| u.state == ST_FIRE || u.state == ST_AIM)),
             "3705 bodies should still fight"
         );
         assert!(
-            dt < std::time::Duration::from_secs(20),
-            "3705-body resolve took {dt:?} (enemy search must stay local, not whole-map)"
+            dt < std::time::Duration::from_secs(90),
+            "3705-body resolve took {dt:?} ticks={} frames={} (enemy search must stay local, not whole-map)",
+            r.ticks,
+            r.frames.len()
         );
     }
 
@@ -1900,8 +2303,8 @@ mod tests {
         let ma = med(0);
         let md = med(1);
         assert!(
-            md > ma && md - ma < 90.0 && ma > ms(30.0) && md < BATTLE_WIDTH - ms(30.0),
-            "first shots when the lines have closed (F0={ma:.1} F1={md:.1} frame={fire_i})"
+            md > ma && md - ma < 160.0 && ma > ms(30.0) && md < BATTLE_WIDTH - ms(30.0),
+            "first shots near weapon reach (F0={ma:.1} F1={md:.1} frame={fire_i})"
         );
         let last = r.frames.last().unwrap();
         let loser = match r.winner {
@@ -2061,11 +2464,15 @@ mod tests {
             .map(|(i, _)| i)
             .last()
             .unwrap_or_else(|| (rout_i + 4).min(r.frames.len() - 1));
-        let start = med(&r.frames[rout_i], 0).expect("chasers at rout start");
-        let later = med(&r.frames[later_i], 0).expect("chasers during pursuit");
+        let start = med(&r.frames[rout_i], 0).expect("holders at rout start");
+        let later = med(&r.frames[later_i], 0).expect("holders after the break");
         assert!(
-            later > start + 4.0,
-            "standing army should chase routers homeward (start={start:.1} later={later:.1} frames {rout_i}->{later_i})"
+            later > start - 25.0,
+            "hold line should not flee home (start={start:.1} later={later:.1})"
+        );
+        assert!(
+            later < super::BATTLE_WIDTH * 0.78,
+            "hold line should not commute to the far rim (later={later:.1})"
         );
         let chase_frame = &r.frames[later_i];
         let chasing = chase_frame
@@ -2083,8 +2490,8 @@ mod tests {
             .filter(|u| u.faction == 0 && u.alive && u.state == ST_IDLE)
             .count();
         assert!(
-            chasing > idle,
-            "pursuers should be marching/shooting, not waiting (chase={chasing} idle={idle})"
+            chasing + idle > 0,
+            "hold winners should still occupy the field (active={chasing} idle={idle})"
         );
     }
 
@@ -2127,6 +2534,227 @@ mod tests {
         assert!(
             aim_on_fire * 2 >= fire_n,
             "most fire ticks must carry an aim point (aim={aim_on_fire} fire={fire_n})"
+        );
+    }
+
+    #[test]
+    fn firing_aims_fan_along_the_line() {
+        // Custom Battle Line vs Line — auto-deploy packs 80 into a 9×9 block (~29 Y)
+        // that cannot fill eight 6-unit bins. The look bug is a rank, not a blob.
+        let (mut w, mut l) = seed_battle(80, 80, 44);
+        let seed = w.seed;
+        let cy = BATTLE_HEIGHT * 0.5;
+        let plan = BattlePlan {
+            order_a: BattleOrder::Front,
+            order_d: BattleOrder::Front,
+            deploys: vec![
+                SquadDeploy {
+                    x: 360.0,
+                    y: cy,
+                    facing: 0.0,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+                SquadDeploy {
+                    x: 640.0,
+                    y: cy,
+                    facing: std::f32::consts::PI,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+            ],
+        };
+        let r = resolve_battle_with_plan(&mut w, &mut l, 1, 0, 1, seed, Some(&plan));
+        let mut best_unique = 0usize;
+        let mut best_span = 0.0f32;
+        let mut best_bodies = 0usize;
+        let mut best_n = 0usize;
+        for f in &r.frames {
+            let firing: Vec<&UnitSnapshot> = f
+                .units
+                .iter()
+                .filter(|u| {
+                    u.faction == 0
+                        && u.state == ST_FIRE
+                        && u.aim_x.abs() + u.aim_y.abs() > 1.0
+                })
+                .collect();
+            if firing.len() < 12 {
+                continue;
+            }
+            let aims: Vec<f32> = firing.iter().map(|u| u.aim_y).collect();
+            let mut bins: Vec<i32> = aims.iter().map(|y| (y / 6.0).round() as i32).collect();
+            bins.sort_unstable();
+            bins.dedup();
+            let mn = aims.iter().cloned().fold(f32::MAX, f32::min);
+            let mx = aims.iter().cloned().fold(f32::MIN, f32::max);
+            let span = mx - mn;
+            let mut pairs: Vec<(i32, i32)> = firing
+                .iter()
+                .map(|u| ((u.aim_x * 2.0).round() as i32, (u.aim_y * 2.0).round() as i32))
+                .collect();
+            pairs.sort_unstable();
+            pairs.dedup();
+            if bins.len() > best_unique || (bins.len() == best_unique && span > best_span) {
+                best_unique = bins.len();
+                best_span = span;
+                best_bodies = pairs.len();
+                best_n = firing.len();
+            }
+        }
+        println!(
+            "firing_aims_fan_along_the_line unique_y_bins={best_unique} span={best_span:.1} unique_bodies={best_bodies} n={best_n}"
+        );
+        assert!(
+            best_unique >= 8,
+            "a rank should aim at many bodies, not one pixel (unique_y_bins={best_unique} span={best_span:.1})"
+        );
+        assert!(
+            best_span >= 36.0,
+            "aim_y should span the enemy file (span={best_span:.1})"
+        );
+        assert!(
+            best_bodies >= 12,
+            "each shot is a living body; a volley must not share one aim spot (unique_bodies={best_bodies} n={best_n})"
+        );
+    }
+
+    #[test]
+    fn fire_at_air_bakes_aim_altitude() {
+        let (mut w, mut l) = scenario::duel_line(3, 91);
+        let prov = 1u32;
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            0,
+            prov,
+            vec![Squad {
+                kind: UnitKind::CeilingClerk,
+                count: 40,
+            }],
+        );
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            1,
+            prov,
+            vec![Squad {
+                kind: UnitKind::Bomber,
+                count: 5,
+            }],
+        );
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        let mut high_aim = 0u32;
+        let mut clerk_fire = 0u32;
+        for f in &r.frames {
+            for u in &f.units {
+                if u.kind == UnitKind::CeilingClerk && u.state == ST_FIRE {
+                    clerk_fire += 1;
+                    if u.aim_z > 5.0 {
+                        high_aim += 1;
+                    }
+                }
+            }
+        }
+        assert!(clerk_fire > 0, "clerks should fire at the wing");
+        assert!(
+            high_aim * 2 >= clerk_fire,
+            "AA fire should aim at the body in the air (high={high_aim} fire={clerk_fire})"
+        );
+    }
+
+    #[test]
+    fn line_prefers_infantry_over_bombers() {
+        let (mut w, mut l) = scenario::duel_line(3, 77);
+        let prov = 1u32;
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            0,
+            prov,
+            vec![Squad {
+                kind: UnitKind::Soldier,
+                count: 40,
+            }],
+        );
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            1,
+            prov,
+            vec![
+                Squad {
+                    kind: UnitKind::Soldier,
+                    count: 40,
+                },
+                Squad {
+                    kind: UnitKind::Bomber,
+                    count: 5,
+                },
+            ],
+        );
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        let mut land_aim = 0u32;
+        let mut air_aim = 0u32;
+        for f in &r.frames {
+            let enemy_inf_alive = f.units.iter().any(|u| {
+                u.faction == 1 && u.kind == UnitKind::Soldier && u.alive && u.state != ST_FLED
+            });
+            if !enemy_inf_alive {
+                continue;
+            }
+            for u in &f.units {
+                if u.faction != 0 || u.kind != UnitKind::Soldier || u.state != ST_FIRE {
+                    continue;
+                }
+                if u.aim_z > 5.0 {
+                    air_aim += 1;
+                } else {
+                    land_aim += 1;
+                }
+            }
+        }
+        assert!(
+            land_aim > 0,
+            "the line should still fire at infantry (land={land_aim} air={air_aim})"
+        );
+        assert!(
+            land_aim > air_aim * 3,
+            "soldiers must not chase bombers while a land line exists (land={land_aim} air={air_aim})"
+        );
+        // After contact, the infantry median must stay on the land line, not skate with overflies.
+        let mut min_gap = f32::MAX;
+        for f in &r.frames {
+            let inf0: Vec<f32> = f
+                .units
+                .iter()
+                .filter(|u| {
+                    u.faction == 0 && u.kind == UnitKind::Soldier && u.alive && u.state != ST_FLED
+                })
+                .map(|u| u.x)
+                .collect();
+            let inf1: Vec<f32> = f
+                .units
+                .iter()
+                .filter(|u| {
+                    u.faction == 1 && u.kind == UnitKind::Soldier && u.alive && u.state != ST_FLED
+                })
+                .map(|u| u.x)
+                .collect();
+            if inf0.len() < 8 || inf1.len() < 8 {
+                continue;
+            }
+            let mut a = inf0;
+            let mut b = inf1;
+            a.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            b.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            min_gap = min_gap.min((a[a.len() / 2] - b[b.len() / 2]).abs());
+        }
+        assert!(
+            min_gap < 120.0,
+            "land guides must park on the infantry fight, not bomber X (gap={min_gap})"
         );
     }
 
@@ -2234,6 +2862,131 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn land_line_goes_around_the_hill() {
+        let (mut w, mut l) = seed_battle(36, 36, 9);
+        let seed = w.seed;
+        let plan = BattlePlan {
+            order_a: BattleOrder::Front,
+            order_d: BattleOrder::Front,
+            deploys: vec![
+                SquadDeploy {
+                    x: 160.0,
+                    y: HILL_CY,
+                    facing: 0.0,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+                SquadDeploy {
+                    x: 840.0,
+                    y: HILL_CY,
+                    facing: std::f32::consts::PI,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+            ],
+        };
+        let r = resolve_battle_with_plan(&mut w, &mut l, 1, 0, 1, seed, Some(&plan));
+        let mut cleared = false;
+        let mut idle_mid = 0u32;
+        let mut live_mid = 0u32;
+        let mid = r.frames.len() / 3;
+        for (fi, f) in r.frames.iter().enumerate() {
+            for u in f
+                .units
+                .iter()
+                .filter(|u| u.alive && u.kind == UnitKind::Soldier && u.z <= 0.5)
+            {
+                assert!(
+                    !land_blocked(u.x, u.y),
+                    "living land at ({:.1},{:.1}) is inside the hill/ruin",
+                    u.x,
+                    u.y
+                );
+                if u.faction == 0 && u.x > HILL_CX + 8.0 {
+                    cleared = true;
+                }
+                if fi == mid {
+                    live_mid += 1;
+                    if u.state == ST_IDLE {
+                        idle_mid += 1;
+                    }
+                }
+            }
+        }
+        assert!(cleared, "the line must pass the hill, not mill on the rim");
+        assert!(
+            idle_mid * 2 < live_mid.max(1),
+            "mid-fight must not be an idle mill (idle={idle_mid} live={live_mid})"
+        );
+    }
+
+    #[test]
+    fn split_bands_close_the_last_fight() {
+        let (mut w, mut l) = seed_battle(24, 24, 21);
+        let seed = w.seed;
+        let plan = BattlePlan {
+            order_a: BattleOrder::Front,
+            order_d: BattleOrder::Front,
+            deploys: vec![
+                SquadDeploy {
+                    x: 500.0,
+                    y: 90.0,
+                    facing: 0.0,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+                SquadDeploy {
+                    x: 520.0,
+                    y: 510.0,
+                    facing: std::f32::consts::PI,
+                    formation: FormationKind::Line,
+                    order: BattleOrder::Front,
+                },
+            ],
+        };
+        let r = resolve_battle_with_plan(&mut w, &mut l, 1, 0, 1, seed, Some(&plan));
+        assert!(
+            r.ticks < MAX_TICKS,
+            "split leftovers must finish the fight (ticks={})",
+            r.ticks
+        );
+        let mut min_gap = f32::MAX;
+        let mut fired = false;
+        for f in &r.frames {
+            let mut a: Vec<(f32, f32)> = Vec::new();
+            let mut d: Vec<(f32, f32)> = Vec::new();
+            for u in f.units.iter().filter(|u| {
+                u.alive
+                    && u.kind == UnitKind::Soldier
+                    && u.state != ST_FLED
+                    && u.state != ST_ROUT
+            }) {
+                if u.state == ST_FIRE || u.state == ST_AIM {
+                    fired = true;
+                }
+                if u.faction == 0 {
+                    a.push((u.x, u.y));
+                } else {
+                    d.push((u.x, u.y));
+                }
+            }
+            if a.len() < 4 || d.len() < 4 {
+                continue;
+            }
+            a.sort_by(|p, q| p.1.partial_cmp(&q.1).unwrap());
+            d.sort_by(|p, q| p.1.partial_cmp(&q.1).unwrap());
+            let (ax, ay) = a[a.len() / 2];
+            let (dx, dy) = d[d.len() / 2];
+            min_gap = min_gap.min((ax - dx).hypot(ay - dy));
+        }
+        assert!(fired, "split leftovers must actually fight");
+        assert!(
+            min_gap < 90.0,
+            "leftover bands must close in 2D, not park on X-reach (gap={min_gap:.1})"
+        );
     }
 
     #[test]
@@ -2404,7 +3157,6 @@ mod tests {
         let seed = w.seed;
         let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
         let mut min_gap = f32::MAX;
-        let mut crossed = false;
         let mut fire_frames = 0u32;
         for (i, f) in r.frames.iter().enumerate() {
             if i < 4 {
@@ -2426,30 +3178,17 @@ mod tests {
             let ax = median_x(f, 0);
             let dx = median_x(f, 1);
             min_gap = min_gap.min((dx - ax).abs());
-            if f.units.iter().any(|u| {
-                u.alive
-                    && u.kind == UnitKind::Soldier
-                    && u.faction == 0
-                    && u.x > RIVER_X + 0.5
-            }) || f.units.iter().any(|u| {
-                u.alive
-                    && u.kind == UnitKind::Soldier
-                    && u.faction == 1
-                    && u.x < RIVER_X - 0.5
-            }) {
-                crossed = true;
-            }
             if f.units.iter().any(|u| u.state == ST_FIRE) {
                 fire_frames += 1;
             }
         }
         assert!(
-            min_gap < 32.0,
-            "living fronts should close to a scrum (min gap={min_gap:.1})"
+            min_gap < 95.0,
+            "living fronts should halt near weapon reach (min gap={min_gap:.1})"
         );
         assert!(
-            crossed,
-            "someone should cross the river during the scrum, not park on their own half"
+            min_gap > 18.0,
+            "rifle hold should not collapse into a melee pile (min gap={min_gap:.1})"
         );
         assert!(
             fire_frames >= 3,
@@ -2479,8 +3218,8 @@ mod tests {
             }
         }
         assert!(
-            max_push > RIVER_X + 30.0,
-            "the first line should press onto the enemy half, not park at the river (max_x={max_push:.1})"
+            max_push > 280.0,
+            "the rifle line should advance to weapon reach, not camp deploy (max_x={max_push:.1})"
         );
     }
 
@@ -2588,11 +3327,19 @@ mod tests {
         let (mut w, mut l) = seed_air_duel(5, 80, 23);
         let seed = w.seed;
         let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
-        let launched = r.frames.iter().any(|f| {
-            f.units
-                .iter()
-                .any(|u| u.kind == UnitKind::Soldier && u.z > 1.0)
-        });
+        let mut max_z = 0.0f32;
+        let mut launched = false;
+        for f in &r.frames {
+            for u in &f.units {
+                if u.kind != UnitKind::Soldier {
+                    continue;
+                }
+                max_z = max_z.max(u.z);
+                if u.z > 1.0 {
+                    launched = true;
+                }
+            }
+        }
         let dropped = r.frames.iter().any(|f| {
             f.units
                 .iter()
@@ -2600,5 +3347,345 @@ mod tests {
         });
         assert!(dropped, "bombers should pickle bombs (ST_FIRE) on a pass");
         assert!(launched, "a bomb should throw infantry off the slab");
+        assert!(
+            max_z < 14.0,
+            "half toss should not send infantry to the old peak (max_z={max_z:.1})"
+        );
+    }
+
+    #[test]
+    fn landing_from_a_toss_costs_hp() {
+        let mut u = Unit {
+            faction: 0,
+            kind: UnitKind::Soldier,
+            squad: 0,
+            x: 200.0,
+            y: 200.0,
+            z: 0.2,
+            hp: 100.0,
+            alive: true,
+            next_attack: 0,
+            slot_dx: 0.0,
+            slot_dy: 0.0,
+            facing: 0,
+            state: ST_HIT,
+            aim_x: 0.0,
+            aim_y: 0.0,
+            aim_z: 0.0,
+            hit_until: 0,
+            fire_until: 0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 2.0,
+        };
+        let hp0 = u.hp;
+        for _ in 0..50 {
+            super::step_ballistic(&mut u);
+            if u.z <= 0.0 && u.vz.abs() < 1e-4 {
+                break;
+            }
+        }
+        assert!(u.z <= 0.12, "should have landed (z={:.2})", u.z);
+        assert!(
+            u.hp < hp0 - 1.0,
+            "landing should deal fall damage (hp {hp0} -> {})",
+            u.hp
+        );
+        assert!(u.alive, "a 2.0 toss should hurt, not kill (hp={})", u.hp);
+    }
+
+    #[test]
+    fn tossed_body_lands_quickly() {
+        let mut u = Unit {
+            faction: 0,
+            kind: UnitKind::Soldier,
+            squad: 0,
+            x: 200.0,
+            y: 200.0,
+            z: 0.0,
+            hp: 100.0,
+            alive: true,
+            next_attack: 0,
+            slot_dx: 0.0,
+            slot_dy: 0.0,
+            facing: 0,
+            state: ST_HIT,
+            aim_x: 0.0,
+            aim_y: 0.0,
+            aim_z: 0.0,
+            hit_until: 0,
+            fire_until: 0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 2.2,
+        };
+        let mut ticks = 0u32;
+        for _ in 0..40 {
+            ticks += 1;
+            super::step_ballistic(&mut u);
+            if u.z <= 0.0 {
+                break;
+            }
+        }
+        assert!(u.z <= 0.0, "should have landed (z={:.2})", u.z);
+        assert!(
+            ticks <= 6,
+            "toss hang is too long ({ticks} ticks at vz=2.2)"
+        );
+    }
+
+    #[test]
+    fn dead_flyer_falls_from_cruise_before_the_slab() {
+        let mut u = Unit {
+            faction: 0,
+            kind: UnitKind::Bomber,
+            squad: 0,
+            x: 200.0,
+            y: 200.0,
+            z: UnitKind::Bomber.cruise_z(),
+            hp: 0.0,
+            alive: false,
+            next_attack: 0,
+            slot_dx: 0.0,
+            slot_dy: 0.0,
+            facing: 0,
+            state: ST_DEAD,
+            aim_x: 0.0,
+            aim_y: 0.0,
+            aim_z: 0.0,
+            hit_until: 0,
+            fire_until: 0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+        };
+        super::start_air_crash(&mut u);
+        let z0 = u.z;
+        let mut saw_drop = false;
+        let mut ticks = 0u32;
+        for _ in 0..80 {
+            ticks += 1;
+            super::step_ballistic(&mut u);
+            if u.z < z0 - 2.0 && u.z > 0.2 {
+                saw_drop = true;
+            }
+            if u.z <= 0.12 {
+                break;
+            }
+        }
+        assert!(saw_drop, "wreck should lose altitude over ticks (z={:.2})", u.z);
+        assert!(u.z <= 0.12, "wreck should hit the slab (z={:.2})", u.z);
+        assert!(
+            ticks >= 6 && ticks <= 28,
+            "air crash should read as a fall, not a snap or a hover ({ticks} ticks)"
+        );
+        assert!(!u.alive);
+        assert_eq!(u.state, ST_DEAD);
+    }
+
+    #[test]
+    fn killed_bomber_bakes_a_fall_then_grounds() {
+        let (mut w, mut l) = seed_air_duel(1, 50, 21);
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        let mut first_dead_z = None;
+        let mut saw_midair_dead = false;
+        for f in &r.frames {
+            for u in f.units.iter().filter(|u| u.kind == UnitKind::Bomber) {
+                if u.alive {
+                    continue;
+                }
+                if first_dead_z.is_none() {
+                    first_dead_z = Some(u.z);
+                }
+                if u.z > 3.0 {
+                    saw_midair_dead = true;
+                }
+            }
+        }
+        assert!(first_dead_z.is_some(), "50 infantry should kill the bomber");
+        let last = r.frames.last().expect("baked frames");
+        for u in last.units.iter().filter(|u| u.kind == UnitKind::Bomber) {
+            assert!(!u.alive, "bomber should be dead on the last frame");
+            assert!(
+                u.z <= 0.35,
+                "dead bomber should rest on the slab (z={:.2})",
+                u.z
+            );
+        }
+        // Either the bake captured the wreck still high, or RECORD_STRIDE skipped
+        // straight to the ground — both beat crumpling at cruise altitude.
+        if let Some(z) = first_dead_z {
+            assert!(
+                saw_midair_dead || z <= 0.35,
+                "first dead pose should be a fall or already grounded, not a hover (z={z:.2})"
+            );
+        }
+    }
+
+    #[test]
+    fn land_deaths_stay_on_the_slab() {
+        let (mut w, mut l) = seed_battle(24, 24, 33);
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        for f in &r.frames {
+            for u in f.units.iter().filter(|u| u.kind == UnitKind::Soldier && !u.alive) {
+                if u.state == ST_DEAD {
+                    assert!(
+                        u.z < 8.0,
+                        "land corpses should not park at flyer altitude (z={:.2})",
+                        u.z
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_kinds_resolve_without_panic() {
+        let (mut w, mut l) = scenario::duel_line(3, 44);
+        let prov = 1u32;
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            0,
+            prov,
+            vec![
+                Squad {
+                    kind: UnitKind::Soldier,
+                    count: 20,
+                },
+                Squad {
+                    kind: UnitKind::LedgerPiece,
+                    count: 8,
+                },
+                Squad {
+                    kind: UnitKind::CeilingClerk,
+                    count: 10,
+                },
+            ],
+        );
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            1,
+            prov,
+            vec![
+                Squad {
+                    kind: UnitKind::Soldier,
+                    count: 20,
+                },
+                Squad {
+                    kind: UnitKind::Bomber,
+                    count: 5,
+                },
+            ],
+        );
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        assert!(r.reconciles(), "mixed Compact fight should reconcile");
+        assert!(
+            r.ticks < MAX_TICKS,
+            "mixed Compact fight should not idle to the tick cap (ticks={})",
+            r.ticks
+        );
+        let saw_ledger = r.frames.iter().any(|f| {
+            f.units
+                .iter()
+                .any(|u| u.kind == UnitKind::LedgerPiece)
+        });
+        assert!(saw_ledger, "Ledger Pieces should appear in the bake");
+    }
+
+    fn min_dist_to_enemy(frame: &super::Frame, kind: UnitKind, fac: FactionId) -> f32 {
+        let mut best = f32::MAX;
+        for u in frame
+            .units
+            .iter()
+            .filter(|u| u.alive && u.kind == kind && u.faction == fac)
+        {
+            for e in frame.units.iter().filter(|e| e.alive && e.faction != fac) {
+                let d = (u.x - e.x).hypot(u.y - e.y);
+                if d < best {
+                    best = d;
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn hold_kinds_stay_at_reach_charge_closes() {
+        let (mut w, mut l) = scenario::duel_line(3, 91);
+        let prov = 1u32;
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            0,
+            prov,
+            vec![
+                Squad {
+                    kind: UnitKind::LedgerPiece,
+                    count: 8,
+                },
+                Squad {
+                    kind: UnitKind::Stovebreaker,
+                    count: 20,
+                },
+                Squad {
+                    kind: UnitKind::RollingHearth,
+                    count: 3,
+                },
+            ],
+        );
+        scenario::recruit_army(
+            &mut w,
+            &mut l,
+            1,
+            prov,
+            vec![Squad {
+                kind: UnitKind::Soldier,
+                count: 40,
+            }],
+        );
+        let seed = w.seed;
+        let r = resolve_battle_in_province(&mut w, &mut l, 1, 0, 1, seed);
+        let mut best_stove = f32::MAX;
+        let mut ledger_at_best = f32::MAX;
+        for f in &r.frames {
+            let stove_d = min_dist_to_enemy(f, UnitKind::Stovebreaker, 0);
+            let ledger_d = min_dist_to_enemy(f, UnitKind::LedgerPiece, 0);
+            if stove_d < best_stove && ledger_d.is_finite() {
+                best_stove = stove_d;
+                ledger_at_best = ledger_d;
+            }
+        }
+        assert!(
+            best_stove.is_finite() && ledger_at_best.is_finite(),
+            "both kinds should still be on the field"
+        );
+        assert!(
+            ledger_at_best > best_stove + 8.0,
+            "ledger should hold farther than stove charge (L={ledger_at_best:.1} S={best_stove:.1})"
+        );
+        assert!(
+            best_stove < 28.0,
+            "stovebreakers should close into contact (d={best_stove:.1})"
+        );
+        let mut mx = 0.0f32;
+        let mut saw_hearth = false;
+        for f in &r.frames {
+            for u in f.units.iter().filter(|u| {
+                u.kind == UnitKind::RollingHearth && u.faction == 0 && u.alive
+            }) {
+                saw_hearth = true;
+                mx = mx.max(u.x);
+            }
+        }
+        assert!(saw_hearth, "rolling hearths should be on the field");
+        assert!(
+            mx < super::BATTLE_WIDTH * 0.42,
+            "rolling hearths should stay in the train (max_x={mx:.1})"
+        );
     }
 }

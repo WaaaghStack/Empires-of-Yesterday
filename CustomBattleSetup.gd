@@ -8,6 +8,8 @@ signal fight_requested(params: Dictionary)
 signal cancelled
 
 const UiTheme := preload("res://GameTheme.gd")
+const ArmyTpl := preload("res://ArmyTemplates.gd")
+const Kinds := preload("res://BattleKinds.gd")
 
 const BW := 1000.0
 const BH := 600.0
@@ -22,7 +24,7 @@ const MAX_INF := 50
 const MAX_WINGS := 16
 const MAX_UNITS := 10000
 const INF_N := 100
-const WING_N := 5
+const DEFAULT_ARMY: Array = [0, 0, 2, 4, 3, 5, 6, 7, 1]
 
 const FORM_LINE := 0
 const FORM_DOUBLE := 1
@@ -46,10 +48,14 @@ var _list1: VBoxContainer
 var _scroll0: ScrollContainer
 var _scroll1: ScrollContainer
 var _form_btns: Array = []
+var _army_btns: Array = [[], []]
+var _army_tpl: Array = [-1, -1]
 var _seed_spin: SpinBox
 var _order0_opt: OptionButton
 var _order1_opt: OptionButton
 var _sel_order_opt: OptionButton
+var _busy: bool = false
+var _wait: Dictionary = {}
 
 var _boxing: bool = false
 var _box_a := Vector2.ZERO
@@ -94,7 +100,7 @@ func _build() -> void:
 	margin.add_child(vb)
 
 	vb.add_child(_build_chrome())
-	vb.add_child(_build_tools())
+	vb.add_child(_build_tool_stack())
 
 	var body := HBoxContainer.new()
 	body.add_theme_constant_override("separation", 12)
@@ -148,17 +154,47 @@ func _build_chrome() -> HBoxContainer:
 	return row
 
 
-func _build_tools() -> ScrollContainer:
+func _tool_scroll(row: HBoxContainer) -> ScrollContainer:
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.custom_minimum_size.y = 52
+	scroll.custom_minimum_size.y = 44
 	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	scroll.follow_focus = true
+	scroll.add_child(row)
+	return scroll
+
+
+func _build_tool_stack() -> VBoxContainer:
+	var wrap := VBoxContainer.new()
+	wrap.add_theme_constant_override("separation", 6)
+	wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wrap.add_child(_tool_scroll(_build_regiment_row()))
+	wrap.add_child(_tool_scroll(_build_army_row(0)))
+	wrap.add_child(_tool_scroll(_build_army_row(1)))
+	return wrap
+
+
+func _build_army_row(fac: int) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var lb := Label.new()
+	lb.text = "Blue army" if fac == 0 else "Red army"
+	row.add_child(lb)
+	_army_btns[fac] = []
+	for i in ArmyTpl.TPL_NAMES.size():
+		var b := Button.new()
+		b.text = String(ArmyTpl.TPL_NAMES[i])
+		b.custom_minimum_size = Vector2(92, 36)
+		b.pressed.connect(_on_army_tpl.bind(fac, i))
+		row.add_child(b)
+		_army_btns[fac].append(b)
+	return row
+
+
+func _build_regiment_row() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
-	scroll.add_child(row)
-
 	var forms := ["Line", "Double", "Column", "Wedge"]
 	for i in forms.size():
 		var b := Button.new()
@@ -191,7 +227,7 @@ func _build_tools() -> ScrollContainer:
 	row.add_child(reroll)
 
 	var inf_lbl := Label.new()
-	inf_lbl.text = "Infantry size"
+	inf_lbl.text = "Hearthline"
 	row.add_child(inf_lbl)
 	_inf_spin = SpinBox.new()
 	_inf_spin.min_value = 20
@@ -210,7 +246,7 @@ func _build_tools() -> ScrollContainer:
 	UiTheme.apply_ghost_button(stress)
 	stress.pressed.connect(_fill_10k)
 	row.add_child(stress)
-	return scroll
+	return row
 
 
 func _order_box(label: String, blue: bool) -> HBoxContainer:
@@ -307,7 +343,7 @@ func _set_unit_order(i: int, o: int) -> void:
 
 func _make_side_column(title: String, fac: int) -> PanelContainer:
 	var wrap := PanelContainer.new()
-	wrap.custom_minimum_size = Vector2(248, 0)
+	wrap.custom_minimum_size = Vector2(268, 0)
 	wrap.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	wrap.clip_contents = true
 	wrap.add_theme_stylebox_override(
@@ -339,20 +375,20 @@ func _make_side_column(title: String, fac: int) -> PanelContainer:
 	else:
 		_list1 = list
 		_scroll1 = scroll
-	var add_row := HBoxContainer.new()
-	var inf := Button.new()
-	inf.text = "+ Infantry"
-	inf.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UiTheme.apply_ghost_button(inf)
-	inf.pressed.connect(func(): _add_card(fac, 0))
-	add_row.add_child(inf)
-	var wing := Button.new()
-	wing.text = "+ Wing"
-	wing.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	UiTheme.apply_ghost_button(wing)
-	wing.pressed.connect(func(): _add_card(fac, 1))
-	add_row.add_child(wing)
-	vb.add_child(add_row)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 4)
+	grid.add_theme_constant_override("v_separation", 4)
+	for k in Kinds.COUNT:
+		var b := Button.new()
+		b.text = "+ " + Kinds.short_name(k)
+		b.custom_minimum_size = Vector2(0, 30)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.add_theme_font_size_override("font_size", 13)
+		UiTheme.apply_ghost_button(b)
+		b.pressed.connect(_add_card.bind(fac, k))
+		grid.add_child(b)
+	vb.add_child(grid)
 	return wrap
 
 
@@ -360,18 +396,30 @@ func _seed_default_armies() -> void:
 	_units.clear()
 	_sel.clear()
 	_next_id = 1
-	for i in 5:
-		_add_card(0, 0)
-	_add_card(0, 1)
-	for i in 4:
-		_add_card(1, 0)
-	_add_card(1, 1)
+	for k in DEFAULT_ARMY:
+		_add_card(0, int(k), false)
+	for k in DEFAULT_ARMY:
+		_add_card(1, int(k), false)
+	_apply_army_template(0, ArmyTpl.TPL_BATTLE_LINE, false)
+	_apply_army_template(1, ArmyTpl.TPL_BATTLE_LINE, false)
 
 
-func _count_kind(fac: int, kind: int) -> int:
+func _regiment_n(kind: int) -> int:
+	return Kinds.regiment_size(kind, _inf_n)
+
+
+func _count_air(fac: int) -> int:
 	var n := 0
 	for u in _units:
-		if int(u.fac) == fac and int(u.kind) == kind:
+		if int(u.fac) == fac and Kinds.is_air(int(u.kind)):
+			n += 1
+	return n
+
+
+func _count_land(fac: int) -> int:
+	var n := 0
+	for u in _units:
+		if int(u.fac) == fac and not Kinds.is_air(int(u.kind)):
 			n += 1
 	return n
 
@@ -379,16 +427,18 @@ func _count_kind(fac: int, kind: int) -> int:
 func _bodies() -> int:
 	var n := 0
 	for u in _units:
-		n += WING_N if int(u.kind) == 1 else _inf_n
+		n += _regiment_n(int(u.kind))
 	return n
 
 
 func _add_card(fac: int, kind: int, refresh: bool = true) -> void:
-	if kind == 0 and _count_kind(fac, 0) >= MAX_INF:
+	kind = Kinds.clamp_kind(kind)
+	if Kinds.is_air(kind):
+		if _count_air(fac) >= MAX_WINGS:
+			return
+	elif _count_land(fac) >= MAX_INF:
 		return
-	if kind == 1 and _count_kind(fac, 1) >= MAX_WINGS:
-		return
-	var add := WING_N if kind == 1 else _inf_n
+	var add := _regiment_n(kind)
 	if _bodies() + add > MAX_UNITS:
 		return
 	var p := _auto_slot(fac, kind)
@@ -421,6 +471,8 @@ func _fill_10k() -> void:
 		_add_card(0, 0, false)
 	for i in 50:
 		_add_card(1, 0, false)
+	_apply_army_template(0, ArmyTpl.TPL_BATTLE_LINE, false)
+	_apply_army_template(1, ArmyTpl.TPL_BATTLE_LINE, false)
 	_refresh()
 	_scroll_side_end(0)
 	_scroll_side_end(1)
@@ -432,14 +484,58 @@ func _scroll_side_end(fac: int) -> void:
 
 
 func _auto_slot(fac: int, kind: int) -> Vector2:
-	var x := 170.0 if fac == 0 else 830.0
-	if kind == 1:
-		x = 120.0 if fac == 0 else 880.0
-	var n := _count_kind(fac, kind)
-	var cap := MAX_INF if kind == 0 else MAX_WINGS
-	var t := float(n) / float(maxi(cap - 1, 1))
-	var y := 40.0 + t * (BH - 80.0)
+	var t := 0.36
+	match Kinds.rank(kind):
+		Kinds.RANK_SCREEN:
+			t = 0.48
+		Kinds.RANK_OVERWATCH:
+			t = 0.30
+		Kinds.RANK_BATTERY:
+			t = 0.22
+		Kinds.RANK_TRAIN:
+			t = 0.12
+		Kinds.RANK_AIR:
+			t = 0.10
+		_:
+			t = 0.36
+	var x := ArmyTpl._x_along(fac, t)
+	var n := 0
+	var rnk := Kinds.rank(kind)
+	for u in _units:
+		if int(u.fac) == fac and Kinds.rank(int(u.kind)) == rnk:
+			n += 1
+	var y := 50.0 + float(n) * 36.0
+	y = clampf(y, 40.0, BH - 40.0)
 	return _clamp_legal(fac, Vector2(x, y))
+
+
+func _on_army_tpl(fac: int, template: int) -> void:
+	_apply_army_template(fac, template)
+
+
+func _apply_army_template(fac: int, template: int, refresh: bool = true) -> void:
+	var idxs: Array = []
+	var kinds: Array = []
+	for i in _units.size():
+		if int(_units[i].fac) == fac:
+			idxs.append(i)
+			kinds.append(int(_units[i].kind))
+	if idxs.is_empty():
+		return
+	var placed: Array = ArmyTpl.layout(fac, template, kinds)
+	for k in idxs.size():
+		var u: Dictionary = _units[idxs[k]]
+		var p: Dictionary = placed[k]
+		u.x = float(p.x)
+		u.y = float(p.y)
+		u.facing = float(p.facing)
+		u.formation = int(p.formation)
+		u.order = int(p.order)
+		_units[idxs[k]] = u
+	_army_tpl[fac] = template
+	_sel.clear()
+	if refresh:
+		_refresh()
 
 
 func _on_form_pressed(i: int) -> void:
@@ -462,14 +558,20 @@ func _spread_selection() -> void:
 
 
 func _on_fight() -> void:
-	if not _can_fight():
+	if _busy or not _can_fight():
 		return
+	_busy = true
+	_fight_btn.disabled = true
+	_fight_btn.text = "Resolving…"
+	_wait = UiTheme.attach_resolve_wait(self, _bodies())
+	await get_tree().process_frame
+	await get_tree().process_frame
 	var roster: Array = []
 	for u in _units:
 		roster.append({
 			"faction": int(u.fac),
 			"kind": int(u.kind),
-			"count": WING_N if int(u.kind) == 1 else _inf_n,
+			"count": _regiment_n(int(u.kind)),
 			"x": float(u.x),
 			"y": float(u.y),
 			"facing": float(u.facing),
@@ -501,7 +603,7 @@ func _can_fight() -> bool:
 
 func _is_legal(u: Dictionary) -> bool:
 	var p := Vector2(float(u.x), float(u.y))
-	if land_blocked(p.x, p.y) and int(u.kind) == 0:
+	if land_blocked(p.x, p.y) and not Kinds.is_air(int(u.kind)):
 		return false
 	if int(u.fac) == 0:
 		return p.x < BW * 0.5 - 10.0 and p.x > 20.0
@@ -548,17 +650,28 @@ func _refresh() -> void:
 			UiTheme.apply_latched_button(_form_btns[i])
 		else:
 			UiTheme.apply_ghost_button(_form_btns[i])
+	for fac in 2:
+		var btns: Array = _army_btns[fac]
+		for i in btns.size():
+			if int(_army_tpl[fac]) == i:
+				UiTheme.apply_latched_button(btns[i])
+			else:
+				UiTheme.apply_ghost_button(btns[i])
 	var ok := _can_fight()
-	_fight_btn.disabled = not ok
-	_fight_btn.text = "Fight! (%d)" % _bodies()
+	if _busy:
+		_fight_btn.disabled = true
+		_fight_btn.text = "Resolving…"
+	else:
+		_fight_btn.disabled = not ok
+		_fight_btn.text = "Fight! (%d)" % _bodies()
 	_sync_sel_order_opt()
 	var n := _bodies()
 	if n > MAX_UNITS:
-		_hint.text = "Over the 10,000 cap (%d). Lower infantry size or remove cards." % n
+		_hint.text = "Over the 10,000 cap (%d). Lower Hearthline size or remove cards." % n
 	elif ok:
-		_hint.text = "Select a regiment, then set Selected order (Front / left / right / rear). Hold right-click and drag for frontage. 10k stress fills the field. Map is 5× the old slab."
+		_hint.text = "Eight Compact jobs. Hearthline size is the spinbox; other cards have fixed bodies. Army buttons place by rank. 10k stress is Hearthline only."
 	else:
-		_hint.text = "Fight stays off until every unit sits on its own half, clear of the hill. Add cards, then place them."
+		_hint.text = "Fight stays off until every unit sits on its own half, clear of the hill. Add cards from the Compact palette, then place them."
 	if _field:
 		_field.queue_redraw()
 
@@ -575,7 +688,7 @@ func _rebuild_list(list: VBoxContainer, fac: int) -> void:
 			continue
 		var row := HBoxContainer.new()
 		var lab := Button.new()
-		var kind_s := ("Infantry %d" % _inf_n) if int(u.kind) == 0 else ("Bomber wing %d" % WING_N)
+		var kind_s := "%s %d" % [Kinds.short_name(int(u.kind)), _regiment_n(int(u.kind))]
 		lab.text = kind_s
 		lab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		if _sel.has(i):
@@ -820,7 +933,15 @@ func _on_field_draw() -> void:
 		var col := Color(0.35, 0.72, 1.0) if int(u.fac) == 0 else Color(0.92, 0.32, 0.34)
 		if _sel.has(i):
 			_field.draw_circle(p, 9.0, Color(1, 0.92, 0.45, 0.85))
-		_field.draw_circle(p, 6.0 if int(u.kind) == 0 else 8.0, col)
+		var rad := 6.0
+		var knd := int(u.kind)
+		if Kinds.is_air(knd):
+			rad = 8.0
+		elif knd == Kinds.LEDGER_PIECES:
+			rad = 7.0
+		elif knd == Kinds.ROLLING_HEARTHS:
+			rad = 8.5
+		_field.draw_circle(p, rad, col)
 		var face := Vector2.from_angle(float(u.facing))
 		var tip := p + Vector2(face.x, face.y) * 12.0
 		_field.draw_line(p, tip, Color(1, 1, 1, 0.8), 2.0)

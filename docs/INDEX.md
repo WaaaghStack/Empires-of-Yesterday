@@ -16,7 +16,7 @@ World Conquest is the only game mode: fluid territory conquest on a 360×180 Ear
 | [REQUEST_SURGE_THEATERS_PAINT.md](REQUEST_SURGE_THEATERS_PAINT.md) | Outpost Pump/Drain/Surge, named theaters, area paint |
 | [REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md](REQUEST_TWO_WORLDS_TRANSACTION_ENGINE.md) | **Exploratory** — turn-based Total War × Dominions 6 reframe: two-worlds transaction engine, dominion tide, auto-resolved HD-2D battles |
 | [REQUEST_BATTLE_VISUAL_READ.md](REQUEST_BATTLE_VISUAL_READ.md) | Two Worlds HD-2D battles must **look like a fight** (form up, halt, fire, hold the field) — visual realism, not sim perfection |
-| [LORE.md](LORE.md) | **Exploratory** — interplanetary setting bible (species, end-states, characters). Not a live World Conquest lock. In-game: Main Menu → **Lore** |
+| [LORE.md](LORE.md) | **Exploratory** — interplanetary setting bible (species, end-states, characters, Hearthkin roster, unit cards). Not a live World Conquest lock. In-game: Main Menu → **Lore** |
 
 ## Architecture snapshot (live Play)
 

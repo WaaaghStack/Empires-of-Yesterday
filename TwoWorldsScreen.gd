@@ -6,7 +6,7 @@ extends Control
 ## resolve one WEGO turn, watch auto-resolved battles play back as baked-frame replays, and reach a
 ## victory. Presentation-only: all sim truth comes from the engine's wide-row report.
 
-const FRAME_DT := 0.06  # seconds per recorded battle frame during playback
+const FRAME_DT := 1.8  # BattlePacing.BATTLE_WATCH_SEC_PER_FRAME — 1x watch clock
 
 var _engine: Object = null
 var _seed: int = 12345

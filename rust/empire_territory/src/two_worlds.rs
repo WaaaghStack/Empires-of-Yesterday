@@ -13,6 +13,7 @@ use eon_engine::battle::{
     FormationKind, SquadDeploy, BATTLE_HEIGHT, BATTLE_WIDTH, HILL_BLOCK_R, HILL_CX, HILL_CY, HILL_R,
     MAX_BATTLE_UNITS, RUIN_CX, RUIN_CY, RUIN_R, RIVER_X,
 };
+use eon_engine::watch;
 use eon_engine::model::{FactionId, GemPath, Squad, UnitKind};
 use eon_engine::{
     run_ai_vs_ai_batch, run_headless_demo, scenario, turn::run_turn, Ledger, Outcome, TurnReport,
@@ -32,6 +33,10 @@ pub struct TwoWorldsEngine {
     last_outcome: String,
     /// Battles available for the viewer — set from the last turn or a custom battle.
     battles: Vec<BattleReport>,
+    /// Cached watch pose layout/buffers (kind×faction MultiMesh). Rebuilt when the battle changes.
+    watch_index: i64,
+    watch_layout: Option<eon_engine::watch::WatchLayout>,
+    watch_bufs: [Vec<f32>; eon_engine::watch::BUCKETS],
 }
 
 #[godot_api]
@@ -164,6 +169,7 @@ impl TwoWorldsEngine {
         out.set("battles", &battles);
         self.battles = report.battles.clone();
         self.last_report = Some(report);
+        self.drop_watch_bind();
         out
     }
 
@@ -250,11 +256,7 @@ impl TwoWorldsEngine {
         let mut s1: Vec<Squad> = Vec::new();
         let mut d1: Vec<SquadDeploy> = Vec::new();
         for i in 0..n {
-            let k = if kind_v[i] == 1 {
-                UnitKind::Bomber
-            } else {
-                UnitKind::Soldier
-            };
+            let k = UnitKind::from_u8(kind_v[i] as u8);
             let c = (count_v[i].max(0) as u32).min(remaining);
             if c == 0 {
                 continue;
@@ -336,10 +338,7 @@ impl TwoWorldsEngine {
         if let Some(f0) = b.frames.first() {
             for u in &f0.units {
                 fac.push(u.faction as u8);
-                kind.push(match u.kind {
-                    UnitKind::Soldier => 0,
-                    UnitKind::Bomber => 1,
-                });
+                kind.push(u.kind.as_u8());
             }
         }
         out.set("unit_count", fac.len() as i64);
@@ -349,7 +348,7 @@ impl TwoWorldsEngine {
     }
 
     /// Per-frame tracks: x/y/z, alive, facing (8-way octant),
-    /// state (idle/march/aim/fire/dead/rout/fled/hit), aim_x/aim_y on fire.
+    /// state (idle/march/aim/fire/dead/rout/fled/hit), aim_x/aim_y/aim_z on fire.
     /// Fled = escaped at the rim; still alive.
     #[func]
     fn get_last_battle_frame_xy(&self, index: i64, frame: i64) -> Dict {
@@ -362,6 +361,7 @@ impl TwoWorldsEngine {
         let mut state = PackedByteArray::new();
         let mut ax = PackedFloat32Array::new();
         let mut ay = PackedFloat32Array::new();
+        let mut az = PackedFloat32Array::new();
         if let Some(b) = self.battles.get(index.max(0) as usize) {
             if let Some(f) = b.frames.get(frame.max(0) as usize) {
                 for u in &f.units {
@@ -373,6 +373,7 @@ impl TwoWorldsEngine {
                     state.push(u.state);
                     ax.push(u.aim_x);
                     ay.push(u.aim_y);
+                    az.push(u.aim_z);
                 }
             }
         }
@@ -384,6 +385,87 @@ impl TwoWorldsEngine {
         out.set("state", &state);
         out.set("aim_x", &ax);
         out.set("aim_y", &ay);
+        out.set("aim_z", &az);
+        out
+    }
+
+    /// Mix bake pages at `frame_pos` into MultiMesh buffers. Godot assigns them; it does not lerp 10k bodies.
+    #[func]
+    fn fill_battle_watch_pose(&mut self, index: i64, frame_pos: f64, lod: i64) -> Dict {
+        let mut out = Dict::new();
+        out.set("ok", false);
+        let idx = index.max(0) as usize;
+        let n = match self.battles.get(idx).and_then(|b| b.frames.first()) {
+            Some(f0) => f0.units.len(),
+            None => return out,
+        };
+        let rebuild = self
+            .watch_layout
+            .as_ref()
+            .map(|l| self.watch_index != index || l.n != n)
+            .unwrap_or(true);
+        if rebuild {
+            let Some(f0) = self.battles.get(idx).and_then(|b| b.frames.first()) else {
+                return out;
+            };
+            let layout = watch::layout_units(&f0.units);
+            watch::prepare_bufs(&layout, &mut self.watch_bufs);
+            self.watch_layout = Some(layout);
+            self.watch_index = index;
+        }
+        let fill = {
+            let b = &self.battles[idx];
+            let layout = self.watch_layout.as_ref().unwrap();
+            watch::fill_watch_pose(
+                &b.frames,
+                layout,
+                BATTLE_WIDTH,
+                BATTLE_HEIGHT,
+                frame_pos as f32,
+                lod.clamp(0, 2) as u8,
+                &[],
+                &mut self.watch_bufs,
+            )
+        };
+        let mut bufs = Array::<Variant>::new();
+        for buf in &self.watch_bufs {
+            let p = PackedFloat32Array::from(buf.as_slice());
+            bufs.push(&p.to_variant());
+        }
+        let mut fire_unit = PackedInt32Array::new();
+        let mut fire_kind = PackedByteArray::new();
+        let mut fire_style = PackedByteArray::new();
+        let mut fx = PackedFloat32Array::new();
+        let mut fy = PackedFloat32Array::new();
+        let mut fz = PackedFloat32Array::new();
+        let mut tx = PackedFloat32Array::new();
+        let mut ty = PackedFloat32Array::new();
+        let mut tz = PackedFloat32Array::new();
+        for s in &fill.fire {
+            fire_unit.push(s.unit as i32);
+            fire_kind.push(s.kind);
+            fire_style.push(s.style);
+            fx.push(s.from[0]);
+            fy.push(s.from[1]);
+            fz.push(s.from[2]);
+            tx.push(s.to[0]);
+            ty.push(s.to[1]);
+            tz.push(s.to[2]);
+        }
+        out.set("ok", true);
+        out.set("bufs", &bufs);
+        out.set("fire_unit", &fire_unit);
+        out.set("fire_kind", &fire_kind);
+        out.set("fire_style", &fire_style);
+        out.set("fire_from_x", &fx);
+        out.set("fire_from_y", &fy);
+        out.set("fire_from_z", &fz);
+        out.set("fire_to_x", &tx);
+        out.set("fire_to_y", &ty);
+        out.set("fire_to_z", &tz);
+        out.set("fire_n", fill.fire_n as i64);
+        out.set("hit_n", fill.hit_n as i64);
+        out.set("rout_n", fill.rout_n as i64);
         out
     }
 
@@ -506,12 +588,10 @@ impl TwoWorldsEngine {
             let mut state = PackedByteArray::new();
             let mut ax = PackedFloat32Array::new();
             let mut ay = PackedFloat32Array::new();
+            let mut azm = PackedFloat32Array::new();
             for u in &frame.units {
                 fac.push(u.faction as u8);
-                kind.push(match u.kind {
-                    UnitKind::Soldier => 0,
-                    UnitKind::Bomber => 1,
-                });
+                kind.push(u.kind.as_u8());
                 xs.push(u.x);
                 ys.push(u.y);
                 zs.push(u.z);
@@ -520,6 +600,7 @@ impl TwoWorldsEngine {
                 state.push(u.state);
                 ax.push(u.aim_x);
                 ay.push(u.aim_y);
+                azm.push(u.aim_z);
             }
             fd.set("fac", &fac);
             fd.set("kind", &kind);
@@ -531,6 +612,7 @@ impl TwoWorldsEngine {
             fd.set("state", &state);
             fd.set("aim_x", &ax);
             fd.set("aim_y", &ay);
+            fd.set("aim_z", &azm);
             frames_arr.push(&fd.to_variant());
         }
         out.set("frames", &frames_arr);
@@ -579,6 +661,12 @@ impl TwoWorldsEngine {
         let unit_count: i64 = report.initial.iter().map(|(_, n)| *n as i64).sum();
         out.set("unit_count", unit_count);
         self.battles = vec![report];
+        self.drop_watch_bind();
         out
+    }
+
+    fn drop_watch_bind(&mut self) {
+        self.watch_index = -1;
+        self.watch_layout = None;
     }
 }

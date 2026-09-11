@@ -2,12 +2,12 @@
 
 **Status:** Exploratory / future setting. **Not** a live World Conquest design lock.  
 **Asana:** [Lore](https://app.asana.com/1/1218267130713047/project/1218290316055546) (standalone project — not a section of Two Worlds battles or campaign).  
-**In-game:** Main Menu → **Lore** (same chrome family as Data Dictionary).  
+**In-game:** Main Menu → **Lore** (same chrome family as Data Dictionary). Catalog **Hearthkin roster** has the eight Compact jobs with portraits.  
 **Branch note:** lives on `cursor/mvp-two-worlds-engine-0600`; do not treat this as a silent change to DESIGN.md § Design locks (R1, A13/F1, F5–F7, A14, R2).
 
 The live game still talks about **one globe**. This bible opens the rest of the sky without pretending the current prototype is already an interplanetary 4X.
 
-Deep pages: [lore/INDEX.md](lore/INDEX.md).
+Deep pages: [lore/INDEX.md](lore/INDEX.md). Hearthkin army list: [lore/HEARTHKIN_ROSTER.md](lore/HEARTHKIN_ROSTER.md). Unit cards: [lore/UNIT_METADATA.md](lore/UNIT_METADATA.md).
 
 ---
 
@@ -23,10 +23,10 @@ Deep pages: [lore/INDEX.md](lore/INDEX.md).
 
 | Layer | What exists | Species / roster |
 |-------|-------------|------------------|
-| **Playable now** | World Conquest globe + Two Worlds prototype art | **Hearthkin** only, as **soldiers** and **bombers**. Azure / Crimson (and any two-banner Compact split) are **banners of one species**, not two species. |
+| **Playable now** | World Conquest globe + Two Worlds Custom Battle | **Hearthkin** only. Globe kinds: **Hearthline** and **Debt Wings**. Custom Battle can field the eight Compact jobs. Azure / Crimson are **banners of one species**, not two species. |
 | **Lore horizon** | Interplanetary Hearthspan (travel is real) | Hearthkin, Orunai, Mnari, the Ravel, Kilnbound, Wakeborn, the Pale Clause, Velm — each with a unique **game-set-match** win. |
 
-Do not invent Rust battle mechanics from this document. Do not retcon prototype art into eight playable armies.
+Do not invent Rust battle mechanics from this document. Do not retcon prototype art into eight anatomies.
 
 ---
 

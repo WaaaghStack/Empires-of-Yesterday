@@ -158,7 +158,41 @@
             {"name": "x / y", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Battlefield position (0..BATTLE_WIDTH / 0..BATTLE_HEIGHT)."},
             {"name": "alive", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Rendered only while alive."}
           ],
-          "notes": "The viewer buckets units by (faction, kind) into 4 MultiMesh draw calls for scale."
+          "notes": "The viewer buckets units by (faction, kind) into MultiMesh draw calls for scale."
+        },
+        {
+          "name": "locomotor",
+          "grain": "One row per UnitKind.",
+          "source": "rust/eon_engine/src/nav.rs :: LOCOMOTOR",
+          "description": "How a Compact kind moves on the battle slab. Static Rust table; not JSON.",
+          "columns": [
+            {"name": "kind", "type": "enum UnitKind", "null": "NOT NULL", "key": "PK", "desc": "Compact kind 0–7."},
+            {"name": "domain", "type": "enum{Land,Air,Naval}", "null": "NOT NULL", "key": "", "desc": "Locomotion plane."},
+            {"name": "blocked_by_hill / blocked_by_ruin", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Land walks around; air flies over."},
+            {"name": "ford_ok", "type": "bool", "null": "NOT NULL", "key": "", "desc": "River is a ford, not a wall."}
+          ]
+        },
+        {
+          "name": "nav_policy",
+          "grain": "One row per (situation, attack_style).",
+          "source": "rust/eon_engine/src/nav.rs :: NAV_POLICY",
+          "description": "Join situation → intent. ST_IDLE is only legal for TrainHold.",
+          "columns": [
+            {"name": "situation", "type": "enum NavSituation", "null": "NOT NULL", "key": "PK", "desc": "Routing / Train / DriveBy / HaltInReach / Advance / AaClose / AirIgnore / FollowLane."},
+            {"name": "style", "type": "enum AttackStyle", "null": "NOT NULL", "key": "", "desc": "Hold / Charge / DriveBy / Train."},
+            {"name": "intent", "type": "enum NavIntent", "null": "NOT NULL", "key": "", "desc": "FollowGuide / CloseContact / HaltAim / Overfly / RoutHome / TrainHold."}
+          ],
+          "notes": "Guides and land bodies steer around nav_blocker rows (hill, ruin). No per-body A*."
+        },
+        {
+          "name": "nav_blocker",
+          "grain": "One row per solid occupancy on the slab (hill, ruin).",
+          "source": "rust/eon_engine/src/battle.rs :: LAND_NAV + rust/eon_engine/src/nav.rs :: NavBlocker",
+          "description": "Static circles land steers around. Air ignores land blockers. Rust tables, not JSON.",
+          "columns": [
+            {"name": "cx / cy / r", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Circle in slab space. Nav radius is occupancy plus a walk-around pad."},
+            {"name": "blocks_land / blocks_air", "type": "bool", "null": "NOT NULL", "key": "", "desc": "Which locomotor domains this occupies."}
+          ]
         }
       ]
     },
@@ -181,7 +215,7 @@
             {"name": "turn_limit", "type": "u32", "null": "NOT NULL", "key": "", "desc": "Hard cap; leader by land then dominion wins by Score."},
             {"name": "dominion_alive_eps", "type": "f32", "null": "NOT NULL", "key": "", "desc": "Faith below this counts as eliminated (dominion-kill win)."}
           ],
-          "notes": "Battle-side constants (BATTLE_WIDTH/HEIGHT, MAX_TICKS, RECORD_STRIDE, ATTACK_COOLDOWN, GRID_CELL) live in battle.rs."
+          "notes": "Battle-side constants (BATTLE_WIDTH/HEIGHT, MAX_TICKS, RECORD_STRIDE, GRID_CELL) live in battle.rs. Shot cadence is KindProfile attack_interval (ticks); air keeps BOMB_COOLDOWN as a floor."
         }
       ]
     },

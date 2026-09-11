@@ -14,7 +14,9 @@ pub mod battle;
 pub mod dominion;
 pub mod ledger;
 pub mod model;
+pub mod nav;
 pub mod rng;
+pub mod watch;
 pub mod scenario;
 pub mod turn;
 

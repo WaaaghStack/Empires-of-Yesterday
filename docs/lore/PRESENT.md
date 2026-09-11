@@ -23,7 +23,7 @@ The Open Tear is not theoretical. Three Wake roads are paying more After than th
 
 ## Playable now vs lore horizon (again, because it matters)
 
-- **Now:** You play Hearthkin soldiers and bombers on one shard. Two banners. DESIGN.md locks. That war is real and small.
+- **Now:** You play Hearthkin on one shard. Two banners. DESIGN.md locks. Globe Play is Hearthline and Debt Wings. Custom Battle can field the eight Compact jobs (see [HEARTHKIN_ROSTER.md](HEARTHKIN_ROSTER.md)).
 - **Horizon:** The table above. Unique wins. Interplanetary travel. Do not ship eight anatomies until art and systems exist. Do not pretend Azure vs Crimson is already Orunai vs Velm.
 
 The present is fickle **because** the horizon is larger than the prototype. A Compact marshal can be a legend at home and a weather report abroad. Sera Vohl is winning a world. Quell is charging her for the trip she has not taken yet.

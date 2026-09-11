@@ -185,6 +185,62 @@ static func scroll_to_bottom(scroll: ScrollContainer) -> void:
 		scroll.set_deferred("scroll_vertical", int(bar.max_value))
 
 
+static func apply_progress_bar(bar: ProgressBar) -> void:
+	if bar == null:
+		return
+	bar.min_value = 0.0
+	bar.max_value = 1.0
+	bar.value = 0.12
+	bar.show_percentage = false
+	bar.custom_minimum_size = Vector2(320, 16)
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.08, 0.10, 0.14, 1.0)
+	bg.border_color = BORDER
+	bg.set_border_width_all(1)
+	bg.set_corner_radius_all(4)
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = ACCENT
+	fill.set_corner_radius_all(3)
+	bar.add_theme_stylebox_override("background", bg)
+	bar.add_theme_stylebox_override("fill", fill)
+
+
+## Full-screen wait so Fight is never a dead click. Returns { root, label, bar }.
+static func attach_resolve_wait(host: Control, n: int) -> Dictionary:
+	var root := ColorRect.new()
+	root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.color = Color(BG_DARK.r, BG_DARK.g, BG_DARK.b, 0.92)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	host.add_child(root)
+	root.move_to_front()
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	root.add_child(center)
+	var col := VBoxContainer.new()
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_theme_constant_override("separation", 14)
+	center.add_child(col)
+	var label := Label.new()
+	label.text = "Resolving %d bodies…" % maxi(n, 0)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 20)
+	label.add_theme_color_override("font_color", TEXT_PRIMARY)
+	col.add_child(label)
+	var hint := Label.new()
+	hint.text = "Rust is baking the fight. The replay opens when this finishes."
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.add_theme_font_size_override("font_size", 13)
+	hint.add_theme_color_override("font_color", TEXT_MUTED)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(360, 0)
+	col.add_child(hint)
+	var bar := ProgressBar.new()
+	apply_progress_bar(bar)
+	bar.indeterminate = true
+	col.add_child(bar)
+	return {"root": root, "label": label, "bar": bar, "hint": hint}
+
+
 static func apply_to_control(node: Control) -> void:
 	var game_theme := Theme.new()
 	var panel := make_panel_style()

@@ -39,24 +39,77 @@ pub enum UnitDomain {
     Naval,
 }
 
-/// Campaign unit kinds. Prototype art is soldiers + bombers; extra kinds drop in as profiles.
+/// How a land/air body behaves once it has a target. Closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttackStyle {
+    /// Get to weapon reach, halt, fire. Do not walk into the scrum.
+    Hold,
+    /// Close into contact and stay in the fight.
+    Charge,
+    /// Overfly, pickle, continue the pass, come around.
+    DriveBy,
+    /// Stay in the train. No charge, no gun-walk.
+    Train,
+}
+
+/// Campaign unit kinds. 0/1 stay Hearthline / Debt Wings. 2–7 are Compact jobs.
+/// KindProfile: hp, attack, attack_interval, reach, perception, speed, cohesion,
+/// vs_air, blast, cruise_z, regiment_size, spacing, plus closed `group`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitKind {
-    Soldier,
-    Bomber,
+    Soldier = 0,
+    Bomber = 1,
+    Stovebreaker = 2,
+    AshWarden = 3,
+    WalkMapper = 4,
+    LedgerPiece = 5,
+    RollingHearth = 6,
+    CeilingClerk = 7,
 }
 
 impl UnitKind {
+    pub const ALL: [UnitKind; 8] = [
+        UnitKind::Soldier,
+        UnitKind::Bomber,
+        UnitKind::Stovebreaker,
+        UnitKind::AshWarden,
+        UnitKind::WalkMapper,
+        UnitKind::LedgerPiece,
+        UnitKind::RollingHearth,
+        UnitKind::CeilingClerk,
+    ];
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => UnitKind::Bomber,
+            2 => UnitKind::Stovebreaker,
+            3 => UnitKind::AshWarden,
+            4 => UnitKind::WalkMapper,
+            5 => UnitKind::LedgerPiece,
+            6 => UnitKind::RollingHearth,
+            7 => UnitKind::CeilingClerk,
+            _ => UnitKind::Soldier,
+        }
+    }
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             UnitKind::Soldier => "soldier",
             UnitKind::Bomber => "bomber",
+            UnitKind::Stovebreaker => "stovebreaker",
+            UnitKind::AshWarden => "ash_warden",
+            UnitKind::WalkMapper => "walk_mapper",
+            UnitKind::LedgerPiece => "ledger_piece",
+            UnitKind::RollingHearth => "rolling_hearth",
+            UnitKind::CeilingClerk => "ceiling_clerk",
         }
     }
     pub fn domain(self) -> UnitDomain {
         match self {
-            UnitKind::Soldier => UnitDomain::Land,
             UnitKind::Bomber => UnitDomain::Air,
+            _ => UnitDomain::Land,
         }
     }
     /// 0 = ignore the formation guide (swarm); 1 = glued to slot (armor).
@@ -64,32 +117,63 @@ impl UnitKind {
         match self {
             UnitKind::Soldier => 0.42,
             UnitKind::Bomber => 0.22,
+            UnitKind::Stovebreaker => 0.70,
+            UnitKind::AshWarden => 0.50,
+            UnitKind::WalkMapper => 0.25,
+            UnitKind::LedgerPiece => 0.35,
+            UnitKind::RollingHearth => 0.55,
+            UnitKind::CeilingClerk => 0.45,
         }
     }
     /// How far a body looks for someone to fight (guide does not pick this target).
+    /// Must be at least weapon reach or they cannot shoot the range they have.
     pub fn perception(self) -> f32 {
         match self {
-            UnitKind::Soldier => 38.0,
+            UnitKind::Soldier => 70.0,
             UnitKind::Bomber => 48.0,
+            UnitKind::Stovebreaker => 36.0,
+            UnitKind::AshWarden => 40.0,
+            UnitKind::WalkMapper => 90.0,
+            UnitKind::LedgerPiece => 160.0,
+            UnitKind::RollingHearth => 24.0,
+            UnitKind::CeilingClerk => 90.0,
         }
     }
     pub fn base_hp(self) -> f32 {
         match self {
             UnitKind::Soldier => 100.0,
             UnitKind::Bomber => 540.0,
+            UnitKind::Stovebreaker => 140.0,
+            UnitKind::AshWarden => 100.0,
+            UnitKind::WalkMapper => 70.0,
+            UnitKind::LedgerPiece => 80.0,
+            UnitKind::RollingHearth => 220.0,
+            UnitKind::CeilingClerk => 90.0,
         }
     }
     pub fn base_attack(self) -> f32 {
         match self {
             UnitKind::Soldier => 12.0,
             UnitKind::Bomber => 55.0,
+            UnitKind::Stovebreaker => 16.0,
+            UnitKind::AshWarden => 8.0,
+            UnitKind::WalkMapper => 8.0,
+            UnitKind::LedgerPiece => 40.0,
+            UnitKind::RollingHearth => 4.0,
+            UnitKind::CeilingClerk => 10.0,
         }
     }
     /// Weapon reach — must be long enough to shoot across the engagement gap.
     pub fn reach(self) -> f32 {
         match self {
-            UnitKind::Soldier => 28.0,
+            UnitKind::Soldier => 70.0,
             UnitKind::Bomber => 18.0,
+            UnitKind::Stovebreaker => 22.0,
+            UnitKind::AshWarden => 18.0,
+            UnitKind::WalkMapper => 40.0,
+            UnitKind::LedgerPiece => 160.0,
+            UnitKind::RollingHearth => 8.0,
+            UnitKind::CeilingClerk => 80.0,
         }
     }
     /// Small-arms vs aircraft. ~50 infantry should bring one bomber down; a handful should not.
@@ -97,6 +181,12 @@ impl UnitKind {
         match self {
             UnitKind::Soldier => 0.08,
             UnitKind::Bomber => 1.0,
+            UnitKind::Stovebreaker => 0.04,
+            UnitKind::AshWarden => 0.05,
+            UnitKind::WalkMapper => 0.06,
+            UnitKind::LedgerPiece => 0.02,
+            UnitKind::RollingHearth => 0.02,
+            UnitKind::CeilingClerk => 1.4,
         }
     }
     /// Ground blast radius. Zero = single-target (rifle).
@@ -104,18 +194,30 @@ impl UnitKind {
         match self {
             UnitKind::Soldier => 0.0,
             UnitKind::Bomber => 12.0,
+            UnitKind::Stovebreaker => 0.0,
+            UnitKind::AshWarden => 4.0,
+            UnitKind::WalkMapper => 0.0,
+            UnitKind::LedgerPiece => 16.0,
+            UnitKind::RollingHearth => 0.0,
+            UnitKind::CeilingClerk => 0.0,
         }
     }
     pub fn move_speed(self) -> f32 {
         match self {
             UnitKind::Soldier => 2.4,
             UnitKind::Bomber => 4.2,
+            UnitKind::Stovebreaker => 2.0,
+            UnitKind::AshWarden => 2.2,
+            UnitKind::WalkMapper => 3.2,
+            UnitKind::LedgerPiece => 1.4,
+            UnitKind::RollingHearth => 1.6,
+            UnitKind::CeilingClerk => 2.3,
         }
     }
     pub fn cruise_z(self) -> f32 {
         match self {
-            UnitKind::Soldier => 0.0,
             UnitKind::Bomber => 14.0,
+            _ => 0.0,
         }
     }
     /// Total War-style regiment size (bodies per distinct unit on the field).
@@ -123,6 +225,57 @@ impl UnitKind {
         match self {
             UnitKind::Soldier => 100,
             UnitKind::Bomber => 5,
+            UnitKind::Stovebreaker => 80,
+            UnitKind::AshWarden => 60,
+            UnitKind::WalkMapper => 40,
+            UnitKind::LedgerPiece => 8,
+            UnitKind::RollingHearth => 3,
+            UnitKind::CeilingClerk => 40,
+        }
+    }
+    /// Battle ticks between shots. Hearthline 3 is today's land cadence;
+    /// Debt Wings 32 is today's bomb floor. Viewer records every `RECORD_STRIDE` ticks.
+    pub fn attack_interval(self) -> u32 {
+        match self {
+            UnitKind::Soldier => 3,
+            UnitKind::Bomber => 32,
+            UnitKind::Stovebreaker => 2,
+            UnitKind::AshWarden => 6,
+            UnitKind::WalkMapper => 4,
+            UnitKind::LedgerPiece => 8,
+            UnitKind::RollingHearth => 16,
+            UnitKind::CeilingClerk => 4,
+        }
+    }
+    /// How a body behaves once it has a target. Closed. Combat authority only.
+    pub fn attack_style(self) -> AttackStyle {
+        match self {
+            UnitKind::Bomber => AttackStyle::DriveBy,
+            UnitKind::Stovebreaker | UnitKind::AshWarden => AttackStyle::Charge,
+            UnitKind::RollingHearth => AttackStyle::Train,
+            _ => AttackStyle::Hold,
+        }
+    }
+    /// Charge closes to this; Hold halts at `reach`.
+    pub fn contact_range(self) -> f32 {
+        match self.attack_style() {
+            AttackStyle::Charge => 6.5,
+            AttackStyle::Hold => self.reach(),
+            AttackStyle::Train => 0.0,
+            AttackStyle::DriveBy => self.reach(),
+        }
+    }
+    /// Parent classification for formation / placement. Closed vocab; not a second combat dialect.
+    pub fn group(self) -> &'static str {
+        match self {
+            UnitKind::Soldier => "infantry_hybrid",
+            UnitKind::Bomber => "air",
+            UnitKind::Stovebreaker => "infantry_melee",
+            UnitKind::AshWarden => "infantry_engineer",
+            UnitKind::WalkMapper => "infantry_skirmish",
+            UnitKind::LedgerPiece => "artillery",
+            UnitKind::RollingHearth => "support",
+            UnitKind::CeilingClerk => "anti_air",
         }
     }
     /// Center-to-center personal space. A hair wider than the HD-2D billboard
@@ -131,6 +284,12 @@ impl UnitKind {
         match self {
             UnitKind::Soldier => 3.6,
             UnitKind::Bomber => 6.4,
+            UnitKind::Stovebreaker => 4.0,
+            UnitKind::AshWarden => 3.8,
+            UnitKind::WalkMapper => 4.2,
+            UnitKind::LedgerPiece => 8.0,
+            UnitKind::RollingHearth => 10.0,
+            UnitKind::CeilingClerk => 3.8,
         }
     }
 }
@@ -404,5 +563,98 @@ impl World {
             mix(f.ascension_points as u64);
         }
         h
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::UnitKind;
+
+    #[test]
+    fn compact_kind_ids_stay_stable() {
+        assert_eq!(UnitKind::Soldier.as_u8(), 0);
+        assert_eq!(UnitKind::Bomber.as_u8(), 1);
+        assert_eq!(UnitKind::Stovebreaker.as_u8(), 2);
+        assert_eq!(UnitKind::AshWarden.as_u8(), 3);
+        assert_eq!(UnitKind::WalkMapper.as_u8(), 4);
+        assert_eq!(UnitKind::LedgerPiece.as_u8(), 5);
+        assert_eq!(UnitKind::RollingHearth.as_u8(), 6);
+        assert_eq!(UnitKind::CeilingClerk.as_u8(), 7);
+        for v in 0u8..=7 {
+            assert_eq!(UnitKind::from_u8(v).as_u8(), v);
+        }
+        assert_eq!(UnitKind::from_u8(99), UnitKind::Soldier);
+    }
+
+    #[test]
+    fn compact_profiles_can_see_their_reach() {
+        let kinds = [
+            UnitKind::Soldier,
+            UnitKind::Bomber,
+            UnitKind::Stovebreaker,
+            UnitKind::AshWarden,
+            UnitKind::WalkMapper,
+            UnitKind::LedgerPiece,
+            UnitKind::RollingHearth,
+            UnitKind::CeilingClerk,
+        ];
+        for k in kinds {
+            assert!(
+                k.perception() + 0.01 >= k.reach(),
+                "{} perception {} < reach {}",
+                k.as_str(),
+                k.perception(),
+                k.reach()
+            );
+        }
+        assert_eq!(UnitKind::LedgerPiece.perception(), 160.0);
+        assert_eq!(UnitKind::LedgerPiece.blast_radius(), 16.0);
+        assert_eq!(UnitKind::AshWarden.blast_radius(), 4.0);
+        assert!((UnitKind::CeilingClerk.vs_air() - 1.4).abs() < 0.001);
+        assert_eq!(UnitKind::Soldier.regiment_size(), 100);
+        assert_eq!(UnitKind::Bomber.regiment_size(), 5);
+        assert!((UnitKind::Soldier.vs_air() - 0.08).abs() < 0.001);
+    }
+
+    #[test]
+    fn attack_interval_stove_faster_than_line_than_guns() {
+        assert_eq!(UnitKind::Soldier.attack_interval(), 3);
+        assert_eq!(UnitKind::Bomber.attack_interval(), 32);
+        assert!(UnitKind::Stovebreaker.attack_interval() < UnitKind::Soldier.attack_interval());
+        assert!(UnitKind::Soldier.attack_interval() < UnitKind::LedgerPiece.attack_interval());
+        assert!(UnitKind::LedgerPiece.attack_interval() < UnitKind::Bomber.attack_interval());
+        assert!(UnitKind::RollingHearth.attack_interval() > UnitKind::Soldier.attack_interval());
+        assert!(UnitKind::WalkMapper.attack_interval() > UnitKind::Soldier.attack_interval());
+        assert!(UnitKind::AshWarden.attack_interval() > UnitKind::Soldier.attack_interval());
+    }
+
+    #[test]
+    fn compact_groups_match_closed_vocab() {
+        assert_eq!(UnitKind::Soldier.group(), "infantry_hybrid");
+        assert_eq!(UnitKind::Stovebreaker.group(), "infantry_melee");
+        assert_eq!(UnitKind::WalkMapper.group(), "infantry_skirmish");
+        assert_eq!(UnitKind::AshWarden.group(), "infantry_engineer");
+        assert_eq!(UnitKind::CeilingClerk.group(), "anti_air");
+        assert_eq!(UnitKind::LedgerPiece.group(), "artillery");
+        assert_eq!(UnitKind::RollingHearth.group(), "support");
+        assert_eq!(UnitKind::Bomber.group(), "air");
+    }
+
+    #[test]
+    fn compact_attack_styles_match_closed_vocab() {
+        use super::AttackStyle;
+        assert_eq!(UnitKind::Soldier.attack_style(), AttackStyle::Hold);
+        assert_eq!(UnitKind::WalkMapper.attack_style(), AttackStyle::Hold);
+        assert_eq!(UnitKind::LedgerPiece.attack_style(), AttackStyle::Hold);
+        assert_eq!(UnitKind::CeilingClerk.attack_style(), AttackStyle::Hold);
+        assert_eq!(UnitKind::Stovebreaker.attack_style(), AttackStyle::Charge);
+        assert_eq!(UnitKind::AshWarden.attack_style(), AttackStyle::Charge);
+        assert_eq!(UnitKind::Bomber.attack_style(), AttackStyle::DriveBy);
+        assert_eq!(UnitKind::RollingHearth.attack_style(), AttackStyle::Train);
+        assert!(UnitKind::Stovebreaker.contact_range() < UnitKind::Stovebreaker.reach());
+        assert_eq!(
+            UnitKind::LedgerPiece.contact_range(),
+            UnitKind::LedgerPiece.reach()
+        );
     }
 }

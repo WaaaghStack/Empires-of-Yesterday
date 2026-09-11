@@ -2,7 +2,8 @@ extends Control
 
 ## In-game Lore encyclopedia — same chrome family as the Data Dictionary.
 ## Left: searchable catalogs -> entries. Right: selected entry (who they are, fight,
-## strengths, weaknesses, unique win). Data lives in res://data/lore_encyclopedia.json.
+## strengths, weaknesses, unique win, optional roster sprite). Data lives in
+## res://data/lore_encyclopedia.json.
 
 const DATA_PATH := "res://data/lore_encyclopedia.json"
 
@@ -117,14 +118,39 @@ func _rebuild_tree() -> void:
 	for cat in _data.get("catalogs", []):
 		var cat_item: TreeItem = null
 		for entry in cat.get("entries", []):
+			var unit: Dictionary = {}
+			var raw_u = entry.get("unit", {})
+			if typeof(raw_u) == TYPE_DICTIONARY:
+				unit = raw_u
+			var tags_s := ""
+			if typeof(unit.get("tags", [])) == TYPE_ARRAY:
+				tags_s = _join_list(unit.get("tags", []))
 			var hay := (
 				String(entry.get("name", ""))
 				+ " "
 				+ String(entry.get("vibe", ""))
 				+ " "
+				+ String(entry.get("role", ""))
+				+ " "
+				+ String(entry.get("fight", ""))
+				+ " "
 				+ String(entry.get("win", ""))
 				+ " "
+				+ String(entry.get("sprite", ""))
+				+ " "
 				+ String(entry.get("body", ""))
+				+ " "
+				+ String(unit.get("domain", ""))
+				+ " "
+				+ String(unit.get("arm", ""))
+				+ " "
+				+ String(unit.get("rank", ""))
+				+ " "
+				+ String(unit.get("group", ""))
+				+ " "
+				+ String(unit.get("weapon", ""))
+				+ " "
+				+ tags_s
 			).to_lower()
 			if query != "" and not hay.contains(query):
 				continue
@@ -222,6 +248,171 @@ func _add_section(label: String, value: String, value_color: Color = GameTheme.T
 	_detail_box.add_child(_mk_label(value, 15, value_color))
 
 
+func _label_token(s: String) -> String:
+	match s:
+		"anti_air":
+			return "Anti-air"
+		"poor_vs_air":
+			return "Poor vs air"
+		"good_vs_air":
+			return "Good vs air"
+		"shock_breach":
+			return "Shock"
+		"after_shells":
+			return "After-shells"
+		"supply_spine":
+			return "Supply spine"
+		"not_a_tank":
+			return "Not a tank"
+		"single_target":
+			return "Single target"
+		"vs_air":
+			return "vs Air"
+		"cruise_z":
+			return "Altitude"
+		"attack_interval":
+			return "Attack interval"
+		"infantry_melee":
+			return "Infantry melee"
+		"infantry_hybrid":
+			return "Infantry hybrid"
+		"infantry_range":
+			return "Infantry range"
+		"infantry_skirmish":
+			return "Infantry skirmish"
+		"infantry_engineer":
+			return "Infantry engineer"
+		"regiment_size":
+			return "Bodies"
+		"size_class":
+			return "Size"
+		_:
+			return s.replace("_", " ").capitalize()
+
+
+func _fmt_stat(v: Variant) -> String:
+	var f := float(v)
+	if abs(f - round(f)) < 0.001:
+		return str(int(round(f)))
+	return "%.2f" % f
+
+
+func _mk_chip(text: String, color: Color = GameTheme.ACCENT) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", 12)
+	l.add_theme_color_override("font_color", color)
+	var st := StyleBoxFlat.new()
+	st.bg_color = Color(0.12, 0.16, 0.22, 1)
+	st.border_color = color
+	st.set_border_width_all(1)
+	st.set_corner_radius_all(4)
+	st.content_margin_left = 8
+	st.content_margin_right = 8
+	st.content_margin_top = 3
+	st.content_margin_bottom = 3
+	l.add_theme_stylebox_override("normal", st)
+	return l
+
+
+func _add_chips(items: PackedStringArray, color: Color = GameTheme.ACCENT) -> void:
+	if items.is_empty():
+		return
+	var row := HFlowContainer.new()
+	row.add_theme_constant_override("h_separation", 8)
+	row.add_theme_constant_override("v_separation", 6)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for t in items:
+		if String(t).strip_edges() == "":
+			continue
+		row.add_child(_mk_chip(String(t), color))
+	_detail_box.add_child(row)
+
+
+func _add_stat_grid(pairs: Array) -> void:
+	if pairs.is_empty():
+		return
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 16)
+	grid.add_theme_constant_override("v_separation", 4)
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for pair in pairs:
+		var name_s := String(pair[0])
+		var val_s := String(pair[1])
+		grid.add_child(_mk_label(name_s, 12, GameTheme.TEXT_MUTED, false))
+		grid.add_child(_mk_label(val_s, 14, GameTheme.TEXT_PRIMARY, false))
+	_detail_box.add_child(grid)
+
+
+func _add_unit_card(raw: Variant) -> void:
+	if typeof(raw) != TYPE_DICTIONARY:
+		return
+	var u: Dictionary = raw
+	var arm := String(u.get("arm", "")).strip_edges()
+	if arm == "":
+		return
+	var source := String(u.get("stats_source", "proposed"))
+	var live := source == "live"
+	_detail_box.add_child(_mk_label("Unit card", 13, GameTheme.ACCENT, false))
+	var chips: PackedStringArray = PackedStringArray()
+	chips.append(_label_token(String(u.get("domain", ""))))
+	chips.append(_label_token(arm))
+	chips.append("Rank: " + _label_token(String(u.get("rank", ""))))
+	var group := String(u.get("group", "")).strip_edges()
+	if group != "":
+		chips.append(_label_token(group))
+	chips.append(_label_token(String(u.get("size_class", ""))))
+	if live:
+		chips.append("Live")
+	else:
+		chips.append("Proposed")
+	_add_chips(chips, GameTheme.ACCENT if live else GameTheme.ACCENT_WARN)
+	_add_section("Weapon", String(u.get("weapon", "")))
+	var pairs: Array = []
+	pairs.append(["Bodies", _fmt_stat(u.get("regiment_size", 0))])
+	pairs.append(["Spacing", _fmt_stat(u.get("spacing", 0))])
+	var stats: Dictionary = u.get("stats", {})
+	if typeof(stats) == TYPE_DICTIONARY:
+		for key in ["hp", "attack", "attack_interval", "reach", "perception", "speed", "cohesion", "vs_air", "blast", "cruise_z"]:
+			if stats.has(key):
+				pairs.append([_label_token(key), _fmt_stat(stats[key])])
+	_add_stat_grid(pairs)
+	var tag_chips: PackedStringArray = PackedStringArray()
+	for t in u.get("tags", []):
+		tag_chips.append(_label_token(String(t)))
+	if not tag_chips.is_empty():
+		_detail_box.add_child(_mk_label("Attributes", 13, GameTheme.ACCENT, false))
+		_add_chips(tag_chips, GameTheme.TEXT_PRIMARY)
+	if live:
+		_detail_box.add_child(_mk_label("Live numbers match the battle KindProfile. Encyclopedia is not combat authority.", 13, GameTheme.TEXT_MUTED))
+	else:
+		_detail_box.add_child(_mk_label("Proposed horizon stats — not a Custom Battle kind yet.", 13, GameTheme.TEXT_MUTED))
+
+
+func _add_sprite(path: String) -> void:
+	var p := path.strip_edges()
+	if p == "":
+		return
+	var tex: Texture2D = null
+	if ResourceLoader.exists(p):
+		tex = load(p) as Texture2D
+	if tex == null and FileAccess.file_exists(p):
+		var img := Image.load_from_file(p)
+		if img != null and not img.is_empty():
+			tex = ImageTexture.create_from_image(img)
+	if tex == null:
+		return
+	var tr := TextureRect.new()
+	tr.texture = tex
+	tr.custom_minimum_size = Vector2(280, 280)
+	tr.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_detail_box.add_child(tr)
+
+
 func _render_detail(cat: Dictionary, entry: Dictionary) -> void:
 	_clear_detail()
 	var playable := String(entry.get("playable", ""))
@@ -230,6 +421,9 @@ func _render_detail(cat: Dictionary, entry: Dictionary) -> void:
 	if playable != "":
 		cat_line += "  ·  " + _playable_label(playable)
 	_detail_box.add_child(_mk_label(cat_line, 13, _playable_color(playable)))
+	_add_sprite(String(entry.get("sprite", "")))
+	_add_unit_card(entry.get("unit", {}))
+	_add_section("Job on the field", String(entry.get("role", "")))
 	_add_section("Who they are", String(entry.get("vibe", "")))
 	_add_section("Origin", String(entry.get("origin", "")))
 	_add_section("Temperament", String(entry.get("temperament", "")))

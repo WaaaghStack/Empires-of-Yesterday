@@ -10,8 +10,7 @@ const UiTheme := preload("res://GameTheme.gd")
 
 var _engine: Object
 var _view: Control
-var _wait: Control
-var _wait_label: Label
+var _wait: Dictionary = {}
 var _params: Dictionary = {}
 
 
@@ -27,27 +26,34 @@ func _ready() -> void:
 		err.position = Vector2(40, 40)
 		add_child(err)
 		return
-	_show_wait(_body_count(_params))
-	call_deferred("_resolve_and_play")
+	_wait = UiTheme.attach_resolve_wait(self, _body_count(_params))
+	# Paint the bar before the blocking Rust resolve, or Fight still looks dead.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	_resolve_and_play()
 
 
-func _show_wait(n: int) -> void:
-	_wait = ColorRect.new()
-	_wait.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_wait.color = Color(0.05, 0.06, 0.09, 1.0)
-	_wait.mouse_filter = Control.MOUSE_FILTER_STOP
-	add_child(_wait)
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_wait.add_child(center)
-	_wait_label = Label.new()
-	_wait_label.text = "Resolving %d soldiers…" % n
-	_wait_label.add_theme_font_size_override("font_size", 22)
-	_wait_label.add_theme_color_override("font_color", UiTheme.TEXT_PRIMARY)
-	center.add_child(_wait_label)
+func _set_wait(text: String, value: float, spin: bool) -> void:
+	var label: Label = _wait.get("label", null)
+	var bar: ProgressBar = _wait.get("bar", null)
+	if label:
+		label.text = text
+	if bar:
+		bar.indeterminate = spin
+		if not spin:
+			bar.value = clampf(value, 0.0, 1.0)
+
+
+func _hide_wait() -> void:
+	var root: Control = _wait.get("root", null)
+	if root:
+		root.queue_free()
+	_wait = {}
 
 
 func _resolve_and_play() -> void:
+	var n := _body_count(_params)
+	_set_wait("Resolving %d bodies…" % n, 0.18, true)
 	var t0 := Time.get_ticks_msec()
 	if _params.has("roster"):
 		_resolve_plan(_params)
@@ -61,11 +67,10 @@ func _resolve_and_play() -> void:
 		)
 	print("Custom Battle resolve %dms bodies=%d" % [
 		Time.get_ticks_msec() - t0,
-		_body_count(_params),
+		n,
 	])
-	if _wait:
-		_wait.queue_free()
-		_wait = null
+	_set_wait("Opening replay…", 0.78, false)
+	await get_tree().process_frame
 	_view = Control.new()
 	_view.set_script(BattleViewScript)
 	_view.anchor_right = 1.0
@@ -74,6 +79,7 @@ func _resolve_and_play() -> void:
 	_view.finished.connect(_on_finished)
 	# Empty summary → BattleView pulls province/attacker/defender/winner from the battle meta.
 	_view.play_engine_battle(_engine, 0, {})
+	_hide_wait()
 
 
 func _body_count(params: Dictionary) -> int:
